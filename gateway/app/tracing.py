@@ -65,9 +65,12 @@ def _configure() -> None:
     os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
     os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
     # The skinny 2.18 span processor logs a benign `'MlflowSpanProcessor' object has no attribute
-    # '_metrics'` AttributeError on span-end (the trace still exports). Keep the gateway logs clean.
+    # '_metrics'` AttributeError on span-end (the trace still exports). On 2.18 it surfaces via the
+    # tracking-client logger as well as the tracing loggers, so silence all three to keep the gateway
+    # logs clean during normal inference.
     logging.getLogger("mlflow.tracing.fluent").setLevel(logging.ERROR)
     logging.getLogger("mlflow.tracing.export.mlflow").setLevel(logging.ERROR)
+    logging.getLogger("mlflow.tracking.client").setLevel(logging.ERROR)
     logger.info("inference tracing ENABLED (experiment=%s, capture_io=%s) — client inits lazily",
                 EXPERIMENT, _CAPTURE_IO)
 
