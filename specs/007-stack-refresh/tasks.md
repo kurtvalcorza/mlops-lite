@@ -74,7 +74,9 @@ Task IDs continue the shared space (T118+).
   `MLFLOW_TRACING_ENABLED`/`MLFLOW_TRACE_CAPTURE_IO` toggles + container passthrough exactly. (FR-057)
 - [ ] **T122** [P] [US1] Re-validate on the 3.x server: `test_serving` / `test_registry` /
   `test_datasets` / `test_finetune` / `test_drift_loop` + `test_tracing_rest` / `test_tracing_stream` /
-  `test_tracing_resilience`; confirm history preserved and traces land via the 3.x API. (SC-036, SC-038)
+  `test_tracing_resilience`; confirm the re-seeded registry resolves (serving `@serving` + vision),
+  datasets are intact on MinIO, and traces land via the 3.x API (prior run/trace history intentionally
+  not carried over). (SC-036, SC-038)
 
 ## Phase 2 — Pin floating images (US2, P1) → SC-037
 
@@ -117,21 +119,24 @@ Task IDs continue the shared space (T118+).
 
 ## Dependencies & Execution Order
 
-- **T118 (snapshot) gates everything** — never migrate the MLflow backend without a rollback point.
-- **US1 (MLflow, T119–T122)** is the highest-risk; do it first behind the snapshot so a regression is
-  isolated before the cheaper refreshes pile on.
+- **T118 (pre-flight) gates everything** — confirm the 3.x installs resolve and capture the current
+  image versions (for US2 pins) before touching the stack. *(Fresh-volume reset — no pgdata
+  snapshot/rollback point needed; the run/trace history loss is the grilled, accepted trade.)*
+- **US1 (MLflow, T119–T122)** is the highest-risk; do it first so a regression is isolated before the
+  cheaper refreshes pile on.
 - **US2 (image pins)** is independent and low-risk; **US3/US4/US5** are independent refresh tiers, each
   re-validated cumulatively.
 - **T131 lands last** (needs every tier in place).
 
 ### Constitution gates (re-check each phase)
 - Principle II untouched: GPU/FT stack frozen (verify no torch-family movement in US3/US5).
-- Principle VI strengthened: pinned images + preserved MLflow history.
+- Principle VI strengthened: pinned images; MLflow backend reset to a fresh volume + re-seeded (run/trace history not retained, accepted; datasets intact on MinIO).
 - No new runtime → no amendment (MLflow/Python/Node all pre-existing).
 
 ## Implementation Strategy
 
-1. **Snapshot, then MLflow 3.x** → migrate + port tracing + re-validate. **Stop and validate.**
+1. **MLflow 3.x: fresh-volume reset + re-seed** → port tracing + re-validate. **Stop and validate.**
+   *(No snapshot — the run/trace history loss is the grilled, accepted trade.)*
 2. **Pin images** → clean bring-up.
 3. **Gateway → UI → native** minor refreshes, each behind its own test gate.
 4. Each phase re-runs the relevant 001–006 tests on the target machine; never regress; never move the
