@@ -113,5 +113,10 @@ def main() -> int:
     return 0
 
 
+def test_finetune(require_trainer):
+    """Pytest wrapper (005 US5): skip unless the native trainer daemon is reachable."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

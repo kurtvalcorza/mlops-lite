@@ -15,9 +15,39 @@ const GATEWAY_URL = process.env.GATEWAY_URL ?? 'http://localhost:8080';
 const API_KEY = process.env.GATEWAY_API_KEY ?? '';
 const UI_PORT = process.env.UI_PORT ?? '3000';
 
-// The only origins/hosts the console legitimately runs on (localhost-bound, FR-025).
-const ALLOWED_HOSTS = new Set([`127.0.0.1:${UI_PORT}`, `localhost:${UI_PORT}`]);
-const ALLOWED_ORIGINS = new Set([`http://127.0.0.1:${UI_PORT}`, `http://localhost:${UI_PORT}`]);
+// Extra origins an operator may explicitly allow (005 US4, FR-044). Comma-separated absolute
+// origins (e.g. "http://workstation.local:3000"). Each is parsed with the URL API: a malformed or
+// non-http(s) entry (including "*") is DROPPED, never widening the guard to allow-all.
+function parseExtraOrigins(raw: string | undefined): { hosts: string[]; origins: string[] } {
+  const hosts: string[] = [];
+  const origins: string[] = [];
+  for (const entry of (raw ?? '').split(',')) {
+    const s = entry.trim();
+    if (!s) continue;
+    let u: URL;
+    try {
+      u = new URL(s);
+    } catch {
+      continue; // malformed — ignore, never widen
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+    origins.push(u.origin); // normalized scheme://host[:port]
+    hosts.push(u.host); // host[:port]
+  }
+  return { hosts, origins };
+}
+
+const EXTRA = parseExtraOrigins(process.env.UI_ALLOWED_ORIGINS);
+
+// The only origins/hosts the console legitimately runs on (localhost-bound, FR-025) — IPv4 + IPv6
+// loopback by default, plus any explicitly configured extra origins (FR-044).
+const ALLOWED_HOSTS = new Set([
+  `127.0.0.1:${UI_PORT}`, `localhost:${UI_PORT}`, `[::1]:${UI_PORT}`, ...EXTRA.hosts,
+]);
+const ALLOWED_ORIGINS = new Set([
+  `http://127.0.0.1:${UI_PORT}`, `http://localhost:${UI_PORT}`, `http://[::1]:${UI_PORT}`,
+  ...EXTRA.origins,
+]);
 
 // Hop-by-hop / identity headers we must not forward (host/length recomputed; any inbound key dropped
 // — only our server-side key is injected).
@@ -78,7 +108,9 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
       duplex: 'half',
     });
   } catch (e) {
-    return json(502, { error: `gateway unreachable at ${GATEWAY_URL}: ${String(e)}` });
+    // Non-leaky (FR-045): the upstream URL/host/port stays in server logs, never in the client body.
+    console.error(`[bff] gateway unreachable at ${GATEWAY_URL}:`, e);
+    return json(502, { error: 'gateway unreachable' });
   }
 
   // Re-emit upstream status + body, preserving content-type (SSE or JSON) and disabling buffering.

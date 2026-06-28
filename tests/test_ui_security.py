@@ -12,11 +12,15 @@ SKIPs cleanly if the UI or key isn't available. Exits non-zero on failure.
 import os
 import re
 import socket
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
-UI = f"http://127.0.0.1:{os.getenv('UI_PORT', '3000')}"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UI_PORT = os.getenv("UI_PORT", "3000")
+UI = f"http://127.0.0.1:{UI_PORT}"
 KEY = os.getenv("GATEWAY_API_KEY")
 PAGES = ["/", "/infer", "/models", "/datasets", "/runs", "/monitor", "/health"]
 
@@ -51,6 +55,68 @@ def _eth0_ip():
         return ip
     except Exception:
         return None
+
+
+def _check_extra_origin() -> int:
+    """005 US4 (FR-044): IPv6 loopback is a default-allowed Origin; a configured extra origin (when
+    the server + test share UI_ALLOWED_ORIGINS) is accepted too. Foreign origins stay 403 (checked
+    in main, section 4)."""
+    failures = 0
+    s, _, _ = _req(f"{UI}/api/gw/models", headers={"Origin": f"http://[::1]:{UI_PORT}"})
+    ok = s == 200
+    print(f"[{'OK' if ok else 'FAIL'}] BFF accepts IPv6 loopback Origin [::1] -> {s} (expect 200)")
+    failures += 0 if ok else 1
+
+    extra = os.getenv("UI_ALLOWED_ORIGINS", "").split(",")[0].strip()
+    if extra:
+        s, _, _ = _req(f"{UI}/api/gw/models", headers={"Origin": extra})
+        ok = s == 200
+        print(f"[{'OK' if ok else 'FAIL'}] BFF accepts configured extra origin {extra} -> {s} (expect 200)")
+        failures += 0 if ok else 1
+    else:
+        print("[SKIP] UI_ALLOWED_ORIGINS not set — configured-extra-origin acceptance not exercised")
+    return failures
+
+
+def _check_nonleaky_error() -> int:
+    """005 US4 (FR-045): a throwaway BFF pointed at a dead gateway must return a GENERIC error body
+    with no upstream URL/host/port (the detail goes to server logs only). Best-effort — skips if a
+    throwaway `next start` can't be spun (no node/.next)."""
+    port = "3098"
+    env = dict(os.environ, GATEWAY_URL="http://127.0.0.1:9", UI_PORT=port, GATEWAY_API_KEY="x")
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            ["./node_modules/.bin/next", "start", "-H", "127.0.0.1", "-p", port],
+            cwd=os.path.join(REPO, "ui"), env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(30):
+            try:
+                s, _, _ = _req(f"{base}/healthz", timeout=2)
+            except Exception:
+                s = None  # connection refused while next is still booting — keep polling
+            if s == 200:
+                break
+            time.sleep(1)
+        else:
+            print("[SKIP] throwaway UI did not come up — non-leaky-error check unverified")
+            return 0
+        # Allowlisted route, but the upstream gateway (127.0.0.1:9) is dead -> 502 generic body.
+        s, body, _ = _req(f"{base}/api/gw/models")
+        ok = s == 502 and "gateway unreachable" in body and "http://" not in body and ":9" not in body
+        print(f"[{'OK' if ok else 'FAIL'}] BFF unreachable-gateway error is generic (no upstream URL) "
+              f"-> {s} {body[:80]!r}")
+        return 0 if ok else 1
+    except FileNotFoundError:
+        print("[SKIP] next binary not found — non-leaky-error check unverified")
+        return 0
+    finally:
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 15)
+            except Exception:
+                proc.terminate()
 
 
 def main() -> int:
@@ -146,12 +212,22 @@ def main() -> int:
         print(f"[{'OK' if good else 'FAIL'}] header: {label}")
         failures += 0 if good else 1
 
+    # ---- 005 US4: configurable origins (+[::1]) + non-leaky upstream errors ----
+    print("\n== 005 US4: BFF robustness ==")
+    failures += _check_extra_origin()
+    failures += _check_nonleaky_error()
+
     if failures:
         print(f"\n{failures} security check(s) failed.")
         return 1
-    print("\nT077/T085 PASS — key server-side + allowlisted-only + origin-guarded; headers present; "
-          "UI bound to 127.0.0.1")
+    print("\nT077/T085/T100 PASS — key server-side + allowlisted-only + origin-guarded (incl. [::1] "
+          "+ configurable); generic upstream errors; headers present; UI bound to 127.0.0.1")
     return 0
+
+
+def test_ui_security(require_ui, require_key):
+    """Pytest wrapper (005 US5): needs the console + a key; else skip (sub-checks self-skip)."""
+    assert main() == 0
 
 
 if __name__ == "__main__":

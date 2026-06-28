@@ -73,5 +73,10 @@ def main() -> int:
     return 0
 
 
+def test_auth(require_gateway, require_key):
+    """Pytest wrapper (005 US5): needs a live gateway + a key; else skip."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

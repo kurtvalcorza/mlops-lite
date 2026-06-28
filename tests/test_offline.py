@@ -65,5 +65,10 @@ def main() -> int:
     return 0
 
 
+def test_offline(require_gateway, require_key):
+    """Pytest wrapper (005 US5): skip if the stack is down / no key, else assert the local-only flows."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

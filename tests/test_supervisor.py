@@ -106,5 +106,10 @@ def main() -> int:
             sup.kill()
 
 
+def test_supervisor(require_wsl):
+    """Pytest wrapper (005 US5): WSL-only (manages native processes); daemon-prereq self-skips."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())
