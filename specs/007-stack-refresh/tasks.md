@@ -37,6 +37,14 @@ Task IDs continue the shared space (T118+).
 > Made it `${MLFLOW_ALLOWED_HOSTS:-<loopback default>}` (mirrors the BIND_ADDR override pattern), doc'd in
 > `.env.example`. Compose interpolation + override verified; mlflow healthy + registry/serving green.
 >
+> **Codex re-review (round 2, 2× P2) — fixed:** (3) the always-run pip installs from fix (1) were
+> unguarded under `set -uo pipefail` (no `-e`), so a failed refresh would continue + report success →
+> stale versions. Added `|| fail` to every install. (4) the SAME directory-existence-cache bug existed in
+> the **UI tier** — step 6 skipped `npm ci`/`next build` whenever `node_modules`/`.next` merely existed,
+> so a lockfile bump (React 19.2.7) never landed. Now keys on freshness: `npm ci` when
+> `package-lock.json -nt node_modules/.package-lock.json`; rebuild `.next` when package.json/lock is newer.
+> Freshness detection verified both directions; full bootstrap re-run green.
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.
