@@ -156,9 +156,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             threading.Thread(target=_worker, args=(run_id, req), daemon=True).start()
         except BaseException:  # spawn failed — don't strand the lease/slot
-            with _lock:
+            with _lock:  # release + clear atomically, same as the _worker finally (Claude re-review)
+                gpu_lease.release(LEASE_TENANT)
                 _active = None
-            gpu_lease.release(LEASE_TENANT)
             raise
         return self._send(202, {"run_id": run_id, "status": "queued"})
 
