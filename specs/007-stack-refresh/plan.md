@@ -84,7 +84,11 @@ mlops-lite/
 ├── training/requirements.txt     # MODIFIED: mlflow-skinny==3.x; prefect bump; torch-family LEFT FROZEN (cu128 index)
 ├── serving/bento/requirements.txt# MODIFIED: bentoml + pillow bumps (CPU only)
 ├── scripts/
-│   └── native_env.lock           # MODIFIED: record the refreshed native pins; torch family unchanged
+│   ├── native_env.lock           # MODIFIED: record the refreshed native pins; torch family unchanged
+│   ├── bootstrap.sh              # MODIFIED: always-apply requirements (|| fail-guarded) + UI lockfile-freshness re-install
+│   ├── up_all.ps1               # MODIFIED: fail-fast hint -> reset_mlflow_3x.ps1 when MLflow isn't healthy
+│   ├── reset_mlflow_3x.ps1      # NEW: guarded one-time 2.18->3.x backend reset (drop pgdata + up_all + reseed)
+│   └── reseed_registry.sh        # NEW: re-register+promote serving LLM + re-register vision after a reset
 ├── ui/package.json + package-lock.json  # MODIFIED: Next 15.x latest + React 19 patch + tooling bumps
 └── tests/                        # re-run; add a tiny version-assertion smoke if useful (e.g. server reports 3.x)
 ```

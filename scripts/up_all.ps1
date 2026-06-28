@@ -34,6 +34,22 @@ Write-Host "`n[1/3] docker compose up ..." -ForegroundColor Green
 docker compose up -d --build
 if ($LASTEXITCODE -ne 0) { Write-Error "compose up failed"; exit 1 }
 
+# Fail-fast hint (007 FR-055): MLflow 3.x will NOT start against a stale 2.18 Postgres schema. If the
+# server doesn't go healthy shortly — the symptom when UPGRADING an existing 2.18 install — point the
+# operator at the one-time fresh-volume reset rather than letting them debug a dead service.
+$mlflowPort = if ($env:MLFLOW_PORT) { $env:MLFLOW_PORT } else { "5500" }
+$mlflowOk = $false
+foreach ($i in 1..20) {
+    try { Invoke-WebRequest "http://127.0.0.1:$mlflowPort/health" -TimeoutSec 4 -UseBasicParsing | Out-Null; $mlflowOk = $true; break }
+    catch { Start-Sleep 3 }
+}
+if (-not $mlflowOk) {
+    Write-Warning ("MLflow is not healthy at 127.0.0.1:$mlflowPort. If you are UPGRADING from MLflow 2.18, " +
+        "the 3.x server cannot start against the old Postgres schema — run the one-time reset:`n" +
+        "    .\scripts\reset_mlflow_3x.ps1 -Confirm`n" +
+        "(drops MLflow run/trace history; MinIO datasets/artifacts survive). Else: docker compose logs mlflow")
+}
+
 # 3. Start the native daemons under the supervisor and wait for their health.
 Write-Host "`n[2/3] starting native daemons under the supervisor ..." -ForegroundColor Green
 wsl.exe -d $Distro bash scripts/supervisor_up.sh

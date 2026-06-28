@@ -63,6 +63,19 @@ Task IDs continue the shared space (T118+).
 > content-addressed, guaranteed resolution). Recreated minio from the digest — running, buckets ready,
 > foundation+exposure+datasets green.
 >
+> **Codex re-review (round 5, 1× P2) — fixed:** (7) the fresh-volume reset (T120) was a MANUAL step, not
+> encoded anywhere runnable — so an operator upgrading an existing 2.18 install via `up_all` would get
+> MLflow 3.14 against a stale 2.18 schema and a dead service. Added the explicit guarded reset path +
+> fail-fast hint Codex asked for: **`scripts/reset_mlflow_3x.ps1`** (`-Confirm`-guarded: compose down →
+> drop ONLY `mlops-lite_pgdata` → `up_all` → re-seed; up_all wrapped in try/catch so a transient daemon
+> flap doesn't abort the re-seed), **`scripts/reseed_registry.sh`** (re-register+promote the serving LLM
+> + re-register vision), and a **fail-fast hint in `up_all.ps1`** (if MLflow isn't healthy, point at the
+> reset script — the stale-schema symptom on an upgrade). Validated: guard refuses cleanly without
+> `-Confirm`; the destructive path drops pgdata + brings up a fresh 3.x backend (HTTP 200, empty
+> registry); reseed registers the LLM `@serving`. (The vision-seed leg + a post-run MinIO-:9000
+> host-forwarding glitch were validation-env churn artifacts, not script defects — vision seed is proven
+> in T120; cleared by a full stack restart.)
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.
