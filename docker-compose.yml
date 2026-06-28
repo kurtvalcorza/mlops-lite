@@ -91,8 +91,13 @@ services:
         condition: service_completed_successfully
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      # API-key auth (US1, FR-016). Comma-separated keys; empty => gateway runs OPEN with a
-      # warning. scripts/gen_secrets provisions one so the hardened path is always authenticated.
+      # 006 inference tracing — pass the .env toggles INTO the container so they actually take effect
+      # (default-on when unset, matching app/tracing.py defaults). FR-052 / SC-034.
+      MLFLOW_TRACING_ENABLED: ${MLFLOW_TRACING_ENABLED:-1}
+      MLFLOW_TRACE_CAPTURE_IO: ${MLFLOW_TRACE_CAPTURE_IO:-1}
+      MLFLOW_TRACING_EXPERIMENT: ${MLFLOW_TRACING_EXPERIMENT:-mlops-lite-inference}
+      # API-key auth (US1, FR-016; fail-closed since 005/US2). Comma-separated keys; empty => protected
+      # routes return 401 unless GATEWAY_ALLOW_OPEN. scripts/gen_secrets provisions a real key.
       GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-}
       # 005 US2 (FR-042): fail-closed by default. No key => protected routes 401, UNLESS this
       # truthy dev override runs the gateway open (logged loudly). Never the default.
