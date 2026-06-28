@@ -18,8 +18,6 @@ NOT the 3.x `mlflow.start_span_no_context` (absent here) nor the wall-clock `@ml
 
 Everything is best-effort: any tracing error is swallowed; inference is never affected.
 """
-import asyncio
-import concurrent.futures
 import logging
 import os
 import threading
@@ -48,16 +46,13 @@ _init_lock = threading.Lock()
 _last_init_monotonic = 0.0
 _INIT_RETRY_SEC = 30.0  # when MLflow is unreachable, retry init at most this often (off-path)
 
-# Trace exports run on a DEDICATED thread pool — never FastAPI's shared request threadpool and never the
-# registry client's HTTP path — so a slow/hung MLflow can pin at most these few threads and can NOT alter
-# registry/promotion timeout behavior (the old process-wide MLFLOW_HTTP_* override did, throttling
-# /models + _resolve_serving_version — 006 Codex review).
-_EXPORT_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="trace-export")
-_MAX_PENDING = 64  # backpressure: drop traces rather than grow unbounded when MLflow is slow/backed up
-
-# asyncio only weak-refs run_in_executor futures; keep strong refs so a fire-and-forget emit can't be
-# GC'd mid-export ("Future ... was never retrieved") and silently drop the trace.
-_tasks: set = set()
+# Trace exports run on bounded DAEMON threads — never FastAPI's request threadpool, never the registry
+# client's HTTP path, and (being daemon) never blocking process/test shutdown even if one export is stuck
+# on an unreachable MLflow. The semaphore caps concurrency: drop a trace rather than pile up threads when
+# MLflow is slow. Keeps registry timeouts robust (no global MLFLOW_HTTP_* override) AND gives tracing a
+# clean fail-open shutdown path (006 Codex review).
+_MAX_CONCURRENT_EXPORTS = 2
+_export_sem = threading.BoundedSemaphore(_MAX_CONCURRENT_EXPORTS)
 
 
 def _silence_span_warning() -> None:
@@ -77,8 +72,8 @@ def _configure() -> None:
     # NB: do NOT set MLFLOW_HTTP_REQUEST_TIMEOUT / MLFLOW_HTTP_REQUEST_MAX_RETRIES here — they are
     # PROCESS-WIDE and would also throttle the registry client (registry.py shares the MLflow stack for
     # /models, promotion, and _resolve_serving_version, which must keep MLflow's robust default
-    # timeout/retries). The exporter is bounded instead by its own dedicated _EXPORT_POOL, so a slow
-    # MLflow can't pin request threads or change registry behavior (006 Codex review).
+    # timeout/retries). The exporter is bounded instead by its own daemon threads (_export_sem-capped),
+    # so a slow MLflow can't pin request threads, change registry behavior, or block shutdown (006 Codex).
     _silence_span_warning()  # reapplied after the lazy MLflow import too (see _ensure_client)
     logger.info("inference tracing ENABLED (experiment=%s, capture_io=%s) — client inits lazily",
                 EXPERIMENT, _CAPTURE_IO)
@@ -151,26 +146,27 @@ def _emit_sync(name, inputs, outputs, attributes, start_ns, end_ns, status) -> N
 
 
 def emit(name, *, inputs=None, outputs=None, attributes=None, start_ns, end_ns, status="OK") -> None:
-    """Fire-and-forget, fail-open: schedule the blocking span build+export OFF the request path.
+    """Fire-and-forget, fail-open: run the blocking span build+export on a bounded DAEMON thread.
 
-    Returns immediately; the synchronous MLflow init+export runs on a worker thread so the inference
-    response and the event loop never block on it (FR-051).
+    Returns immediately; the synchronous MLflow init+export never blocks the inference response or the
+    event loop (FR-051), and being daemon it never blocks process/test shutdown (006 Codex review).
     """
     if not _ENABLED:
         return
-    if len(_tasks) >= _MAX_PENDING:
-        # Backpressure: MLflow is slow/backed up — drop this trace rather than queue unbounded.
+    if not _export_sem.acquire(blocking=False):
+        # Backpressure: max concurrent exports already in flight (MLflow slow) — drop this trace.
         return
+
+    def _run():
+        try:
+            _emit_sync(name, inputs, outputs, attributes, start_ns, end_ns, status)
+        finally:
+            _export_sem.release()
+
     try:
-        loop = asyncio.get_running_loop()
-        fut = loop.run_in_executor(
-            _EXPORT_POOL, _emit_sync, name, inputs, outputs, attributes, start_ns, end_ns, status)
-        _tasks.add(fut)
-        fut.add_done_callback(_tasks.discard)
-    except RuntimeError:
-        # No running loop (not expected on the request path) — best-effort inline, still swallowed.
-        _emit_sync(name, inputs, outputs, attributes, start_ns, end_ns, status)
-    except Exception as e:  # noqa: BLE001
+        threading.Thread(target=_run, name="trace-export", daemon=True).start()
+    except Exception as e:  # noqa: BLE001 — tracing must never affect inference
+        _export_sem.release()
         logger.debug("trace schedule failed (ignored): %s", e)
 
 

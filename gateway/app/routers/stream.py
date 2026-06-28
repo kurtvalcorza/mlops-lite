@@ -24,6 +24,9 @@ router = APIRouter()
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+# The supervisor's terminal SSE frame — a delivered `done` proves a complete stream (006 trace status).
+_DONE_MARKER = b'"event": "done"'
+
 
 class StreamRequest(BaseModel):
     prompt: str
@@ -57,6 +60,7 @@ async def infer_stream(req: StreamRequest):
         start_ns = time.time_ns()
         frames = 0
         saw_done = False
+        done_tail = b""  # rolling overlap so a `done` frame split across transport chunks is still seen
         # Pessimistic default: an unexpected mid-stream failure leaves the trace errored — only a stream
         # that delivered the terminal `done` frame flips it to OK below (parity with REST /infer; 006
         # Codex review).
@@ -81,8 +85,15 @@ async def infer_stream(req: StreamRequest):
                             # stay byte-identical (FR-050).
                             async for chunk in r.aiter_raw():
                                 frames += chunk.count(b"data:")
-                                if b'"event": "done"' in chunk:
-                                    saw_done = True
+                                if not saw_done:
+                                    # aiter_raw yields transport chunks, not SSE frames — the terminal
+                                    # `done` frame can split across chunks, so scan a rolling window
+                                    # (prev tail + chunk), not the chunk alone (006 Codex review).
+                                    window = done_tail + chunk
+                                    if _DONE_MARKER in window:
+                                        saw_done = True
+                                    else:
+                                        done_tail = window[-len(_DONE_MARKER):]
                                 yield chunk
                             # aiter_raw ending != success: the supervisor can close the response
                             # mid-stream on a backend failure with no error frame, so only a delivered
