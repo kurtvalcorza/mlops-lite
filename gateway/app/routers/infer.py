@@ -3,12 +3,14 @@
 T021 wires US1 to the registry: the response reports the registry version currently promoted to
 `serving`, so an inference is traceable to a registered, promoted model version (FR-006).
 """
+import time
+
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter, Histogram
 from pydantic import BaseModel
 
-from .. import registry
+from .. import registry, tracing
 from ..serving import SERVING_MODEL, ModelTooLargeError, ServingError, health, run_inference
 
 router = APIRouter()
@@ -35,29 +37,68 @@ async def _resolve_serving_version() -> str | None:
 
 @router.post("/infer")
 async def infer(req: InferRequest):
-    """Submit a text prompt; returns the completion and metadata, including cold-start load time."""
-    if not await health():
-        INFER_REQUESTS.labels(status="unavailable").inc()
-        raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
-    try:
-        result = await run_inference(req.prompt, req.max_tokens, req.temperature)
-    except ModelTooLargeError as e:
-        INFER_REQUESTS.labels(status="rejected").inc()
-        raise HTTPException(status_code=400, detail=str(e))
-    except ServingError as e:
-        INFER_REQUESTS.labels(status="error").inc()
-        raise HTTPException(status_code=502, detail=str(e))
+    """Submit a text prompt; returns the completion and metadata, including cold-start load time.
 
-    if result.get("load_ms"):
-        LOAD_LATENCY.observe(result["load_ms"] / 1000.0)
-    INFER_LATENCY.observe(result.get("infer_ms", 0) / 1000.0)
-    INFER_REQUESTS.labels(status="ok").inc()
-    return {
-        "status": "completed",
-        "registry_model": SERVING_MODEL,
-        "registry_version": await _resolve_serving_version(),
-        **result,
-    }
+    Emits one fire-and-forget MLflow trace per request (006/FR-049) — including error outcomes — from
+    a `finally`, off the request path. The span is at the router, naturally outside the GPU lock.
+    """
+    start_ns = time.time_ns()
+    result = None
+    registry_version = None
+    # Pessimistic default: any UNEXPECTED failure (e.g. a malformed supervisor response) keeps the trace
+    # errored — only the known-good path flips it to OK just before returning (006 Codex review).
+    trace_status = "ERROR"
+    outcome = "error"
+    try:
+        if not await health():
+            INFER_REQUESTS.labels(status="unavailable").inc()
+            trace_status, outcome = "ERROR", "unavailable"
+            raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
+        try:
+            result = await run_inference(req.prompt, req.max_tokens, req.temperature)
+        except ModelTooLargeError as e:
+            INFER_REQUESTS.labels(status="rejected").inc()
+            trace_status, outcome = "ERROR", "rejected"
+            raise HTTPException(status_code=400, detail=str(e))
+        except ServingError as e:
+            INFER_REQUESTS.labels(status="error").inc()
+            trace_status, outcome = "ERROR", "error"
+            raise HTTPException(status_code=502, detail=str(e))
+
+        if result.get("load_ms"):
+            LOAD_LATENCY.observe(result["load_ms"] / 1000.0)
+        INFER_LATENCY.observe(result.get("infer_ms", 0) / 1000.0)
+        INFER_REQUESTS.labels(status="ok").inc()
+        registry_version = await _resolve_serving_version()
+        trace_status, outcome = "OK", "completed"  # success is known — flip the pessimistic default
+        return {
+            "status": "completed",
+            "registry_model": SERVING_MODEL,
+            "registry_version": registry_version,
+            **result,
+        }
+    finally:
+        attrs = {
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+            "model": SERVING_MODEL,
+            "status": outcome,
+        }
+        if result:
+            for k in ("load_ms", "infer_ms", "usage"):
+                if result.get(k) is not None:
+                    attrs[k] = result[k]
+        if registry_version is not None:
+            attrs["registry_version"] = registry_version
+        tracing.emit(
+            name="infer",
+            inputs={"prompt": req.prompt},
+            outputs={"output": result.get("text")} if result else None,
+            attributes=attrs,
+            start_ns=start_ns,
+            end_ns=time.time_ns(),
+            status=trace_status,
+        )
 
 
 @router.get("/serving/health")

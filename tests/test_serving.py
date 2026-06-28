@@ -44,5 +44,10 @@ def main() -> int:
     return 0 if ok else 1
 
 
+def test_serving(require_serving, require_key):
+    """Pytest wrapper (005 US5): skip unless the serving daemon is reachable + a key is set."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

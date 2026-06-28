@@ -92,9 +92,22 @@ python tests/test_auth.py && python tests/test_serving.py && python tests/test_r
 
 </details>
 
-> **Auth (002/US1).** The lifecycle endpoints require an `X-API-Key` header once `GATEWAY_API_KEYS`
-> is set (`gen_secrets` provisions one); `/healthz` and `/metrics` stay open. With no key
-> configured the gateway runs open and logs a warning. Tests pick up `GATEWAY_API_KEY` from the env.
+> **Auth (002/US1 + 005/US2 fail-closed).** The lifecycle endpoints require an `X-API-Key` header
+> once `GATEWAY_API_KEYS` is set (`gen_secrets` provisions one); `/healthz` and `/metrics` stay open.
+> **Fail-closed by default (005):** with no key configured the gateway still boots but protected
+> routes return `401` — set `GATEWAY_ALLOW_OPEN=1` for the documented dev escape hatch (runs open,
+> warns loudly). Tests pick up `GATEWAY_API_KEY` from the env. **Key rotation needs a gateway
+> restart** — the key set is read once at startup, so after editing `GATEWAY_API_KEYS` (or the keys
+> file) restart the gateway for it to take effect (FR-046).
+>
+> **Network exposure (005/US1).** Every published Compose port binds to **loopback (`127.0.0.1`)** by
+> default — nothing answers on the LAN. Set `BIND_ADDR=0.0.0.0` in `.env` only for intentional LAN
+> exposure (that re-exposes MinIO/MLflow/Grafana/Prometheus). The WSL native daemons reach
+> MinIO/MLflow over `localhost` unchanged.
+>
+> **Tests (005/US5).** `pytest` is the entry point — it runs the integration suite against a live,
+> keyed stack and **skips cleanly** when the stack/key/daemons/WSL are absent (no collect-nothing
+> exit-5). Each `tests/test_*.py` also still runs standalone (`python tests/test_auth.py`).
 >
 > **Supervisor (002/US2).** Instead of hand-starting the three native daemons, run one process
 > supervisor in WSL — it starts serving/training/vision, health-checks them, and restarts any that
@@ -120,6 +133,25 @@ module so it can be swapped back:
 | DVC | content-addressing on MinIO | DVC needs git + CLI + a commit per version; ill-fitting for an API flow |
 | Prefect *server* | Prefect *ephemeral* + native daemon | an always-on server is weight MLflow already covers for run tracking |
 | Evidently | pure-Python PSI | Evidently's pandas/scipy/plotly would bloat the gateway image on the constrained Windows C: drive |
+
+## Inference traces (006)
+
+Every `POST /infer` and `POST /infer/stream` emits one **MLflow trace** (prompt, params, output,
+`load_ms`/`infer_ms`, model, `usage`, promoted `registry_version`, status). Traces land in the
+**`mlops-lite-inference`** experiment on the existing MLflow server — open MLflow at
+`http://127.0.0.1:5500`, pick that experiment, and use the **Traces** tab to inspect any request.
+
+- **Manual, not autolog.** The gateway proxies inference over `httpx`, so `mlflow.autolog()` captures
+  nothing — 006 instruments the proxy paths directly (reusing the MLflow already present for the
+  registry; no new dependency).
+- **Never slows inference.** Traces are emitted *fire-and-forget* off the request path (MLflow export
+  is synchronous), and tracing is *fail-open* — if MLflow is down the inference still succeeds. The
+  single-GPU mutex is never held for tracing.
+- **Toggles** (`.env`): `MLFLOW_TRACING_ENABLED=0` disables it entirely; `MLFLOW_TRACE_CAPTURE_IO=0`
+  keeps timing/metadata but omits prompt/output bodies (for sensitive prompts).
+- **Retention.** 006 ships **no** retention policy — traces accumulate in `mlops-lite-inference`. To
+  prune, delete traces or the experiment from the MLflow UI (or
+  `MlflowClient().delete_experiment(<id>)`). Revisit if storage on the constrained C: drive bites.
 
 ## Disk frugality (Principle III)
 

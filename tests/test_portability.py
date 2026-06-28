@@ -138,5 +138,10 @@ def main() -> int:
     return 0
 
 
+def test_portability(require_node, require_key):
+    """Pytest wrapper (005 US5): retarget-contract check; needs a key (the e2e leg shells serving)."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

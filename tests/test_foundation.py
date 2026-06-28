@@ -38,5 +38,10 @@ def main() -> int:
     return 0
 
 
+def test_foundation(require_gateway):
+    """Pytest wrapper (005 US5): skip if the stack is down, else assert the smoke passes."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

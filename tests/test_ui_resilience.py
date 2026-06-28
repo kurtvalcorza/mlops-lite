@@ -129,5 +129,10 @@ def main() -> int:
     return 0
 
 
+def test_ui_resilience(require_ui):
+    """Pytest wrapper (005 US5): skip unless the console is up (not-ready branch self-skips)."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

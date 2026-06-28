@@ -99,5 +99,10 @@ def main() -> int:
     return 0
 
 
+def test_drift_loop(require_gateway, require_key):
+    """Pytest wrapper (005 US5): skip if the stack is down / no key (the retrain leg self-skips)."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

@@ -111,5 +111,10 @@ def main() -> int:
     return 0
 
 
+def test_stream(require_key, require_serving):
+    """Pytest wrapper (005 US5): needs a key + a reachable serving daemon; else skip."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

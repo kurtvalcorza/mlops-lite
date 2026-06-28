@@ -55,5 +55,10 @@ def main() -> int:
     return 0
 
 
+def test_bento(require_vision):
+    """Pytest wrapper (005 US5): skip unless the BentoML vision daemon is reachable."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

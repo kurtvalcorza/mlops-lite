@@ -16,6 +16,27 @@ import sys
 import urllib.error
 import urllib.request
 
+API_KEY_HEADER = "X-API-Key"
+
+
+def resolve_api_key(flag: str | None = None) -> str | None:
+    """Gateway API key from (in order): --api-key, GATEWAY_API_KEY, first key in
+    GATEWAY_API_KEYS_FILE. Returns None when none is set (open-mode, unchanged). Mirrors the
+    test/auth header contract so the CLIs talk to a hardened gateway (005 US3, FR-043)."""
+    if flag:
+        return flag
+    env = os.getenv("GATEWAY_API_KEY")
+    if env:
+        return env
+    path = os.getenv("GATEWAY_API_KEYS_FILE")
+    if path and os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                k = line.strip()
+                if k and not k.startswith("#"):
+                    return k
+    return None
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Register a file as an immutable dataset version.")
@@ -23,6 +44,8 @@ def main() -> int:
     ap.add_argument("path", help="path to the local file to register")
     ap.add_argument("--format", default=None, help="optional format hint, e.g. csv/jsonl/parquet")
     ap.add_argument("--gateway", default=os.getenv("GATEWAY_URL", "http://localhost:8080"))
+    ap.add_argument("--api-key", default=None,
+                    help="gateway API key (else GATEWAY_API_KEY / GATEWAY_API_KEYS_FILE)")
     args = ap.parse_args()
 
     with open(args.path, "rb") as f:
@@ -33,9 +56,13 @@ def main() -> int:
         "format": args.format,
     }).encode()
 
+    headers = {"Content-Type": "application/json"}
+    key = resolve_api_key(args.api_key)
+    if key:
+        headers[API_KEY_HEADER] = key
+
     req = urllib.request.Request(
-        f"{args.gateway}/datasets", data=body,
-        headers={"Content-Type": "application/json"}, method="POST",
+        f"{args.gateway}/datasets", data=body, headers=headers, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as r:

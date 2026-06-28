@@ -133,5 +133,10 @@ def main() -> int:
     return 0
 
 
+def test_ui_smoke(require_ui, require_key):
+    """Pytest wrapper (005 US5): needs the console + a key; else skip (kill-flip self-skips)."""
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

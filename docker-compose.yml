@@ -15,7 +15,8 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "${POSTGRES_PORT:-55432}:5432"
+      # 005 US1 (FR-041): bind loopback by default; BIND_ADDR=0.0.0.0 for intentional LAN exposure.
+      - "${BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mlops}"]
       interval: 5s
@@ -32,8 +33,9 @@ services:
     volumes:
       - miniodata:/data
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
+      - "${BIND_ADDR:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "${BIND_ADDR:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
 
   # One-shot: create the platform buckets, then exit (T008).
   createbuckets:
@@ -72,7 +74,8 @@ services:
       --artifacts-destination s3://mlflow
       --serve-artifacts
     ports:
-      - "${MLFLOW_PORT:-5500}:5000"
+      # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
+      - "${BIND_ADDR:-127.0.0.1}:${MLFLOW_PORT:-5500}:5000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\" || exit 1"]
       interval: 10s
@@ -88,9 +91,17 @@ services:
         condition: service_completed_successfully
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      # API-key auth (US1, FR-016). Comma-separated keys; empty => gateway runs OPEN with a
-      # warning. scripts/gen_secrets provisions one so the hardened path is always authenticated.
+      # 006 inference tracing — pass the .env toggles INTO the container so they actually take effect
+      # (default-on when unset, matching app/tracing.py defaults). FR-052 / SC-034.
+      MLFLOW_TRACING_ENABLED: ${MLFLOW_TRACING_ENABLED:-1}
+      MLFLOW_TRACE_CAPTURE_IO: ${MLFLOW_TRACE_CAPTURE_IO:-1}
+      MLFLOW_TRACING_EXPERIMENT: ${MLFLOW_TRACING_EXPERIMENT:-mlops-lite-inference}
+      # API-key auth (US1, FR-016; fail-closed since 005/US2). Comma-separated keys; empty => protected
+      # routes return 401 unless GATEWAY_ALLOW_OPEN. scripts/gen_secrets provisions a real key.
       GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-}
+      # 005 US2 (FR-042): fail-closed by default. No key => protected routes 401, UNLESS this
+      # truthy dev override runs the gateway open (logged loudly). Never the default.
+      GATEWAY_ALLOW_OPEN: ${GATEWAY_ALLOW_OPEN:-}
       # Native serving supervisor on the WSL GPU host (hybrid GPU). serve_up.ps1 injects the
       # Ubuntu IP since host.docker.internal can't cross WSL distros.
       SERVING_URL: ${SERVING_URL:-http://host.docker.internal:8090}
@@ -107,7 +118,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${GATEWAY_PORT:-8080}:8000"
+      # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
+      - "${BIND_ADDR:-127.0.0.1}:${GATEWAY_PORT:-8080}:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\" || exit 1"]
       interval: 10s
@@ -119,7 +131,8 @@ services:
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
+      - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
     image: grafana/grafana:latest
@@ -140,7 +153,8 @@ services:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafanadata:/var/lib/grafana
     ports:
-      - "${GRAFANA_PORT:-3001}:3000"
+      # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
+      - "${BIND_ADDR:-127.0.0.1}:${GRAFANA_PORT:-3001}:3000"
     depends_on:
       - prometheus
 

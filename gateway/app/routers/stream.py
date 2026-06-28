@@ -10,18 +10,22 @@ gateway polls and re-emits status/metrics until the run reaches a terminal state
 import asyncio
 import json
 import os
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import platform_health, serving
+from .. import platform_health, serving, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+# The supervisor's terminal SSE frame — a delivered `done` proves a complete stream (006 trace status).
+_DONE_MARKER = b'"event": "done"'
 
 
 class StreamRequest(BaseModel):
@@ -37,28 +41,93 @@ def _sse(event: dict) -> bytes:
 @router.post("/infer/stream")
 async def infer_stream(req: StreamRequest):
     """Stream inference tokens as SSE (FR-026/FR-027). Auth is enforced by the router dependency."""
+    route_start_ns = time.time_ns()
     if not await serving.health():
+        # 006/FR-050: trace the pre-generation failure too — parity with REST /infer's 503 branch, so a
+        # failed stream during a serving outage is still observable (gen() never runs in this case).
+        tracing.emit(
+            name="infer_stream",
+            inputs={"prompt": req.prompt},
+            attributes={"max_tokens": req.max_tokens, "temperature": req.temperature,
+                        "model": serving.SERVING_MODEL, "status": "unavailable", "token_frames": 0},
+            start_ns=route_start_ns, end_ns=time.time_ns(), status="ERROR",
+        )
         raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
 
     async def gen():
-        # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
-        async with serving._gpu_lock:
-            try:
-                async with httpx.AsyncClient(timeout=300) as client:
-                    async with client.stream(
-                        "POST", f"{serving.SERVING_URL}/infer/stream",
-                        json={"prompt": req.prompt, "max_tokens": req.max_tokens,
-                              "temperature": req.temperature},
-                    ) as r:
-                        if r.status_code != 200:
-                            body = (await r.aread()).decode("utf-8", "ignore")[:200]
-                            yield _sse({"event": "error", "detail": body})
-                            return
-                        # Pass the supervisor's SSE bytes straight through (already framed).
-                        async for chunk in r.aiter_raw():
-                            yield chunk
-            except httpx.HTTPError as e:
-                yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})
+        # 006/FR-050: trace timing captured OUTSIDE the GPU lock (export never coincides with the
+        # mutex) and emitted fire-and-forget in the finally. The SSE bytes are an untouched passthrough.
+        start_ns = time.time_ns()
+        frames = 0
+        saw_done = False
+        done_tail = b""  # rolling overlap so a `done` frame split across transport chunks is still seen
+        # Pessimistic default: an unexpected mid-stream failure leaves the trace errored — only a stream
+        # that delivered the terminal `done` frame flips it to OK below (parity with REST /infer; 006
+        # Codex review).
+        trace_status, outcome, error_detail = "ERROR", "error", None
+        try:
+            # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
+            async with serving._gpu_lock:
+                try:
+                    async with httpx.AsyncClient(timeout=300) as client:
+                        async with client.stream(
+                            "POST", f"{serving.SERVING_URL}/infer/stream",
+                            json={"prompt": req.prompt, "max_tokens": req.max_tokens,
+                                  "temperature": req.temperature},
+                        ) as r:
+                            if r.status_code != 200:
+                                body = (await r.aread()).decode("utf-8", "ignore")[:200]
+                                trace_status, outcome, error_detail = "ERROR", "error", body
+                                yield _sse({"event": "error", "detail": body})
+                                return
+                            # Pass the supervisor's SSE bytes straight through (already framed).
+                            # Count `data:` frames as an approximate token count — no parsing, bytes
+                            # stay byte-identical (FR-050).
+                            async for chunk in r.aiter_raw():
+                                frames += chunk.count(b"data:")
+                                if not saw_done:
+                                    # aiter_raw yields transport chunks, not SSE frames — the terminal
+                                    # `done` frame can split across chunks, so scan a rolling window
+                                    # (prev tail + chunk), not the chunk alone (006 Codex review).
+                                    window = done_tail + chunk
+                                    if _DONE_MARKER in window:
+                                        saw_done = True
+                                    else:
+                                        done_tail = window[-len(_DONE_MARKER):]
+                                yield chunk
+                            # aiter_raw ending != success: the supervisor can close the response
+                            # mid-stream on a backend failure with no error frame, so only a delivered
+                            # terminal `done` frame proves a complete stream (006 Codex review).
+                            if saw_done:
+                                trace_status, outcome = "OK", "completed"
+                            else:
+                                outcome, error_detail = "truncated", "stream closed before done frame"
+                except httpx.HTTPError as e:
+                    trace_status, outcome, error_detail = "ERROR", "error", f"serving unreachable: {e}"
+                    yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected mid-stream — record an aborted generation, not a false success.
+            trace_status, outcome, error_detail = "ERROR", "cancelled", "client disconnected mid-stream"
+            raise
+        finally:
+            attrs = {
+                "max_tokens": req.max_tokens,
+                "temperature": req.temperature,
+                "model": serving.SERVING_MODEL,
+                "status": outcome,
+                "token_frames": frames,
+            }
+            if error_detail:
+                attrs["error"] = error_detail
+            tracing.emit(
+                name="infer_stream",
+                inputs={"prompt": req.prompt},
+                outputs=None,
+                attributes=attrs,
+                start_ns=start_ns,
+                end_ns=time.time_ns(),
+                status=trace_status,
+            )
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 
