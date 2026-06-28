@@ -10,13 +10,14 @@ gateway polls and re-emits status/metrics until the run reaches a terminal state
 import asyncio
 import json
 import os
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import platform_health, serving
+from .. import platform_health, serving, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -41,24 +42,54 @@ async def infer_stream(req: StreamRequest):
         raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
 
     async def gen():
-        # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
-        async with serving._gpu_lock:
-            try:
-                async with httpx.AsyncClient(timeout=300) as client:
-                    async with client.stream(
-                        "POST", f"{serving.SERVING_URL}/infer/stream",
-                        json={"prompt": req.prompt, "max_tokens": req.max_tokens,
-                              "temperature": req.temperature},
-                    ) as r:
-                        if r.status_code != 200:
-                            body = (await r.aread()).decode("utf-8", "ignore")[:200]
-                            yield _sse({"event": "error", "detail": body})
-                            return
-                        # Pass the supervisor's SSE bytes straight through (already framed).
-                        async for chunk in r.aiter_raw():
-                            yield chunk
-            except httpx.HTTPError as e:
-                yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})
+        # 006/FR-050: trace timing captured OUTSIDE the GPU lock (export never coincides with the
+        # mutex) and emitted fire-and-forget in the finally. The SSE bytes are an untouched passthrough.
+        start_ns = time.time_ns()
+        frames = 0
+        trace_status, outcome, error_detail = "OK", "completed", None
+        try:
+            # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
+            async with serving._gpu_lock:
+                try:
+                    async with httpx.AsyncClient(timeout=300) as client:
+                        async with client.stream(
+                            "POST", f"{serving.SERVING_URL}/infer/stream",
+                            json={"prompt": req.prompt, "max_tokens": req.max_tokens,
+                                  "temperature": req.temperature},
+                        ) as r:
+                            if r.status_code != 200:
+                                body = (await r.aread()).decode("utf-8", "ignore")[:200]
+                                trace_status, outcome, error_detail = "ERROR", "error", body
+                                yield _sse({"event": "error", "detail": body})
+                                return
+                            # Pass the supervisor's SSE bytes straight through (already framed).
+                            # Count `data:` frames as an approximate token count — no parsing, bytes
+                            # stay byte-identical (FR-050).
+                            async for chunk in r.aiter_raw():
+                                frames += chunk.count(b"data:")
+                                yield chunk
+                except httpx.HTTPError as e:
+                    trace_status, outcome, error_detail = "ERROR", "error", f"serving unreachable: {e}"
+                    yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})
+        finally:
+            attrs = {
+                "max_tokens": req.max_tokens,
+                "temperature": req.temperature,
+                "model": serving.SERVING_MODEL,
+                "status": outcome,
+                "token_frames": frames,
+            }
+            if error_detail:
+                attrs["error"] = error_detail
+            tracing.emit(
+                name="infer_stream",
+                inputs={"prompt": req.prompt},
+                outputs=None,
+                attributes=attrs,
+                start_ns=start_ns,
+                end_ns=time.time_ns(),
+                status=trace_status,
+            )
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 

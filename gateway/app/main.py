@@ -12,8 +12,8 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
-from . import platform_health, platform_metrics
-from .auth import require_api_key
+from . import platform_health, platform_metrics, tracing
+from .auth import auth_mode, require_api_key
 from .routers import datasets, infer, models, monitor, runs, stream, vision
 
 app = FastAPI(title="MLOps-Lite Gateway", version="1.2.0")
@@ -66,5 +66,8 @@ def root():
             "/vision/classify", "/vision/health",
             "/infer/stream", "/platform/events",
         ],
-        "phase": "8 (complete) + 002 US1 (auth) + US2 (supervisor) + 003 US1 (streaming)",
+        "phase": "8 (complete) + 002 US1 (auth) + US2 (supervisor) + 003 US1 (streaming) "
+        "+ 005 US2 (fail-closed auth) + 006 (inference tracing)",
+        "auth_mode": auth_mode(),
+        "tracing": tracing.enabled(),
     }
