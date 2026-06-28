@@ -8,15 +8,13 @@ The live fail-open property (MLflow stopped → inference still 200, no added la
 on restart) is validated manually on the target machine (SC-033) — stopping MLflow mid-suite would
 disrupt the running stack, so it is not automated here.
 
-Skips cleanly if FastAPI isn't importable (tracing.py imports fastapi.concurrency).
+tracing.py is pure-stdlib (daemon-thread exporter), so these run anywhere — no third-party import needed.
 """
 import asyncio
 import importlib.util
 import os
 
 import pytest
-
-pytest.importorskip("fastapi")  # tracing.py imports fastapi.concurrency.run_in_threadpool
 
 TRACING_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway", "app", "tracing.py"
@@ -51,12 +49,15 @@ def test_default_enabled_and_capture():
     assert m.capture_io() is True
 
 
-def test_disabled_flag_bypasses_and_emits_nothing():
+def test_disabled_flag_bypasses_and_emits_nothing(monkeypatch):
     m = _load_tracing(MLFLOW_TRACING_ENABLED="0")
     assert m.enabled() is False
-    # emit() must be a no-op: returns immediately, schedules no background task, never raises.
+    # emit() must be a no-op when disabled: it returns before spawning an export thread, so the export
+    # worker (_emit_sync) is never invoked, and it never raises.
+    called = []
+    monkeypatch.setattr(m, "_emit_sync", lambda *a, **k: called.append(1))
     m.emit("infer", inputs={"prompt": "x"}, attributes={}, start_ns=1, end_ns=2)
-    assert len(m._tasks) == 0
+    assert called == []
 
 
 def test_capture_io_off_keeps_tracing_on():
