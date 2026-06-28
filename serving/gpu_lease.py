@@ -81,7 +81,15 @@ def free_vram_gb():
 
 
 def _alive(pid) -> bool:
-    """True if `pid` is a live process (os.kill(pid, 0) — FR-063 stale-holder detection)."""
+    """True if `pid` is a live process (os.kill(pid, 0) — FR-063 stale-holder detection).
+
+    Liveness (not a wall-clock TTL) is deliberate (Claude review F4): a training run legitimately
+    holds the lease for many minutes/hours, so a TTL-based reclaim could wrongly evict a live long
+    run and let a second tenant load onto the GPU — a worse failure than the theoretical case this
+    trades against (a dead holder's PID being recycled by an unrelated process before the next
+    acquire). On Linux PIDs cycle through a large pid_max space, making that window tiny on a
+    single-operator host; liveness keeps long holds safe, which matters more here.
+    """
     if not isinstance(pid, int) or pid <= 0:
         return False
     try:
@@ -187,7 +195,13 @@ def reclaim() -> bool:
 
 
 def current_holder():
-    """The live lease holder {tenant, pid, acquired_at}, or None (used for the UI status, FR-068)."""
+    """The live lease holder {tenant, pid, acquired_at}, or None (used for the UI status, FR-068).
+
+    Intentionally lock-free / stale-tolerant (Claude review F3): it does **not** take `_coord()`, so
+    the holder it returns can change the instant after it reads — this is a best-effort *display*
+    read (the Infer status line, supervisor `/health`), **not** an admission decision. Admission is
+    always made inside `acquire()` under the flock; nothing here arbitrates the GPU.
+    """
     holder = _read_holder()
     if holder and _alive(holder.get("pid")):
         return holder

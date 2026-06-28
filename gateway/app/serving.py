@@ -1,9 +1,14 @@
-"""Serving client + one-model-in-VRAM guard (T016/T017).
+"""Serving client + GPU/lease-state surface (T016/T017; 008 US1/US3).
 
 The gateway proxies inference to a native serving **supervisor** running on the WSL GPU host
-(hybrid GPU, constitution v1.2.0). The supervisor owns the llama-server lifecycle (on-demand
-load, idle VRAM release, oversize rejection). A gateway-side asyncio lock serializes GPU use so
-at most one inference is in flight — the gateway is the platform authority for Principle II.
+(hybrid GPU, constitution v1.2.0). The supervisor owns the llama-server lifecycle (on-demand load,
+idle VRAM release, oversize rejection).
+
+**Principle II authority moved in 008** (Claude review F5): the single race-free **GPU lease**
+(serving/gpu_lease.py), held by the native daemons, is now what guarantees one GPU tenant at a time
+— **not** this gateway. The `_gpu_lock` below is only a gateway-side concurrency limiter (at most one
+in-flight supervisor call); it no longer *enforces* Principle II. `gpu_state()` reads the lease
+holder via the supervisor `/health` for the UI status line (FR-068).
 """
 import asyncio
 import os
@@ -18,7 +23,7 @@ SERVING_MODEL = os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 # read covers every tenant (LLM, vision, training) — they all share the same lockfile.
 _HOLDER_LABEL = {"llm-serving": "llm", "vision": "vision", "training": "training"}
 
-_gpu_lock = asyncio.Lock()
+_gpu_lock = asyncio.Lock()  # gateway-side concurrency limiter only; Principle II is the lease's job
 
 
 class ServingError(Exception):

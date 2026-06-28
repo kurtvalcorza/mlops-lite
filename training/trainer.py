@@ -75,9 +75,13 @@ def _worker(run_id: str, req: dict):
         except Exception:
             pass
     finally:
+        # Release the lease and clear _active **atomically under _lock** (Claude review F1): a
+        # concurrent POST /train does its `_active is None` check + `gpu_lease.acquire()` under the
+        # same _lock, so it can never observe the in-between state "_active cleared but lease still
+        # held" and return a spurious LeaseHeld 409. Releasing inside the lock closes that window.
         with _lock:
+            gpu_lease.release(LEASE_TENANT)  # free the single GPU slot on completion/failure (FR-062)
             _active = None
-        gpu_lease.release(LEASE_TENANT)  # free the single GPU slot on completion/failure (FR-062)
 
 
 class Handler(BaseHTTPRequestHandler):
