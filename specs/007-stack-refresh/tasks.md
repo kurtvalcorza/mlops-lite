@@ -45,6 +45,15 @@ Task IDs continue the shared space (T118+).
 > `package-lock.json -nt node_modules/.package-lock.json`; rebuild `.next` when package.json/lock is newer.
 > Freshness detection verified both directions; full bootstrap re-run green.
 >
+> **Codex re-review (round 3, 1× P2 security) — fixed:** (5) the captured MinIO pin
+> `minio/minio:RELEASE.2025-09-07T16-13-09Z` predates the patch for **CVE-2025-62506** (session-policy
+> bypass priv-esc, fixed upstream 2025-10-15). Docker Hub's `minio/minio` is FROZEN at the un-patched
+> 2025-09-07 tag (the named 2025-10-15 release isn't published there or on quay), so switched to the
+> **quay.io hotfix of the same release**: `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772`
+> (Apr-2026 rebuild, go1.26.1, backports the security fix; **console retained**; same 2025-09-07 behavior).
+> Recreated minio — running, WebUI on :9001, miniodata intact (models 15 / datasets 18 / mlflow 35
+> objects), foundation+exposure+datasets green. (mc client not flagged — left on Docker Hub.)
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.
@@ -145,7 +154,9 @@ Task IDs continue the shared space (T118+).
   > `minio/mc:RELEASE.2025-08-13T08-35-41Z` · `prom/prometheus:v3.5.4` · `grafana/grafana:13.1.0` ·
   > `postgres:17-alpine`→`postgres:17.10-alpine`.
   > **DONE (2026-06-28):** all five pinned with `# 007 US2: pin (...captured T118)` comments; no platform
-  > image uses `:latest`.
+  > image uses `:latest`. **MinIO later moved to the quay.io hotfix
+  > `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772` for CVE-2025-62506** (Codex round-3;
+  > Docker Hub's tag is frozen un-patched — see the round-3 note above).
 - [X] **T124** [P] [US2] Clean `up_all`; `test_foundation` + `test_exposure` green (pins are healthy +
   loopback-bound). (SC-037)
   > **DONE (2026-06-28):** clean up_all pulled the explicit tags + recreated; postgres came up healthy on

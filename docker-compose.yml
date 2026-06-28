@@ -24,7 +24,11 @@ services:
       retries: 12
 
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z  # 007 US2: pin (was :latest, captured T118)
+    # 007 US2: pinned (was :latest). Uses the quay.io HOTFIX of the 2025-09-07 release — Docker Hub's
+    # minio/minio froze at the un-patched 2025-09-07 tag, and the hotfix backports security fixes incl.
+    # CVE-2025-62506 (session-policy bypass) on the same release line (go1.26.1, Apr-2026 build, console
+    # retained). Codex P2, PR#3. Same behavior as the validated 2025-09-07, just patched.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
     command: server /data --console-address ":9001"
     environment:
       # Secrets — no shipped minioadmin/minioadmin defaults (FR-017). Run scripts/gen_secrets.
