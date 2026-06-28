@@ -70,4 +70,5 @@ def root():
         "+ 005 US2 (fail-closed auth) + 006 (inference tracing)",
         "auth_mode": auth_mode(),
         "tracing": tracing.enabled(),
+        "trace_capture": tracing.capture_io(),
     }

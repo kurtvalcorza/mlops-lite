@@ -134,3 +134,19 @@ def require_tracing(require_gateway):
                 pytest.skip("gateway reports tracing disabled (MLFLOW_TRACING_ENABLED=0)")
     except Exception:
         pytest.skip("could not read the gateway tracing flag")
+
+
+@pytest.fixture
+def require_capture(require_gateway):
+    """Skip when the gateway reports trace IO-capture off (MLFLOW_TRACE_CAPTURE_IO=0).
+
+    The live rest/stream tracing smokes correlate a trace by its captured prompt marker, which is absent
+    under capture-off (`emit()` sends inputs=None) — so the lookup would time out even though tracing
+    works. That toggle path is covered by the offline unit checks in test_tracing_resilience.
+    """
+    try:
+        with urllib.request.urlopen(f"{GW}/", timeout=4) as r:
+            if json.load(r).get("trace_capture") is not True:
+                pytest.skip("gateway reports trace capture disabled (MLFLOW_TRACE_CAPTURE_IO=0)")
+    except Exception:
+        pytest.skip("could not read the gateway trace-capture flag")

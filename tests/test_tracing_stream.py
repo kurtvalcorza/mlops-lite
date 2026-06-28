@@ -59,8 +59,12 @@ def main() -> int:
     return 0
 
 
-def test_tracing_stream(require_serving, require_key, require_mlflow, require_tracing):
-    """Pytest wrapper (006 US2): needs serving + key + MLflow + tracing on; else skip."""
+def test_tracing_stream(require_serving, require_key, require_mlflow, require_tracing, require_capture):
+    """Pytest wrapper (006 US2): needs serving + key + MLflow + tracing + IO-capture on; else skip.
+
+    `require_capture`: the trace is correlated by its captured prompt marker, absent under
+    MLFLOW_TRACE_CAPTURE_IO=0 (covered there by test_tracing_resilience's offline toggle checks).
+    """
     assert main() == 0
 
 

@@ -56,8 +56,13 @@ def main() -> int:
     return 0
 
 
-def test_tracing_rest(require_gateway, require_key, require_mlflow, require_tracing):
-    """Pytest wrapper (006 US1): needs the stack + key + MLflow + tracing on; else skip."""
+def test_tracing_rest(require_serving, require_key, require_mlflow, require_tracing, require_capture):
+    """Pytest wrapper (006 US1): needs serving + key + MLflow + tracing + IO-capture on; else skip.
+
+    `require_serving`: `main()` posts a real `/infer`, so a stack with the native serving daemon down
+    must skip (not fail on the 503) — parity with the stream tracing smoke. `require_capture`: the trace
+    is correlated by its captured prompt, absent under MLFLOW_TRACE_CAPTURE_IO=0.
+    """
     assert main() == 0
 
 
