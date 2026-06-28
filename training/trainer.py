@@ -1,10 +1,12 @@
 """Native training daemon (T031/T032, US4) — runs the LoRA flow on the WSL GPU host.
 
 Mirrors the serving supervisor: a pure-stdlib HTTP server the gateway proxies to. It owns one
-training run at a time and enforces the platform's one-model-in-VRAM rule (Principle II) by
-refusing to start while the serving model is resident — so training and serving never contend
-for the single GPU. The heavy ML stack is imported lazily inside the worker thread, keeping the
-daemon light and holding no VRAM while idle.
+training run at a time and enforces the platform's one-GPU-tenant rule (Principle II, v1.4.0) by
+acquiring the shared race-free GPU lease (008 US1, serving/gpu_lease.py) before a run starts —
+atomically refusing while another tenant (serving/vision) holds the slot, and releasing on
+completion/failure. This *subsumes* the old refuse-while-serving-resident HTTP poll with the same
+409 "GPU busy" semantics, but without its time-of-check/time-of-use race. The heavy ML stack is
+imported lazily inside the worker thread, keeping the daemon light and holding no VRAM while idle.
 
 Endpoints:
   GET  /health            -> {ok, busy, active, gpu_free_mib}
@@ -19,15 +21,17 @@ import os
 import subprocess
 import sys
 import threading
-import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # so `flows` is importable
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "serving"))
+import gpu_lease  # noqa: E402  (shared, stdlib-only GPU lease — 008 US1)
 
 TRAINER_PORT = int(os.getenv("TRAINER_PORT", "8091"))
 SUPERVISOR_URL = os.getenv("SUPERVISOR_URL", "http://localhost:8090")
 VRAM_GB = float(os.getenv("VRAM_GB", "12"))
+LEASE_TENANT = "training"          # this daemon's GPU lease identity (008 US1)
 
 _lock = threading.Lock()           # one run at a time
 _runs: dict = {}                   # run_id -> job record
@@ -43,15 +47,6 @@ def _gpu_free_mib():
         return int(out.stdout.strip().splitlines()[0])
     except Exception:
         return None
-
-
-def _serving_resident() -> bool:
-    """True if the serving supervisor currently holds a model in VRAM."""
-    try:
-        with urllib.request.urlopen(f"{SUPERVISOR_URL}/health", timeout=3) as r:
-            return bool(json.load(r).get("resident"))
-    except Exception:
-        return False  # serving not up → GPU is free for training
 
 
 def _worker(run_id: str, req: dict):
@@ -82,6 +77,7 @@ def _worker(run_id: str, req: dict):
     finally:
         with _lock:
             _active = None
+        gpu_lease.release(LEASE_TENANT)  # free the single GPU slot on completion/failure (FR-062)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -140,14 +136,26 @@ class Handler(BaseHTTPRequestHandler):
             global _active
             if _active is not None:
                 return self._send(409, {"error": f"trainer busy with run {_active}"})
-            if _serving_resident():
-                return self._send(409, {"error": "GPU busy: a model is resident in serving "
+            # 008 US1: acquire the single race-free GPU lease (FR-062) — this *subsumes* the old
+            # `_serving_resident()` HTTP poll, refusing atomically (no TOCTOU window) while another
+            # tenant (serving/vision) holds the slot, with the same 409 "GPU busy" semantics.
+            try:
+                gpu_lease.acquire(LEASE_TENANT)
+            except gpu_lease.LeaseHeld as e:
+                holder = (e.holder or {}).get("tenant", "another GPU tenant")
+                return self._send(409, {"error": f"GPU busy: {holder} holds the GPU "
                                                  "(one-model-in-VRAM). Let it idle out, then retry."})
             run_id = uuid.uuid4().hex[:12]
             _runs[run_id] = {"run_id": run_id, "status": "queued", "request": req,
                              "mlflow_run_id": None, "model": None, "metrics": None, "error": None}
             _active = run_id
-        threading.Thread(target=_worker, args=(run_id, req), daemon=True).start()
+        try:
+            threading.Thread(target=_worker, args=(run_id, req), daemon=True).start()
+        except BaseException:  # spawn failed — don't strand the lease/slot
+            with _lock:
+                _active = None
+            gpu_lease.release(LEASE_TENANT)
+            raise
         return self._send(202, {"run_id": run_id, "status": "queued"})
 
 
