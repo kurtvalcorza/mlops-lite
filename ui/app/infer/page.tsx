@@ -5,44 +5,58 @@ import { PageTitle, Panel } from '@/components/Panel';
 import { gwGet, gwPost } from '@/lib/gw';
 import { streamSse } from '@/lib/sse';
 
-type ModelRow = { name: string; serving_version: string | null };
 type Pred = { label: string; score: number };
 type VisionResp = { predictions: Pred[]; device?: string; model?: string };
+// 008 US3 (FR-068): the gateway's lease/GPU state. `holder` ∈ {llm, vision, training, null}.
+type ServingState = {
+  holder: 'llm' | 'vision' | 'training' | null;
+  resident: boolean;
+  serving_model: string;
+  serving_version: string | null;
+};
+
+/** Poll the gateway's GPU/lease state so the tab reflects what is actually resident (008 US3). */
+function useServingState(intervalMs = 4000): ServingState | null {
+  const [state, setState] = useState<ServingState | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      gwGet<ServingState>('serving/state')
+        .then((s) => alive && setState(s))
+        .catch(() => {});
+    tick();
+    const id = setInterval(tick, intervalMs);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [intervalMs]);
+  return state;
+}
 
 export default function InferPage() {
+  const serving = useServingState();
   return (
     <>
       <PageTitle sub="Stream a completion or classify an image. The API key stays server-side (BFF).">
         infer
       </PageTitle>
       <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
-        <StreamConsole />
-        <VisionDropzone />
+        <StreamConsole serving={serving} />
+        <VisionDropzone serving={serving} />
       </div>
     </>
   );
 }
 
-function StreamConsole() {
+function StreamConsole({ serving }: { serving: ServingState | null }) {
   const [prompt, setPrompt] = useState('');
-  const [models, setModels] = useState<ModelRow[]>([]);
-  const [selected, setSelected] = useState('');
   const [tokens, setTokens] = useState('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'streaming' | 'error'>('idle');
   const [meta, setMeta] = useState<string>('');
   const [err, setErr] = useState('');
   const abortRef = useRef<AbortController | null>(null);
   const tailRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    gwGet<{ models: ModelRow[] }>('models')
-      .then((d) => {
-        setModels(d.models || []);
-        const serving = (d.models || []).find((m) => m.serving_version);
-        if (serving) setSelected(serving.name);
-      })
-      .catch(() => setModels([]));
-  }, []);
 
   useEffect(() => {
     tailRef.current?.scrollTo({ top: tailRef.current.scrollHeight });
@@ -93,27 +107,24 @@ function StreamConsole() {
   const stop = () => abortRef.current?.abort();
   const busy = status === 'loading' || status === 'streaming';
 
+  // 008 US3 (FR-069): read-only "serving: <model>@vN · resident|idle" status line — the resident
+  // GGUF always serves the stream, so the old (inert) model dropdown is removed. No selection is sent.
+  const modelLabel = serving
+    ? `${serving.serving_model}${serving.serving_version ? `@v${serving.serving_version}` : ''}`
+    : '…';
+
   return (
     <Panel title="stream" hint="POST /infer/stream → SSE">
-      {/* model/selector line (tui-prompt-row) */}
+      {/* read-only GPU/serving status line (replaces the inert model dropdown) */}
       <div className="mb-3 flex flex-wrap items-center gap-2 text-caption-md">
-        <span className="text-mute">model:</span>
-        <select
-          value={selected}
-          onChange={(e) => setSelected(e.target.value)}
-          className="hairline rounded-sm bg-soft px-2 py-1 text-ink"
-        >
-          {models.length === 0 && <option value="">(none registered)</option>}
-          {models.map((m) => (
-            <option key={m.name} value={m.name}>
-              {m.name}
-              {m.serving_version ? ` @v${m.serving_version}` : ''}
-            </option>
-          ))}
-        </select>
-        <span className="text-ash">
-          [i] the resident GGUF serves the stream; promote in models (US3) to switch
-        </span>
+        <span className="text-mute">serving:</span>
+        <span className="hairline rounded-sm bg-soft px-2 py-1 text-ink">{modelLabel}</span>
+        {serving && (
+          <span className={serving.resident ? 'st-accent' : 'text-ash'}>
+            · {serving.resident ? 'resident' : 'idle'}
+          </span>
+        )}
+        <span className="text-ash">[i] the resident GGUF serves the stream</span>
       </div>
 
       {/* dark streaming console — the one raised surface */}
@@ -172,29 +183,44 @@ function StreamConsole() {
   );
 }
 
-function VisionDropzone() {
+function VisionDropzone({ serving }: { serving: ServingState | null }) {
   const [preds, setPreds] = useState<Pred[] | null>(null);
   const [device, setDevice] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [fileName, setFileName] = useState('');
 
-  const handleFile = useCallback(async (file: File) => {
-    setErr('');
-    setPreds(null);
-    setFileName(file.name);
-    setBusy(true);
-    try {
-      const b64 = await toBase64(file);
-      const res = await gwPost<VisionResp>('vision/classify', { image_b64: b64 });
-      setPreds(res.predictions || []);
-      setDevice(res.device || '');
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  // 008 US3 (FR-070, A1 disable-with-hint): one model in VRAM — if another tenant holds the GPU
+  // lease, classify is disabled with a hint. The operator frees the GPU (idle-release or stop
+  // serving) to classify. No preemption/swap (A2 deferred). Vision holding the lease is fine.
+  const heldByOther = !!serving?.holder && serving.holder !== 'vision';
+  const heldHint =
+    serving?.holder === 'llm'
+      ? 'GPU busy: LLM resident'
+      : serving?.holder === 'training'
+        ? 'GPU busy: training run active'
+        : `GPU busy: ${serving?.holder} resident`;
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      if (heldByOther) return; // belt-and-suspenders: the input is disabled when held
+      setErr('');
+      setPreds(null);
+      setFileName(file.name);
+      setBusy(true);
+      try {
+        const b64 = await toBase64(file);
+        const res = await gwPost<VisionResp>('vision/classify', { image_b64: b64 });
+        setPreds(res.predictions || []);
+        setDevice(res.device || '');
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [heldByOther],
+  );
 
   return (
     <Panel title="classify" hint="POST /vision/classify → top-5">
@@ -202,23 +228,39 @@ function VisionDropzone() {
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
+          if (heldByOther) return;
           const f = e.dataTransfer.files?.[0];
           if (f) handleFile(f);
         }}
-        className="hairline flex h-32 cursor-pointer flex-col items-center justify-center rounded-sm bg-soft text-caption-md text-mute"
+        aria-disabled={heldByOther}
+        className={
+          'hairline flex h-32 flex-col items-center justify-center rounded-sm bg-soft text-caption-md text-mute ' +
+          (heldByOther ? 'cursor-not-allowed opacity-40' : 'cursor-pointer')
+        }
       >
         <input
           type="file"
           accept="image/*"
           className="hidden"
+          disabled={heldByOther}
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) handleFile(f);
           }}
         />
-        <span className="st-accent">[+]</span>
-        <span className="mt-1">drop an image or click</span>
-        {fileName && <span className="mt-1 text-ash">{fileName}</span>}
+        {heldByOther ? (
+          <>
+            <span className="st-danger">[!]</span>
+            <span className="mt-1">{heldHint}</span>
+            <span className="mt-1 text-ash">free the GPU (idle-release or stop serving) to classify</span>
+          </>
+        ) : (
+          <>
+            <span className="st-accent">[+]</span>
+            <span className="mt-1">drop an image or click</span>
+            {fileName && <span className="mt-1 text-ash">{fileName}</span>}
+          </>
+        )}
       </label>
 
       <div className="mt-3 text-caption-md">

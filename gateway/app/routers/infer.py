@@ -11,7 +11,7 @@ from prometheus_client import Counter, Histogram
 from pydantic import BaseModel
 
 from .. import registry, tracing
-from ..serving import SERVING_MODEL, ModelTooLargeError, ServingError, health, run_inference
+from ..serving import SERVING_MODEL, ModelTooLargeError, ServingError, gpu_state, health, run_inference
 
 router = APIRouter()
 
@@ -104,3 +104,13 @@ async def infer(req: InferRequest):
 @router.get("/serving/health")
 async def serving_health():
     return {"backend": "llama-server (supervised)", "reachable": await health()}
+
+
+@router.get("/serving/state")
+async def serving_state():
+    """GPU/lease state for the Infer status line (008 US3, FR-068): {holder, resident,
+    serving_model, serving_version}. holder ∈ {llm, vision, training, null}; the version is the
+    registry @serving pointer. Read-only; the API key never reaches the browser (BFF contract)."""
+    state = await gpu_state()
+    state["serving_version"] = await _resolve_serving_version()
+    return state

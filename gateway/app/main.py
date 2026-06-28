@@ -58,7 +58,7 @@ def root():
         "service": "mlops-lite-gateway",
         "version": app.version,
         "endpoints": [
-            "/healthz", "/metrics", "/platform/health", "/infer", "/serving/health",
+            "/healthz", "/metrics", "/platform/health", "/infer", "/serving/health", "/serving/state",
             "/models", "/models/{name}", "/models/{name}/promote",
             "/datasets", "/datasets/{name}", "/datasets/{name}/{version}",
             "/runs", "/runs/{id}", "/runs/{id}/events", "/training/health",
