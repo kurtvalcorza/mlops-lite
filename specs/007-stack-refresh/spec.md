@@ -29,24 +29,27 @@ changing any platform behavior** — same lifecycle, same UI, same APIs.
 ### User Story 1 — MLflow 2.18 → 3.x across the platform (Priority: P1)
 
 The MLflow server and **every** skinny client (gateway, training) move to `3.14.x` together, the
-existing registry/run/trace history survives the backend migration, and all MLflow-backed flows behave
-identically: model registry (alias-based promotion), dataset registry metadata, training run logging,
-drift reports, and 006 inference traces.
+backend store is reset to a fresh volume (run/trace history dropped — accepted; datasets persist on
+MinIO) and the platform is re-seeded, and all MLflow-backed flows behave identically: model registry
+(alias-based promotion), dataset registry metadata, training run logging, drift reports, and 006
+inference traces.
 
 **Why this priority**: MLflow is the platform's tracking + registry backbone (Principle VI) and the
 single biggest version gap. Moving it unblocks the nicer 3.x GenAI tracing (a direct win for 006) and
 keeps the stack on a supported line. It is also the highest-risk change, so it leads.
 
-**Independent Test**: After the server + clients move to 3.x and the backend is migrated, the full
-001–006 suite passes: register/promote a model (alias resolves), register datasets, run a LoRA
-fine-tune that logs to MLflow, run a drift check, and emit inference traces visible in the MLflow UI —
-all against the migrated server, with no data loss.
+**Independent Test**: After the server + clients move to 3.x and the backend is reset to a fresh volume
++ re-seeded, the full 001–006 suite passes: register/promote a model (alias resolves), register
+datasets, run a LoRA fine-tune that logs to MLflow, run a drift check, and emit inference traces visible
+in the MLflow UI — all against the re-seeded 3.x server (prior run/trace history intentionally not
+carried over; datasets intact on MinIO).
 
 **Acceptance Scenarios**:
 
-1. **Given** an existing 2.18 backend (Postgres + MinIO artifacts) with registered models, runs, and
-   traces, **When** the server is upgraded to 3.x and the backend store is migrated, **Then** the
-   pre-existing models/runs/traces are still listed and resolvable (no history loss).
+1. **Given** a fresh 3.x backend (a clean `pgdata` volume; MinIO artifacts retained), **When** the
+   server is upgraded to 3.x and the platform is re-seeded, **Then** the serving LLM (`@serving` alias)
+   and the vision model resolve and the datasets (content-addressed on MinIO) are intact — prior
+   run/trace history is intentionally not retained (grilled, accepted).
 2. **Given** the 3.x server, **When** the gateway/training skinny clients (also 3.x) call register /
    promote / log-run / log-trace, **Then** every flow behaves exactly as on 2.18 (alias promotion,
    dataset manifests, run params/metrics, traces).
@@ -156,6 +159,17 @@ fine-tune + drift loop (`test_finetune`, `test_drift_loop`) still pass on the fr
   deprecated shim (FR-057).
 - **Skinny/server version skew**: all MLflow clients and the server MUST be the **same** 3.x version —
   a 2.18 client against a 3.x server (or vice-versa) is unsupported (FR-055).
+- **3.x server hardening (discovered at build)**: MLflow 3.x ships two new validations the gateway
+  trips on. (a) **DNS-rebinding Host-header check** — the server `403`s requests whose `Host` isn't
+  allowlisted, including the gateway's `Host: mlflow:5000`; the server MUST run with `--allowed-hosts`
+  (`MLFLOW_SERVER_ALLOWED_HOSTS`) covering `mlflow:5000`, the in-container healthcheck `localhost:5000`,
+  and the published `localhost:${MLFLOW_PORT}` / `127.0.0.1:${MLFLOW_PORT}`. (b) **Model-version source
+  validation** — a local `file://` source is rejected unless tied to a run's artifact dir; the serving
+  LLM's registry entry is a routing pointer (llama.cpp serves the GGUF locally; `/infer` never reads
+  `source`), so it is registered with an `s3://`-scheme pointer like the vision model (FR-055).
+- **GPU mutex on re-validation**: `test_finetune`/`test_drift_loop` `409` if a serving `/infer` (e.g. the
+  tracing smokes) left the LLM resident — the one-model-in-VRAM mutex (Principle II), not a regression;
+  re-run after serving idle-releases VRAM (~120s).
 - **Frozen GPU stack**: any transitive pull that would move torch/transformers/peft is a violation —
   the bumps in US3/US5 must not perturb the cu128 torch family (FR-060).
 - **Pinned-image drift**: pins must be the *validated* versions, captured after a clean bring-up — not
@@ -196,8 +210,8 @@ fine-tune + drift loop (`test_finetune`, `test_drift_loop`) still pass on the fr
 ### Key Entities *(include if feature involves data)*
 
 - **PinnedImage**: a Compose service image at an explicit, validated tag/digest (replaces a `:latest`).
-- **MlflowVersion**: the single `3.x` version shared by the server + every skinny client; the migrated
-  backend store carries the existing registry/run/trace history.
+- **MlflowVersion**: the single `3.x` version shared by the server + every skinny client; the backend
+  store is reset to a fresh volume (prior run/trace history not carried over) and re-seeded.
 - **FrozenGpuStack**: the locked cu128 torch family + FT libraries — the upgrade boundary 007 must not
   cross.
 
@@ -205,9 +219,9 @@ fine-tune + drift loop (`test_finetune`, `test_drift_loop`) still pass on the fr
 
 ### Measurable Outcomes
 
-- **SC-036**: The MLflow server + all skinny clients run the same `3.x` version; pre-existing
-  registry/runs/traces survive the migration and every MLflow-backed flow (registry/datasets/training/
-  drift/tracing) passes unchanged.
+- **SC-036**: The MLflow server + all skinny clients run the same `3.x` version; after the fresh-volume
+  reset + re-seed, every MLflow-backed flow (registry/datasets/training/drift/tracing) passes unchanged
+  (prior run/trace history intentionally not carried over; datasets intact on MinIO).
 - **SC-037**: `docker-compose.yml` contains no `:latest` for a platform service; a clean `up_all` pulls
   the pins and comes up healthy.
 - **SC-038**: 006 tracing runs on the 3.x `start_span_no_context` API with REST + stream traces intact
@@ -240,5 +254,5 @@ fine-tune + drift loop (`test_finetune`, `test_drift_loop`) still pass on the fr
 - **Next.js 16** — deferred; 007 stays on the validated Next 15 line (FR-059).
 - **New MLflow 3.x features** (logged-models GenAI eval, prompt registry, etc.) — 007 is a version move
   + the minimal 006 tracing port, not a feature expansion. A later increment may adopt 3.x eval/tracing
-  features on top of the migrated server.
+  features on top of the refreshed 3.x server.
 - **Switching any backing service** (Postgres/MinIO/Prometheus/Grafana) — only pinned, not replaced.

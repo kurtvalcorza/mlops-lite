@@ -8,8 +8,8 @@
 ## Summary
 
 A coordinated, behavior-preserving version refresh: (US1) move MLflow 2.18→3.x across the server + all
-skinny clients with a backend migration that preserves history, porting 006 tracing to the
-non-deprecated 3.x API; (US2) pin the four floating `:latest` infra images; (US3) refresh the gateway's
+skinny clients with a fresh-volume backend reset + re-seed (prior run/trace history dropped — accepted;
+datasets persist on MinIO), porting 006 tracing to the non-deprecated 3.x API; (US2) pin the four floating `:latest` infra images; (US3) refresh the gateway's
 pure-Python deps + Python base 3.11→3.12; (US4) bump the UI on the Next 15 line; (US5) bump the safe
 native CPU deps. The **Blackwell GPU/FT stack is frozen**. Phase-gated like 002/004/005/006, validated
 against the full 001–006 suite each tier, never regressing.
@@ -47,8 +47,9 @@ besides the 006 tracing port.
 **Performance Goals**: none targeted; the refresh must not regress inference latency or the GPU-lock
 hold time.
 
-**Constraints**: behavior-preserving (no lifecycle/UI/API change); GPU stack frozen; MLflow history
-preserved; single MLflow version across server + clients; loopback/auth/BFF posture unchanged.
+**Constraints**: behavior-preserving (no lifecycle/UI/API change); GPU stack frozen; MLflow run/trace
+history not retained (fresh-volume reset + re-seed, grilled); single MLflow version across server +
+clients; loopback/auth/BFF posture unchanged.
 
 ## Constitution Check
 
@@ -61,7 +62,7 @@ preserved; single MLflow version across server + clients; loopback/auth/BFF post
 | III. Lightweight Footprint | No new service/runtime; Python 3.12 is the same runtime family; pinned images are the same images | ✅ |
 | IV. Full Lifecycle Coverage | No stage added/dropped | ✅ N/A |
 | V. OSS & Swappable | Same OSS components, newer versions; MLflow stays the registry/tracking | ✅ |
-| VI. Reproducibility & Observability | **Strengthened** — pinning `:latest` images removes a reproducibility hole; MLflow history preserved | ✅ strengthened |
+| VI. Reproducibility & Observability | **Strengthened** — pinning `:latest` images removes a reproducibility hole; MLflow backend reset to a fresh volume + re-seeded (run/trace history not retained, accepted; datasets intact on MinIO) | ✅ strengthened |
 | VII. Phase-Gated Delivery | Five independently-runnable stories (US1–US5), each re-validated on the target machine | ✅ |
 | Workflow: "no new runtime without amendment" | None introduced (Python/Node/MLflow all pre-existing) | ✅ no amendment |
 
@@ -84,7 +85,10 @@ mlops-lite/
 ├── serving/bento/requirements.txt# MODIFIED: bentoml + pillow bumps (CPU only)
 ├── scripts/
 │   ├── native_env.lock           # MODIFIED: record the refreshed native pins; torch family unchanged
-│   └── migrate_mlflow.sh         # NEW (optional): snapshot + `mlflow db upgrade` helper for the backend migration
+│   ├── bootstrap.sh              # MODIFIED: always-apply requirements (|| fail-guarded) + UI lockfile-freshness re-install
+│   ├── up_all.ps1               # MODIFIED: fail-fast hint -> reset_mlflow_3x.ps1 when MLflow isn't healthy
+│   ├── reset_mlflow_3x.ps1      # NEW: guarded one-time 2.18->3.x backend reset (drop pgdata + up_all + reseed)
+│   └── reseed_registry.sh        # NEW: re-register+promote serving LLM + re-register vision after a reset
 ├── ui/package.json + package-lock.json  # MODIFIED: Next 15.x latest + React 19 patch + tooling bumps
 └── tests/                        # re-run; add a tiny version-assertion smoke if useful (e.g. server reports 3.x)
 ```

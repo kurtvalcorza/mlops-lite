@@ -5,7 +5,7 @@ name: mlops-lite
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.10-alpine  # 007 US2: pin the minor (was 17-alpine; PG_VERSION 17.10, captured T118)
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-mlops}
       # Secret — no inline default; bring-up fails fast if unset (FR-017). Run scripts/gen_secrets.
@@ -24,7 +24,13 @@ services:
       retries: 12
 
   minio:
-    image: minio/minio:latest
+    # 007 US2: pinned (was :latest). MinIO CVE-2025-62506 (session-policy bypass) is unpatched on Docker
+    # Hub's frozen 2025-09-07 tag; the fix ships as the quay.io hotfix of that release
+    # (RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 — go1.26.1, Apr-2026, console retained). Pinned BY
+    # DIGEST (not the hotfix tag) for immutability + guaranteed resolution on a fresh host — `docker
+    # manifest inspect` confirms this digest (the hotfix's amd64 manifest list) is published on quay.
+    # Codex P1/P2, PR#3. Same behavior as the validated 2025-09-07, just patched.
+    image: quay.io/minio/minio@sha256:cf3dadcfa1fb0324f43958bad1abba986d53c4ecc04d4d50b46c7dcda28bd3cd
     command: server /data --console-address ":9001"
     environment:
       # Secrets — no shipped minioadmin/minioadmin defaults (FR-017). Run scripts/gen_secrets.
@@ -39,7 +45,7 @@ services:
 
   # One-shot: create the platform buckets, then exit (T008).
   createbuckets:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z  # 007 US2: pin (was :latest, captured T118)
     depends_on:
       minio:
         condition: service_started
@@ -73,6 +79,7 @@ services:
       --backend-store-uri postgresql://${POSTGRES_USER:-mlops}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/mlflow
       --artifacts-destination s3://mlflow
       --serve-artifacts
+      --allowed-hosts ${MLFLOW_ALLOWED_HOSTS:-mlflow:5000,localhost:5000,127.0.0.1:5000,localhost:${MLFLOW_PORT:-5500},127.0.0.1:${MLFLOW_PORT:-5500}}
     ports:
       # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
       - "${BIND_ADDR:-127.0.0.1}:${MLFLOW_PORT:-5500}:5000"
@@ -127,7 +134,7 @@ services:
       retries: 12
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.5.4  # 007 US2: pin (was :latest, captured T118)
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -135,7 +142,10 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
-    image: grafana/grafana:latest
+    # 007 US2: pinned (was :latest). `grafana/grafana:13.1.0` IS a published Docker Hub tag (verified by a
+    # clean untag+re-pull), but pinned BY DIGEST for immutability + to make the "is this tag published"
+    # question moot (mirrors the MinIO digest pin). Digest = the 13.1.0 manifest list. Codex P1, PR#3.
+    image: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       # Secret — no shipped admin/admin default (FR-017). Run scripts/gen_secrets.

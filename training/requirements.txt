@@ -10,7 +10,10 @@ safetensors==0.4.5
 sentencepiece==0.2.0
 protobuf==5.29.1
 # Tracking + registry client (matches the MLflow server) and S3 for artifact upload.
-mlflow-skinny==2.18.0
+# 007 US1: 2.18.0 -> 3.14.0 (same version as the server). GPU/FT stack stays frozen; the Prefect bump
+# is US5 (T129). torch is the cu128 wheel installed separately and is intentionally untouched here.
+mlflow-skinny==3.14.0
 boto3==1.35.99
 # Flow structure (ephemeral — no Prefect server runs; see training/flows/finetune.py).
-prefect==3.1.4
+# 007 US5: 3.1.4 -> 3.7.6 (current 3.x). Must not perturb the frozen torch/transformers/datasets stack.
+prefect==3.7.6

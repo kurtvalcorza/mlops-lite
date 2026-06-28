@@ -11,10 +11,12 @@ start before MLflow is ready, and tracing must self-heal once the server is reac
 MLflow restart) without a gateway restart. The blocking init therefore runs inside the background
 worker, never on the event loop.
 
-API note (006/FR-048): uses the pinned `mlflow-skinny==2.18.0` low-level client API with explicit
-timestamps — `MlflowClient.start_trace(..., start_time_ns=...)` + `end_trace(..., end_time_ns=...)` —
-NOT the 3.x `mlflow.start_span_no_context` (absent here) nor the wall-clock `@mlflow.trace` /
-`mlflow.start_span` context managers (they cannot backdate a span to the real request window).
+API note (007/FR-057): ported to the non-deprecated `mlflow-skinny==3.14.0` tracing API with explicit
+timestamps — `mlflow.start_span_no_context(..., start_time_ns=...)` opens a root span (one trace) and
+`span.end(..., end_time_ns=...)` finalizes + exports it. This replaces the 2.18
+`MlflowClient.start_trace`/`end_trace` v2 path (which 3.x deprecates) and is preferred over the
+wall-clock `@mlflow.trace` / `mlflow.start_span` context managers (they cannot backdate a span to the
+real request window).
 
 Everything is best-effort: any tracing error is swallowed; inference is never affected.
 """
@@ -40,7 +42,7 @@ EXPERIMENT = os.getenv("MLFLOW_TRACING_EXPERIMENT", "mlops-lite-inference")
 _ENABLED = _env_flag("MLFLOW_TRACING_ENABLED", True)
 _CAPTURE_IO = _env_flag("MLFLOW_TRACE_CAPTURE_IO", True)
 
-_client = None
+_mlflow = None  # the lazily-imported mlflow module (3.x), set on the worker thread once ready
 _experiment_id = None
 _init_lock = threading.Lock()
 _last_init_monotonic = 0.0
@@ -56,16 +58,17 @@ _export_sem = threading.BoundedSemaphore(_MAX_CONCURRENT_EXPORTS)
 
 
 def _silence_span_warning() -> None:
-    """Mute the benign 2.18 `'MlflowSpanProcessor' object has no attribute '_metrics'` AttributeError
-    logged on span-end (the trace still exports) — it surfaces via the tracing loggers AND the
-    tracking-client logger. Must be REAPPLIED after the lazy `import mlflow`: MLflow's import resets
-    these levels, so setting them only at module-import time wouldn't stick (006 Codex review)."""
+    """Mute benign MLflow tracing-export log noise on span-end (the trace still exports) across the
+    tracing + tracking-client loggers. Under 2.18 this hid a cosmetic `'MlflowSpanProcessor' has no
+    attribute '_metrics'` AttributeError; on 3.14 it's a defensive carryover. Must be REAPPLIED after
+    the lazy `import mlflow`: MLflow's import resets these levels, so setting them only at module-import
+    time wouldn't stick (006 Codex review)."""
     for _name in ("mlflow.tracing.fluent", "mlflow.tracing.export.mlflow", "mlflow.tracking.client"):
         logging.getLogger(_name).setLevel(logging.ERROR)
 
 
 def _configure() -> None:
-    """Import-time, network-free setup: silence the cosmetic 2.18 span-end warning."""
+    """Import-time, network-free setup: silence cosmetic MLflow span-end log noise."""
     if not _ENABLED:
         logger.info("inference tracing DISABLED (MLFLOW_TRACING_ENABLED is falsy)")
         return
@@ -74,7 +77,7 @@ def _configure() -> None:
     # /models, promotion, and _resolve_serving_version, which must keep MLflow's robust default
     # timeout/retries). The exporter is bounded instead by its own daemon threads (_export_sem-capped),
     # so a slow MLflow can't pin request threads, change registry behavior, or block shutdown (006 Codex).
-    _silence_span_warning()  # reapplied after the lazy MLflow import too (see _ensure_client)
+    _silence_span_warning()  # reapplied after the lazy MLflow import too (see _ensure_mlflow)
     logger.info("inference tracing ENABLED (experiment=%s, capture_io=%s) — client inits lazily",
                 EXPERIMENT, _CAPTURE_IO)
 
@@ -90,53 +93,56 @@ def capture_io() -> bool:
     return _CAPTURE_IO
 
 
-def _ensure_client():
-    """Lazily (re)create the MLflow client — BLOCKING, runs on the worker thread only. Throttled so a
-    down server is retried at most every _INIT_RETRY_SEC. Returns the client, or None if not ready."""
-    global _client, _experiment_id, _last_init_monotonic
-    if _client is not None:
-        return _client
+def _ensure_mlflow():
+    """Lazily import + configure MLflow — BLOCKING, runs on the worker thread only. Throttled so a
+    down server is retried at most every _INIT_RETRY_SEC. Returns the mlflow module, or None if not
+    ready. The 3.x path emits via `mlflow.start_span_no_context`, so no MlflowClient is held."""
+    global _mlflow, _experiment_id, _last_init_monotonic
+    if _mlflow is not None:
+        return _mlflow
     if not _ENABLED:
         return None
     with _init_lock:
-        if _client is not None:
-            return _client
+        if _mlflow is not None:
+            return _mlflow
         now = time.monotonic()
         if _last_init_monotonic and (now - _last_init_monotonic) < _INIT_RETRY_SEC:
             return None
         _last_init_monotonic = now
         try:
             import mlflow
-            from mlflow import MlflowClient
 
             _silence_span_warning()  # MLflow's import resets these loggers — reapply (006 Codex review)
             mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
             exp = mlflow.set_experiment(EXPERIMENT)
             _experiment_id = exp.experiment_id
-            _client = MlflowClient()
+            _mlflow = mlflow
             logger.info("inference tracing client ready (experiment=%s id=%s)",
                         EXPERIMENT, _experiment_id)
         except Exception as e:  # MLflow not ready yet — try again later, off-path.
             logger.debug("tracing client init deferred (%s)", e)
-            _client = None
-    return _client
+            _mlflow = None
+    return _mlflow
 
 
 def _emit_sync(name, inputs, outputs, attributes, start_ns, end_ns, status) -> None:
-    """Build + export one trace synchronously (runs on a worker thread). Never raises."""
-    client = _ensure_client()
-    if client is None:
+    """Build + export one trace synchronously (runs on a worker thread). Never raises.
+
+    3.x path: `mlflow.start_span_no_context(...)` opens a root span (a new trace) with an explicit
+    start_time_ns; `span.end(...)` finalizes + exports it with outputs/status/end_time_ns — backdating
+    the span to the real request window exactly as the 2.18 `start_trace`/`end_trace` pair did."""
+    mlflow = _ensure_mlflow()
+    if mlflow is None:
         return
     try:
-        span = client.start_trace(
+        span = mlflow.start_span_no_context(
             name=name,
             inputs=inputs if _CAPTURE_IO else None,
             attributes=attributes or {},
-            start_time_ns=start_ns,
             experiment_id=_experiment_id,
+            start_time_ns=start_ns,
         )
-        client.end_trace(
-            request_id=span.request_id,
+        span.end(
             outputs=outputs if _CAPTURE_IO else None,
             status=status,
             end_time_ns=end_ns,

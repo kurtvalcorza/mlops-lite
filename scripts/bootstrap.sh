@@ -54,17 +54,28 @@ else
   [ -x "$PY" ] || fail "venv creation failed"
 fi
 
-# 3. Pinned dependencies (idempotent — skip if the core set already imports).
+# 3. Pinned dependencies. Only the torch-family cu128 wheels are expensive, so gate JUST those on import;
+#    the requirements installs ALWAYS run (idempotent + fast when satisfied) so a version bump on an
+#    existing venv actually lands — e.g. 007's mlflow-skinny 3.14 / prefect 3.7.6. A stale native client
+#    against a newer MLflow server is unsupported (FR-055), so this must not be skipped.
 echo "[3/6] pinned deps (torch cu128 + training + bento) ..."
-if "$PY" -c 'import torch, torchvision, transformers, peft, bentoml' 2>/dev/null; then
-  ok "core deps already importable"
+# Every install is `|| fail`-guarded: the script runs `set -uo pipefail` WITHOUT -e, so an unguarded
+# install failure would let bootstrap continue + report success, leaving a stale native client against
+# the newer server — the exact skew this step exists to prevent. Abort loudly instead.
+"$PY" -m pip install --upgrade pip -q || fail "pip self-upgrade failed"
+if "$PY" -c 'import torch, torchvision' 2>/dev/null; then
+  ok "torch-family already importable (cu128 download skipped)"
 else
-  step "pip installing (first run downloads torch — several minutes)"
-  "$PY" -m pip install --upgrade pip -q
-  "$PY" -m pip install -q torch==2.11.0 torchvision==0.26.0 --index-url "$CU_INDEX"
-  "$PY" -m pip install -q -r "$REPO/training/requirements.txt"
-  "$PY" -m pip install -q -r "$REPO/serving/bento/requirements.txt"
+  step "pip installing torch cu128 (first run downloads torch — several minutes)"
+  "$PY" -m pip install -q torch==2.11.0 torchvision==0.26.0 --index-url "$CU_INDEX" \
+    || fail "torch cu128 install failed (check the driver vs the cu128 wheels)"
 fi
+"$PY" -m pip install -q -r "$REPO/training/requirements.txt" || fail "training requirements install failed"
+"$PY" -m pip install -q -r "$REPO/serving/bento/requirements.txt" || fail "bento requirements install failed"
+# fsspec hold (007): datasets 3.1.0 caps fsspec<=2024.9.0 but bentoml needs >=2025.7.0 — the re-resolve
+# above can downgrade it and break bentoml. Pin to the validated 2026.6.0 LAST so it wins (overrides
+# datasets' conservative cap; both work). See scripts/native_env.lock.
+"$PY" -m pip install -q 'fsspec==2026.6.0' || fail "fsspec==2026.6.0 pin failed"
 if "$PY" -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)'; then
   ok "torch.cuda available (capability $("$PY" -c 'import torch;print(torch.cuda.get_device_capability())'))"
 else
@@ -139,17 +150,22 @@ else
   fail "node/npm not found — the operator console (ui/) needs Node ${NODE_MIN} LTS+. Install it (e.g. via nvm) and re-run."
 fi
 UI_DIR="$REPO/ui"
-if [ -d "$UI_DIR/node_modules" ]; then
-  ok "ui dependencies present"
-else
-  step "npm ci (first run — installs the pinned lockfile)"
+# Key on lockfile FRESHNESS, not directory existence — else a dependency bump (e.g. 007's React
+# 19.0.0->19.2.7) never lands on a machine that already has node_modules/.next, leaving the console on
+# the old tree + a stale build. npm writes node_modules/.package-lock.json as its installed-state marker;
+# rebuild .next whenever package.json/lock changed since the last build.
+LOCK="$UI_DIR/package-lock.json"; PKG="$UI_DIR/package.json"
+if [ ! -d "$UI_DIR/node_modules" ] || [ "$LOCK" -nt "$UI_DIR/node_modules/.package-lock.json" ]; then
+  step "npm ci (install/refresh — lockfile changed or first run)"
   ( cd "$UI_DIR" && npm ci --no-audit --no-fund ) || fail "npm ci failed in ui/"
-fi
-if [ -d "$UI_DIR/.next" ]; then
-  ok "ui already built (.next present)"
 else
-  step "next build (first run)"
+  ok "ui dependencies up to date (lockfile unchanged since last install)"
+fi
+if [ ! -d "$UI_DIR/.next" ] || [ "$LOCK" -nt "$UI_DIR/.next" ] || [ "$PKG" -nt "$UI_DIR/.next" ]; then
+  step "next build (refresh — deps/build changed or first run)"
   ( cd "$UI_DIR" && npm run build ) || fail "ui build failed"
+else
+  ok "ui already built (up to date)"
 fi
 
 echo
