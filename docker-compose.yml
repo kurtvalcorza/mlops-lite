@@ -5,7 +5,7 @@ name: mlops-lite
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.10-alpine  # 007 US2: pin the minor (was 17-alpine; PG_VERSION 17.10, captured T118)
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-mlops}
       # Secret — no inline default; bring-up fails fast if unset (FR-017). Run scripts/gen_secrets.
@@ -24,7 +24,7 @@ services:
       retries: 12
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z  # 007 US2: pin (was :latest, captured T118)
     command: server /data --console-address ":9001"
     environment:
       # Secrets — no shipped minioadmin/minioadmin defaults (FR-017). Run scripts/gen_secrets.
@@ -39,7 +39,7 @@ services:
 
   # One-shot: create the platform buckets, then exit (T008).
   createbuckets:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z  # 007 US2: pin (was :latest, captured T118)
     depends_on:
       minio:
         condition: service_started
@@ -128,7 +128,7 @@ services:
       retries: 12
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.5.4  # 007 US2: pin (was :latest, captured T118)
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -136,7 +136,7 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.1.0  # 007 US2: pin (was :latest, captured T118)
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       # Secret — no shipped admin/admin default (FR-017). Run scripts/gen_secrets.

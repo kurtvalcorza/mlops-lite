@@ -116,14 +116,19 @@ Task IDs continue the shared space (T118+).
 
 ## Phase 2 — Pin floating images (US2, P1) → SC-037
 
-- [ ] **T123** [US2] `docker-compose.yml`: replace `:latest` on `minio/minio`, `minio/mc`,
+- [X] **T123** [US2] `docker-compose.yml`: replace `:latest` on `minio/minio`, `minio/mc`,
   `prom/prometheus`, `grafana/grafana` (and pin the Postgres minor) with the validated versions captured
   at T118 / after a clean bring-up. Note each pin's source in a comment. (FR-056)
   > **Pins captured at T118 (2026-06-28):** `minio/minio:RELEASE.2025-09-07T16-13-09Z` ·
   > `minio/mc:RELEASE.2025-08-13T08-35-41Z` · `prom/prometheus:v3.5.4` · `grafana/grafana:13.1.0` ·
   > `postgres:17-alpine`→`postgres:17.10-alpine`.
-- [ ] **T124** [P] [US2] Clean `up_all`; `test_foundation` + `test_exposure` green (pins are healthy +
+  > **DONE (2026-06-28):** all five pinned with `# 007 US2: pin (...captured T118)` comments; no platform
+  > image uses `:latest`.
+- [X] **T124** [P] [US2] Clean `up_all`; `test_foundation` + `test_exposure` green (pins are healthy +
   loopback-bound). (SC-037)
+  > **DONE (2026-06-28):** clean up_all pulled the explicit tags + recreated; postgres came up healthy on
+  > `17.10-alpine` (pgdata + the T120 re-seed persisted). `test_foundation` + `test_exposure` 2/2 green —
+  > all services healthy + 127.0.0.1-bound. SC-037 met.
 
 ## Phase 3 — Gateway Python refresh (US3, P2) → SC-039
 
