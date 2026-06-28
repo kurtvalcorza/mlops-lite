@@ -1,15 +1,21 @@
-"""BentoML vision service (T022, US1) — the non-LLM half of FR-002.
+"""BentoML vision service (T022, US1; 008 US2 — vision-on-GPU under the lease).
 
 Serves a small image classifier (MobileNetV2) packaged **from the MinIO `models` bucket** (seeded
-+ registered by scripts/seed_vision_model.py — so it depends on the US2 registry). Runs on **CPU**
-on purpose: it touches no VRAM, so it never contends with the single-GPU LLM serving/training
-(Principle II stays about the GPU). Scale-to-zero is approximated by lazy-loading the model on the
-first request and releasing it after an idle timeout — nothing resident until used.
++ registered by scripts/seed_vision_model.py — so it depends on the US2 registry).
+
+008 US2: vision is now a **GPU lease tenant** (FR-066/067). When CUDA is present it loads the model
+onto the **GPU**, holds the single race-free lease (serving/gpu_lease.py) while resident — so it is
+**never co-resident** with the LLM or a training run (strict one-model-in-VRAM now includes vision) —
+and releases the lease on idle, mirroring the LLM supervisor. It reuses the frozen
+`torchvision==0.26.0+cu128` already in the native env (**no new dependency**, 007 FR-060). Off a GPU
+(CUDA absent) it falls back to CPU and holds no lease — CPU-only inference is lease-exempt (Principle
+II is about VRAM). Scale-to-zero is the lazy load + idle release: nothing resident until used.
 
 Serve natively in WSL:  bash serving/bento/run.sh   (gateway proxies to it, like the LLM serving)
 """
 import io
 import os
+import sys
 import threading
 import time
 
@@ -21,11 +27,19 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.models import mobilenet_v2
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # serving/ on path
+import gpu_lease  # noqa: E402  (shared, stdlib-only GPU lease — 008 US2)
+
 S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("VISION_MODEL", "vision-mobilenet")
 KEY = os.getenv("VISION_MODEL_KEY", f"{NAME}/v1/model.pt")
 IDLE_TIMEOUT = float(os.getenv("VISION_IDLE_TIMEOUT", "300"))
+LEASE_TENANT = "vision"                                  # this daemon's GPU lease identity (008 US2)
+VRAM_GB = float(os.getenv("VRAM_GB", "12"))              # static-budget fallback if GPU unreadable
+VISION_EST_GB = float(os.getenv("VISION_EST_GB", "1.0"))  # MobileNet + CUDA context (tiny, but non-zero)
+# One GPU tenant in VRAM (Principle II): use the GPU when present, else CPU (CPU is lease-exempt).
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 _preprocess = transforms.Compose([
     transforms.Resize(256),
@@ -54,36 +68,71 @@ class VisionClassifier:
         threading.Thread(target=self._idle_watcher, daemon=True).start()
 
     def _ensure_loaded(self):
-        """Lazy-load weights from the models bucket on first use (scale-from-zero)."""
+        """Lazy-load weights from the models bucket on first use (scale-from-zero).
+
+        008 US2: on a GPU, acquire the single lease before touching VRAM (FR-066/067) so vision is
+        never co-resident with the LLM/training; load the model onto CUDA; release the lease if the
+        load fails (no deadlock). Off a GPU, load on CPU and hold no lease (CPU is lease-exempt).
+        """
         with self._lock:
             if self._model is None:
-                blob = _s3().get_object(Bucket=BUCKET, Key=KEY)["Body"].read()
-                ckpt = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=False)
-                model = mobilenet_v2()
-                model.load_state_dict(ckpt["state_dict"])
-                model.eval()
-                self._model, self._cats = model, ckpt["categories"]
+                if DEVICE == "cuda":
+                    try:
+                        gpu_lease.acquire(LEASE_TENANT, est_gb=VISION_EST_GB, vram_budget_gb=VRAM_GB)
+                    except gpu_lease.LeaseHeld as e:
+                        holder = (e.holder or {}).get("tenant", "another GPU tenant")
+                        raise RuntimeError(
+                            f"GPU busy: {holder} holds the GPU (one model in VRAM, Principle II); "
+                            f"free it (idle-release or stop serving) to classify")
+                    except gpu_lease.VramExceeded as e:
+                        raise RuntimeError(str(e))
+                try:
+                    blob = _s3().get_object(Bucket=BUCKET, Key=KEY)["Body"].read()
+                    ckpt = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=False)
+                    model = mobilenet_v2()
+                    model.load_state_dict(ckpt["state_dict"])
+                    model.eval()
+                    if DEVICE == "cuda":
+                        model = model.to("cuda")
+                    self._model, self._cats = model, ckpt["categories"]
+                except BaseException:
+                    if DEVICE == "cuda":
+                        gpu_lease.release(LEASE_TENANT)  # load failed → free the slot
+                    raise
             self._last_used = time.time()
+
+    def _release(self):
+        """Drop the resident model (scale-to-zero) and free the GPU lease. Caller holds self._lock."""
+        self._model = self._cats = None
+        if DEVICE == "cuda":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            gpu_lease.release(LEASE_TENANT)
 
     def _idle_watcher(self):
         while True:
             time.sleep(10)
             with self._lock:
                 if self._model is not None and (time.time() - self._last_used) > IDLE_TIMEOUT:
-                    self._model = self._cats = None  # release (scale-to-zero)
+                    self._release()  # release VRAM + the lease for the next tenant (FR-071)
 
     @bentoml.api
     def classify(self, image: Image.Image) -> dict:
-        """Top-5 ImageNet classification for an uploaded image."""
-        self._ensure_loaded()
+        """Top-5 ImageNet classification for an uploaded image (on the GPU under the lease)."""
+        self._ensure_loaded()  # may raise RuntimeError when another tenant holds the GPU (FR-067)
         x = _preprocess(image.convert("RGB")).unsqueeze(0)
+        if DEVICE == "cuda":
+            x = x.to("cuda")
         with torch.no_grad():
             probs = self._model(x)[0].softmax(0)
         top = probs.topk(5)
         preds = [{"label": self._cats[int(i)], "score": round(float(p), 4)}
                  for p, i in zip(top.values, top.indices)]
-        return {"model": NAME, "device": "cpu", "predictions": preds}
+        return {"model": NAME, "device": DEVICE, "predictions": preds}
 
     @bentoml.api
     def info(self) -> dict:
-        return {"ok": True, "loaded": self._model is not None, "model": NAME, "task": "image-classification"}
+        return {"ok": True, "loaded": self._model is not None, "model": NAME,
+                "device": DEVICE, "task": "image-classification"}
