@@ -38,7 +38,17 @@ def _sse(event: dict) -> bytes:
 @router.post("/infer/stream")
 async def infer_stream(req: StreamRequest):
     """Stream inference tokens as SSE (FR-026/FR-027). Auth is enforced by the router dependency."""
+    route_start_ns = time.time_ns()
     if not await serving.health():
+        # 006/FR-050: trace the pre-generation failure too — parity with REST /infer's 503 branch, so a
+        # failed stream during a serving outage is still observable (gen() never runs in this case).
+        tracing.emit(
+            name="infer_stream",
+            inputs={"prompt": req.prompt},
+            attributes={"max_tokens": req.max_tokens, "temperature": req.temperature,
+                        "model": serving.SERVING_MODEL, "status": "unavailable", "token_frames": 0},
+            start_ns=route_start_ns, end_ns=time.time_ns(), status="ERROR",
+        )
         raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
 
     async def gen():
@@ -71,6 +81,10 @@ async def infer_stream(req: StreamRequest):
                 except httpx.HTTPError as e:
                     trace_status, outcome, error_detail = "ERROR", "error", f"serving unreachable: {e}"
                     yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected mid-stream — record an aborted generation, not a false success.
+            trace_status, outcome, error_detail = "ERROR", "cancelled", "client disconnected mid-stream"
+            raise
         finally:
             attrs = {
                 "max_tokens": req.max_tokens,
