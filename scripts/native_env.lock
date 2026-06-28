@@ -11,10 +11,13 @@ torchvision==0.26.0+cu128
 # The remaining native deps are pinned in the per-component requirements files:
 #   training/requirements.txt   -> transformers==4.46.3 peft==0.13.2 accelerate==1.1.1
 #                                  datasets==3.1.0 safetensors==0.4.5 sentencepiece==0.2.0
-#                                  protobuf==5.29.1 mlflow-skinny==3.14.0 boto3==1.35.99 prefect==3.1.4
-#                                  (mlflow-skinny 2.18.0 -> 3.14.0 in 007 US1; bentoml/pillow/prefect
-#                                  bumps are US5/T129)
-#   serving/bento/requirements.txt -> bentoml==1.4.39 pillow==11.0.0
+#                                  protobuf==5.29.1 mlflow-skinny==3.14.0 boto3==1.35.99 prefect==3.7.6
+#                                  (007: mlflow-skinny 2.18.0->3.14.0 [US1]; prefect 3.1.4->3.7.6 [US5].
+#                                  fsspec held at 2026.6.0 — datasets 3.1.0 caps it <=2024.9.0 but a venv
+#                                  re-resolve must NOT downgrade it or bentoml 1.4.39 [fsspec>=2025.7.0]
+#                                  breaks. torch-family/transformers/datasets FROZEN.)
+#   serving/bento/requirements.txt -> bentoml==1.4.39 pillow==12.2.0  (007 US5: pillow 11.0.0->12.2.0,
+#                                  already resolved in-venv via torchvision; bentoml already latest 1.x)
 #
 # Operator console (003 UI) — Node/UI tier (004 US2, T087). bootstrap.sh enforces a Node floor and
 # runs `npm ci` against ui/package-lock.json (the exact JS dep tree is pinned there, not here).

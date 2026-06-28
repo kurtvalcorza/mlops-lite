@@ -166,11 +166,18 @@ Task IDs continue the shared space (T118+).
 
 ## Phase 5 — Safe native (non-GPU) bumps (US5, P3) → SC-041
 
-- [ ] **T129** [US5] `serving/bento/requirements.txt` (BentoML, Pillow) + `training/requirements.txt`
+- [X] **T129** [US5] `serving/bento/requirements.txt` (BentoML, Pillow) + `training/requirements.txt`
   (Prefect) minor bumps; update `scripts/native_env.lock`. **torch / torchvision / transformers / peft /
   accelerate / datasets UNCHANGED** (frozen cu128 stack). (FR-060)
-- [ ] **T130** [P] [US5] `test_bento` (CPU vision) + `test_finetune` + `test_drift_loop` green on the
+  > **DONE (2026-06-28):** **bentoml stays 1.4.39** (already latest 1.x). **pillow 11.0.0→12.2.0** (the
+  > venv resolver already pulled 12.2.0 torchvision-side; pin to match). **prefect 3.1.4→3.7.6**;
+  > installed in-venv + bounced the trainer daemon to load it. Post-install verify: torch 2.11.0+cu128 /
+  > torchvision 0.26.0+cu128 / transformers 4.46.3 / peft 0.13.2 / accelerate 1.1.1 / datasets 3.1.0 /
+  > **fsspec 2026.6.0** all UNCHANGED, `torch.cuda True`. native_env.lock updated (+ fsspec-hold note).
+- [X] **T130** [P] [US5] `test_bento` (CPU vision) + `test_finetune` + `test_drift_loop` green on the
   frozen torch stack (GPU pipeline intact). (SC-041)
+  > **DONE (2026-06-28):** 3/3 green — vision classify (pillow 12.2.0), LoRA fine-tune (prefect 3.7.6 +
+  > frozen torch), drift→retrain loop all pass on the frozen cu128 stack. GPU pipeline intact.
 
 ## Phase 6 — Cross-cutting regression
 
