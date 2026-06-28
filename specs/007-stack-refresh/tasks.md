@@ -132,11 +132,21 @@ Task IDs continue the shared space (T118+).
 
 ## Phase 3 — Gateway Python refresh (US3, P2) → SC-039
 
-- [ ] **T125** [US3] `gateway/Dockerfile` → `python:3.12-slim`; `gateway/requirements.txt` bump FastAPI
+- [X] **T125** [US3] `gateway/Dockerfile` → `python:3.12-slim`; `gateway/requirements.txt` bump FastAPI
   (`0.138.x`), uvicorn (`0.49.x`), pydantic (`2.13.x`), boto3 (`1.43.x`), prometheus-client (`0.25.x`)
   (httpx already current). Rebuild. (FR-058)
-- [ ] **T126** [P] [US3] Gateway suite green (auth/serving/registry/datasets/monitor/vision/stream/
+  > **DONE (2026-06-28):** Dockerfile `python:3.11-slim`→`3.12-slim`; pinned fastapi `0.138.1`, uvicorn
+  > `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client `0.25.0` (httpx 0.28.1 unchanged).
+  > Rebuilt clean; image smoke confirms python 3.12.13 + all bumped versions + `app.main` import OK.
+- [X] **T126** [P] [US3] Gateway suite green (auth/serving/registry/datasets/monitor/vision/stream/
   tracing); OpenAPI contract + `/metrics` output unchanged. (SC-039)
+  > **DONE (2026-06-28):** **OpenAPI contract byte-identical** (22 paths, same operations + schemas
+  > before/after the FastAPI+pydantic bump). Gateway suite green: auth(+modes)/cli_auth/registry/datasets/
+  > tracing_resilience + serving/stream/vision/tracing rest+stream — 36/36 (no monitor-specific test;
+  > monitor exercised via the drift loop in T122). **Wiring lesson:** a plain `docker compose up -d
+  > gateway` recreates WITHOUT up_all's injected `SERVING_URL/TRAINER_URL/BENTO_URL`, so the gateway falls
+  > back to `host.docker.internal` and can't reach the WSL daemons (daemon tests skip). Re-ran `up_all` to
+  > rewire → daemon tests pass. **Always rewire via up_all after recreating the gateway.** SC-039 met.
 
 ## Phase 4 — UI refresh, stay on Next 15 (US4, P3) → SC-040
 
