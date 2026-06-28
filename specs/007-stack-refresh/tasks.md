@@ -54,6 +54,15 @@ Task IDs continue the shared space (T118+).
 > Recreated minio — running, WebUI on :9001, miniodata intact (models 15 / datasets 18 / mlflow 35
 > objects), foundation+exposure+datasets green. (mc client not flagged — left on Docker Hub.)
 >
+> **Codex re-review (round 4, 1× P1) — addressed:** (6) claimed the hotfix is "not a published
+> `quay.io/minio/minio` container tag." **Empirically false** — `docker pull` succeeded, `docker manifest
+> inspect` returns a published OCI image index with an amd64/linux manifest, and the container runs on it.
+> But the underlying reproducibility concern is fair, so **re-pinned BY DIGEST** (the strongest fix, even
+> though the spec preferred tags — justified exception when a tag's stability is questioned):
+> `quay.io/minio/minio@sha256:cf3dadcfa1fb0324f43958bad1abba986d53c4ecc04d4d50b46c7dcda28bd3cd` (immutable,
+> content-addressed, guaranteed resolution). Recreated minio from the digest — running, buckets ready,
+> foundation+exposure+datasets green.
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.

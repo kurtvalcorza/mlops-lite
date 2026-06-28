@@ -24,11 +24,13 @@ services:
       retries: 12
 
   minio:
-    # 007 US2: pinned (was :latest). Uses the quay.io HOTFIX of the 2025-09-07 release — Docker Hub's
-    # minio/minio froze at the un-patched 2025-09-07 tag, and the hotfix backports security fixes incl.
-    # CVE-2025-62506 (session-policy bypass) on the same release line (go1.26.1, Apr-2026 build, console
-    # retained). Codex P2, PR#3. Same behavior as the validated 2025-09-07, just patched.
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
+    # 007 US2: pinned (was :latest). MinIO CVE-2025-62506 (session-policy bypass) is unpatched on Docker
+    # Hub's frozen 2025-09-07 tag; the fix ships as the quay.io hotfix of that release
+    # (RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 — go1.26.1, Apr-2026, console retained). Pinned BY
+    # DIGEST (not the hotfix tag) for immutability + guaranteed resolution on a fresh host — `docker
+    # manifest inspect` confirms this digest (the hotfix's amd64 manifest list) is published on quay.
+    # Codex P1/P2, PR#3. Same behavior as the validated 2025-09-07, just patched.
+    image: quay.io/minio/minio@sha256:cf3dadcfa1fb0324f43958bad1abba986d53c4ecc04d4d50b46c7dcda28bd3cd
     command: server /data --console-address ":9001"
     environment:
       # Secrets — no shipped minioadmin/minioadmin defaults (FR-017). Run scripts/gen_secrets.
