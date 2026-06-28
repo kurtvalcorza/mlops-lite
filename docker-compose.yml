@@ -142,7 +142,10 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
-    image: grafana/grafana:13.1.0  # 007 US2: pin (was :latest, captured T118)
+    # 007 US2: pinned (was :latest). `grafana/grafana:13.1.0` IS a published Docker Hub tag (verified by a
+    # clean untag+re-pull), but pinned BY DIGEST for immutability + to make the "is this tag published"
+    # question moot (mirrors the MinIO digest pin). Digest = the 13.1.0 manifest list. Codex P1, PR#3.
+    image: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       # Secret — no shipped admin/admin default (FR-017). Run scripts/gen_secrets.

@@ -86,6 +86,13 @@ Task IDs continue the shared space (T118+).
 > 19.2.x — independent versioning, nothing to align), up_all warning-not-exit (correct: gateway
 > /platform/health is the hard gate).
 >
+> **Codex re-review (round 6, 1× P1) — addressed:** claimed `grafana/grafana:13.1.0` is "not a published
+> Docker Hub tag." **Empirically false** — untagged it locally and re-pulled fresh from docker.io
+> (`Status: Downloaded newer image for grafana/grafana:13.1.0`, exit 0), so a clean-host `compose pull`
+> succeeds. Same false-positive pattern as the round-4 MinIO P1. Pinned grafana **by digest**
+> (`sha256:121a7a9e…`, the 13.1.0 manifest list) anyway — verified-published but immutable, making the
+> "is it published" question moot. Recreated grafana from the digest: running, `/api/health` OK.
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.
