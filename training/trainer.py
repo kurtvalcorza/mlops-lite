@@ -32,6 +32,10 @@ TRAINER_PORT = int(os.getenv("TRAINER_PORT", "8091"))
 SUPERVISOR_URL = os.getenv("SUPERVISOR_URL", "http://localhost:8090")
 VRAM_GB = float(os.getenv("VRAM_GB", "12"))
 LEASE_TENANT = "training"          # this daemon's GPU lease identity (008 US1)
+# Conservative VRAM floor for a LoRA run (base model + adapters + optimizer state). Not an exact
+# estimate — just enough that the lease's live-VRAM gate refuses a start when the GPU is already
+# mostly consumed (e.g. a leftover CUDA context), instead of letting the worker hit CUDA OOM (#11).
+TRAIN_EST_GB = float(os.getenv("TRAIN_EST_GB", "2.0"))
 
 _lock = threading.Lock()           # one run at a time
 _runs: dict = {}                   # run_id -> job record
@@ -142,13 +146,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": f"trainer busy with run {_active}"})
             # 008 US1: acquire the single race-free GPU lease (FR-062) — this *subsumes* the old
             # `_serving_resident()` HTTP poll, refusing atomically (no TOCTOU window) while another
-            # tenant (serving/vision) holds the slot, with the same 409 "GPU busy" semantics.
+            # tenant (serving/vision) holds the slot, with the same 409 "GPU busy" semantics. The
+            # est_gb floor applies the live-VRAM gate so a mostly-consumed GPU refuses the start
+            # (507) instead of the worker hitting CUDA OOM mid-run (Codex #11).
             try:
-                gpu_lease.acquire(LEASE_TENANT)
+                gpu_lease.acquire(LEASE_TENANT, est_gb=TRAIN_EST_GB, vram_budget_gb=VRAM_GB)
             except gpu_lease.LeaseHeld as e:
                 holder = (e.holder or {}).get("tenant", "another GPU tenant")
                 return self._send(409, {"error": f"GPU busy: {holder} holds the GPU "
                                                  "(one-model-in-VRAM). Let it idle out, then retry."})
+            except gpu_lease.VramExceeded as e:
+                return self._send(507, {"error": str(e)})
             run_id = uuid.uuid4().hex[:12]
             _runs[run_id] = {"run_id": run_id, "status": "queued", "request": req,
                              "mlflow_run_id": None, "model": None, "metrics": None, "error": None}

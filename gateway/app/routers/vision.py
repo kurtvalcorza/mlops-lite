@@ -40,8 +40,16 @@ async def classify(req: ClassifyRequest):
     if r.status_code != 200:
         VISION_REQUESTS.labels(status="error").inc()
         raise HTTPException(status_code=502, detail=f"vision service error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    if isinstance(data, dict) and data.get("busy"):
+        # Expected GPU-lease contention (008 FR-067): the bento returns a structured busy marker
+        # (200) rather than a 5xx (whose message BentoML masks). Surface the documented 409 GPU-busy
+        # with the actionable hint, so stale-UI / direct-API clients get a clean refusal (Codex #6).
+        VISION_REQUESTS.labels(status="busy").inc()
+        raise HTTPException(status_code=409,
+                            detail=data.get("detail", "GPU busy — free the GPU and retry"))
     VISION_REQUESTS.labels(status="ok").inc()
-    return r.json()
+    return data
 
 
 @router.get("/vision/health")
