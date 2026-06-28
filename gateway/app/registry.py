@@ -5,7 +5,7 @@ them, and promote one to the **serving** position. Promotion uses MLflow *aliase
 (the modern, non-deprecated mechanism) rather than the legacy stage transitions, so a
 single named alias (`serving`) always points at the version US1 should resolve.
 
-The MLflow server version is pinned in infra/mlflow (2.18.0); this client matches it.
+The MLflow server version is pinned in infra/mlflow (3.14.0, 007 US1); this client matches it.
 """
 import os
 from typing import Optional

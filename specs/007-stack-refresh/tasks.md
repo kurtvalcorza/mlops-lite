@@ -51,10 +51,16 @@ Task IDs continue the shared space (T118+).
 
 ## Phase 0 — Pre-flight (gates everything)
 
-- [ ] **T118** [US1] Confirm `mlflow==3.14.0` and `mlflow-skinny==3.14.0` resolve/install clean in the
+- [X] **T118** [US1] Confirm `mlflow==3.14.0` and `mlflow-skinny==3.14.0` resolve/install clean in the
   gateway + mlflow images (dry build). Capture the CURRENT validated image versions (`docker compose
   images`) so US2 can pin them. *(Grilled: fresh-volume migration — NO pgdata snapshot needed; the
   MLflow run/trace history loss is accepted, datasets survive on MinIO.)* (FR-055)
+  > **DONE (2026-06-28):** `mlflow-skinny==3.14.0` + `mlflow==3.14.0` resolve clean on `python:3.12-slim`
+  > (pip `--dry-run`, no resolver conflict). **Captured floating-image pins for T123** (read off the
+  > current local store): `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
+  > `minio/mc:RELEASE.2025-08-13T08-35-41Z`, `prom/prometheus:v3.5.4`, `grafana/grafana:13.1.0`,
+  > `postgres:17.10-alpine` (was `17-alpine`; PG_VERSION=17.10). Stack was down at capture time, so these
+  > are the last-validated pulled versions — confirm still healthy after the clean bring-up at T124.
 
 ## Phase 1 — MLflow 2.18 → 3.x (US1, P1) → SC-036 + SC-038
 
@@ -83,6 +89,9 @@ Task IDs continue the shared space (T118+).
 - [ ] **T123** [US2] `docker-compose.yml`: replace `:latest` on `minio/minio`, `minio/mc`,
   `prom/prometheus`, `grafana/grafana` (and pin the Postgres minor) with the validated versions captured
   at T118 / after a clean bring-up. Note each pin's source in a comment. (FR-056)
+  > **Pins captured at T118 (2026-06-28):** `minio/minio:RELEASE.2025-09-07T16-13-09Z` ·
+  > `minio/mc:RELEASE.2025-08-13T08-35-41Z` · `prom/prometheus:v3.5.4` · `grafana/grafana:13.1.0` ·
+  > `postgres:17-alpine`→`postgres:17.10-alpine`.
 - [ ] **T124** [P] [US2] Clean `up_all`; `test_foundation` + `test_exposure` green (pins are healthy +
   loopback-bound). (SC-037)
 
