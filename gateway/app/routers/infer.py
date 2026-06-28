@@ -45,8 +45,10 @@ async def infer(req: InferRequest):
     start_ns = time.time_ns()
     result = None
     registry_version = None
-    trace_status = "OK"
-    outcome = "completed"
+    # Pessimistic default: any UNEXPECTED failure (e.g. a malformed supervisor response) keeps the trace
+    # errored — only the known-good path flips it to OK just before returning (006 Codex review).
+    trace_status = "ERROR"
+    outcome = "error"
     try:
         if not await health():
             INFER_REQUESTS.labels(status="unavailable").inc()
@@ -68,6 +70,7 @@ async def infer(req: InferRequest):
         INFER_LATENCY.observe(result.get("infer_ms", 0) / 1000.0)
         INFER_REQUESTS.labels(status="ok").inc()
         registry_version = await _resolve_serving_version()
+        trace_status, outcome = "OK", "completed"  # success is known — flip the pessimistic default
         return {
             "status": "completed",
             "registry_model": SERVING_MODEL,

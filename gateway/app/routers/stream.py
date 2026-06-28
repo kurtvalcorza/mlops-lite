@@ -56,7 +56,9 @@ async def infer_stream(req: StreamRequest):
         # mutex) and emitted fire-and-forget in the finally. The SSE bytes are an untouched passthrough.
         start_ns = time.time_ns()
         frames = 0
-        trace_status, outcome, error_detail = "OK", "completed", None
+        # Pessimistic default: an unexpected mid-stream failure leaves the trace errored — only a fully
+        # delivered stream flips it to OK below (parity with REST /infer; 006 Codex review).
+        trace_status, outcome, error_detail = "ERROR", "error", None
         try:
             # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
             async with serving._gpu_lock:
@@ -78,6 +80,7 @@ async def infer_stream(req: StreamRequest):
                             async for chunk in r.aiter_raw():
                                 frames += chunk.count(b"data:")
                                 yield chunk
+                            trace_status, outcome = "OK", "completed"  # full stream delivered
                 except httpx.HTTPError as e:
                     trace_status, outcome, error_detail = "ERROR", "error", f"serving unreachable: {e}"
                     yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})

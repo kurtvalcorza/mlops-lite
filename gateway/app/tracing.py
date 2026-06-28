@@ -60,8 +60,17 @@ _MAX_PENDING = 64  # backpressure: drop traces rather than grow unbounded when M
 _tasks: set = set()
 
 
+def _silence_span_warning() -> None:
+    """Mute the benign 2.18 `'MlflowSpanProcessor' object has no attribute '_metrics'` AttributeError
+    logged on span-end (the trace still exports) — it surfaces via the tracing loggers AND the
+    tracking-client logger. Must be REAPPLIED after the lazy `import mlflow`: MLflow's import resets
+    these levels, so setting them only at module-import time wouldn't stick (006 Codex review)."""
+    for _name in ("mlflow.tracing.fluent", "mlflow.tracing.export.mlflow", "mlflow.tracking.client"):
+        logging.getLogger(_name).setLevel(logging.ERROR)
+
+
 def _configure() -> None:
-    """Import-time, network-free setup: fast-fail HTTP backstop + silence the cosmetic warning."""
+    """Import-time, network-free setup: silence the cosmetic 2.18 span-end warning."""
     if not _ENABLED:
         logger.info("inference tracing DISABLED (MLFLOW_TRACING_ENABLED is falsy)")
         return
@@ -70,13 +79,7 @@ def _configure() -> None:
     # /models, promotion, and _resolve_serving_version, which must keep MLflow's robust default
     # timeout/retries). The exporter is bounded instead by its own dedicated _EXPORT_POOL, so a slow
     # MLflow can't pin request threads or change registry behavior (006 Codex review).
-    # The skinny 2.18 span processor logs a benign `'MlflowSpanProcessor' object has no attribute
-    # '_metrics'` AttributeError on span-end (the trace still exports). On 2.18 it surfaces via the
-    # tracking-client logger as well as the tracing loggers, so silence all three to keep the gateway
-    # logs clean during normal inference.
-    logging.getLogger("mlflow.tracing.fluent").setLevel(logging.ERROR)
-    logging.getLogger("mlflow.tracing.export.mlflow").setLevel(logging.ERROR)
-    logging.getLogger("mlflow.tracking.client").setLevel(logging.ERROR)
+    _silence_span_warning()  # reapplied after the lazy MLflow import too (see _ensure_client)
     logger.info("inference tracing ENABLED (experiment=%s, capture_io=%s) — client inits lazily",
                 EXPERIMENT, _CAPTURE_IO)
 
@@ -111,6 +114,7 @@ def _ensure_client():
             import mlflow
             from mlflow import MlflowClient
 
+            _silence_span_warning()  # MLflow's import resets these loggers — reapply (006 Codex review)
             mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
             exp = mlflow.set_experiment(EXPERIMENT)
             _experiment_id = exp.experiment_id
