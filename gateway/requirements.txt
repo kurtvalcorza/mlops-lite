@@ -1,0 +1,8 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+prometheus-client==0.21.1
+httpx==0.28.1
+# Registry client only (no server/UI deps) — matches the MLflow server pinned in infra/mlflow.
+mlflow-skinny==2.18.0
+# S3 client for the MinIO-backed dataset registry (US3). Matches infra/mlflow's boto3.
+boto3==1.35.99

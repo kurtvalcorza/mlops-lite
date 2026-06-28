@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['gateway:8000']
+
+  # The serving supervisor (:8090) and training daemon (:8091) run NATIVELY in WSL and each
+  # expose /metrics, but they sit outside the container engine on a dynamic distro IP — a direct
+  # scrape would be fragile. Instead the gateway polls their /health on each scrape and re-exports
+  # their GPU/state as `mlops_gpu_free_mib`, `mlops_serving_resident`, `mlops_trainer_busy`,
+  # `mlops_serving_up`, `mlops_trainer_up` (see gateway/app/platform_metrics.py) — so every
+  # service's signal reaches Prometheus through the one gateway target above. (T043)

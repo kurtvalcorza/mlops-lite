@@ -1,0 +1,11 @@
+# Local secrets (T046/T061, FR-017) — never commit. .env.example is the documented template.
+.env
+.env.local
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/

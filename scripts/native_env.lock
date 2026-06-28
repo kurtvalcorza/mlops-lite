@@ -1,0 +1,20 @@
+# Native WSL execution environment — exact versions (002 US4, T058 / Principle VI reproducibility).
+# These pin the GPU-specific torch-family wheels that requirements.txt intentionally leaves to the
+# CUDA index, so a clean machine reproduces the verified environment. Installed into ~/mlops-train
+# by scripts/bootstrap.sh. Reference hardware: RTX 5070 Ti Laptop (Blackwell, capability sm_120).
+#
+# CUDA wheel index for all torch-family packages:
+#   --index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+
+# The remaining native deps are pinned in the per-component requirements files:
+#   training/requirements.txt   -> transformers==4.46.3 peft==0.13.2 accelerate==1.1.1
+#                                  datasets==3.1.0 safetensors==0.4.5 sentencepiece==0.2.0
+#                                  protobuf==5.29.1 mlflow-skinny==2.18.0 boto3==1.35.99 prefect==3.1.4
+#   serving/bento/requirements.txt -> bentoml==1.4.39 pillow==11.0.0
+#
+# Operator console (003 UI) — Node/UI tier (004 US2, T087). bootstrap.sh enforces a Node floor and
+# runs `npm ci` against ui/package-lock.json (the exact JS dep tree is pinned there, not here).
+#   node >= 20 LTS        (Node gate in bootstrap.sh; verified on Node 22.x)
+#   next == 15.5.19       (patched past CVE-2025-66478; full tree in ui/package-lock.json)

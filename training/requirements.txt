@@ -1,0 +1,16 @@
+# Native WSL training env (hybrid GPU). torch is installed separately from the CUDA index
+# (Blackwell sm_120 → cu128 wheels), so it is intentionally NOT pinned here:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+transformers==4.46.3
+peft==0.13.2
+accelerate==1.1.1
+datasets==3.1.0
+safetensors==0.4.5
+# Vocab handling for HF->GGUF base conversion (Qwen tokenizer) + its protobuf dep.
+sentencepiece==0.2.0
+protobuf==5.29.1
+# Tracking + registry client (matches the MLflow server) and S3 for artifact upload.
+mlflow-skinny==2.18.0
+boto3==1.35.99
+# Flow structure (ephemeral — no Prefect server runs; see training/flows/finetune.py).
+prefect==3.1.4

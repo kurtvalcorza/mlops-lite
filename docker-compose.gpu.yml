@@ -1,0 +1,16 @@
+# GPU override — applied with: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Adds the NVIDIA device reservation to GPU-bound services (serving/training), introduced in
+# Phase 3+. Requires the container engine to expose the `nvidia` runtime (see scripts/gpu_check.sh).
+# Placeholder until those services exist; documents the intended reservation shape.
+
+services:
+  # Example reservation shape (uncomment when the serving service is added in Phase 3):
+  # ollama:
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  {}

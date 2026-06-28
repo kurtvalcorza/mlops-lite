@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Terminal / man-page tokens (design-language.md). Chrome stays monochrome; status color is the
+   only departure, and only on status elements. No shadows, no gradients. */
+:root {
+  --canvas: #fdfcfc;
+  --ink: #201d1d;
+  --body: #424245;
+  --mute: #646262;
+  --ash: #9a9898;
+
+  --surface-soft: #f8f7f7;
+  --surface-card: #f1eeee;
+  --surface-dark: #201d1d;
+  --surface-dark-elevated: #302c2c;
+
+  --hairline: rgba(15, 0, 0, 0.12);
+
+  /* Apple-HIG semantic ramp — reserved for operator status (inverted-semantic rule). */
+  --accent: #007aff;
+  --success: #30d158;
+  --warning: #ff9f0a;
+  --danger: #ff3b30;
+}
+
+html,
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hairline-on-cream is the default elevation; the dark console is the only "raised" surface. */
+.hairline {
+  border: 1px solid var(--hairline);
+}
+
+/* Status bracket glyphs ([+] [-] [x] [✓] [~] [!]) carry meaning; color them via these classes. */
+.st-success { color: var(--success); }
+.st-danger { color: var(--danger); }
+.st-warning { color: var(--warning); }
+.st-accent { color: var(--accent); }
+.st-mute { color: var(--mute); }
+
+/* The one dark surface — streaming console (Infer) / live log (Runs). */
+.console {
+  background: var(--surface-dark);
+  color: #e8e6e6;
+}
+.console .console-elevated {
+  background: var(--surface-dark-elevated);
+}
+
+/* Blinking cursor for the live stream tail. */
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.cursor::after {
+  content: '\2588';
+  animation: blink 1s steps(1) infinite;
+  color: var(--accent);
+}

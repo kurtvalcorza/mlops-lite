@@ -1,0 +1,81 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "title": "MLOps-Lite Platform",
+  "uid": "mlops-lite",
+  "tags": ["mlops-lite"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Gateway up",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [
+        { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+      ], "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "up{job=\"gateway\"}", "refId": "A" } ]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Dataset drift (last check)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [
+        { "type": "value", "options": { "0": { "text": "stable", "color": "green" }, "1": { "text": "DRIFT", "color": "red" } } }
+      ], "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "targets": [ { "expr": "gateway_dataset_drift", "refId": "A" } ]
+    },
+    {
+      "id": 3, "type": "gauge", "title": "Max PSI drift score",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "thresholds": { "steps": [
+        { "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.25 }
+      ] } }, "overrides": [] },
+      "targets": [ { "expr": "gateway_drift_score", "refId": "A" } ]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Retrain triggers",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
+      "targets": [ { "expr": "sum(gateway_retrain_triggers_total{result=\"launched\"})", "refId": "A" } ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Inference latency (avg, excl. cold start)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [ { "expr": "rate(gateway_infer_latency_seconds_sum[5m]) / clamp_min(rate(gateway_infer_latency_seconds_count[5m]), 1)", "refId": "A", "legendFormat": "avg infer s" } ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Gateway request rate by route",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [ { "expr": "sum by (route) (rate(gateway_requests_total[5m]))", "refId": "A", "legendFormat": "{{route}}" } ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "GPU free memory (MiB)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "decmbytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [ { "expr": "mlops_gpu_free_mib", "refId": "A", "legendFormat": "free MiB" } ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "GPU occupancy (serving resident / training busy)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "custom": { "drawStyle": "line", "fillOpacity": 20, "stepBefore": true } }, "overrides": [] },
+      "targets": [
+        { "expr": "mlops_serving_resident", "refId": "A", "legendFormat": "serving resident" },
+        { "expr": "mlops_trainer_busy", "refId": "B", "legendFormat": "training busy" }
+      ]
+    }
+  ]
+}

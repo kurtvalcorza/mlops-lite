@@ -1,0 +1,150 @@
+name: mlops-lite
+
+# Phase 1–2 foundational stack: Postgres + MinIO + MLflow (registry) + gateway + observability.
+# GPU services (serving/training) are added later via docker-compose.gpu.yml.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mlops}
+      # Secret — no inline default; bring-up fails fast if unset (FR-017). Run scripts/gen_secrets.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (run scripts/gen_secrets)}"
+      POSTGRES_DB: ${POSTGRES_DB:-mlflow}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mlops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      # Secrets — no shipped minioadmin/minioadmin defaults (FR-017). Run scripts/gen_secrets.
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
+    volumes:
+      - miniodata:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
+  # One-shot: create the platform buckets, then exit (T008).
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
+        echo 'waiting for minio...'; sleep 2;
+      done;
+      mc mb -p local/datasets local/models local/results local/mlflow;
+      echo 'buckets ready';
+      "
+
+  mlflow:
+    build: ./infra/mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
+      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
+      AWS_DEFAULT_REGION: us-east-1
+    command: >
+      mlflow server
+      --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER:-mlops}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow
+      --serve-artifacts
+    ports:
+      - "${MLFLOW_PORT:-5500}:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  gateway:
+    build: ./gateway
+    depends_on:
+      mlflow:
+        condition: service_started
+      createbuckets:
+        condition: service_completed_successfully
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # API-key auth (US1, FR-016). Comma-separated keys; empty => gateway runs OPEN with a
+      # warning. scripts/gen_secrets provisions one so the hardened path is always authenticated.
+      GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-}
+      # Native serving supervisor on the WSL GPU host (hybrid GPU). serve_up.ps1 injects the
+      # Ubuntu IP since host.docker.internal can't cross WSL distros.
+      SERVING_URL: ${SERVING_URL:-http://host.docker.internal:8090}
+      SERVING_MODEL: ${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}
+      # Native training daemon on the WSL GPU host (US4). serve_up.ps1 injects the Ubuntu IP.
+      TRAINER_URL: ${TRAINER_URL:-http://host.docker.internal:8091}
+      # Native BentoML vision service (US1 vision/audio, CPU). serve_up.ps1 injects the Ubuntu IP.
+      BENTO_URL: ${BENTO_URL:-http://host.docker.internal:8092}
+      # MinIO/S3 for the dataset registry (US3).
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
+      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
+      AWS_DEFAULT_REGION: us-east-1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${GATEWAY_PORT:-8080}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      # Secret — no shipped admin/admin default (FR-017). Run scripts/gen_secrets.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env (run scripts/gen_secrets)}"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # Allow the operator console (003 US2) to embed dashboard panels via iframe. Anonymous view is
+      # already on; this drops the X-Frame-Options deny so localhost framing works (FR-029).
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      # 004 US1 (FR-036): scope the embed so ONLY the console origin may frame Grafana — Grafana's own
+      # CSP frame-ancestors limited to http://localhost:3000, not the blanket allow-any that
+      # allow_embedding alone leaves. (Grafana is anonymous + read-only, but this closes clickjacking.)
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
+      GF_SECURITY_CONTENT_SECURITY_POLICY_TEMPLATE: "frame-ancestors 'self' http://localhost:3000 http://127.0.0.1:3000;"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata:
+  miniodata:
+  grafanadata:

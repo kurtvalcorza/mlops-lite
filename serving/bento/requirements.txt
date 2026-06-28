@@ -1,0 +1,6 @@
+# BentoML vision service (T022) — installed into the native WSL training venv (~/mlops-train),
+# which already has torch (cu128). torchvision must come from the same CUDA index as torch:
+#   pip install torchvision --index-url https://download.pytorch.org/whl/cu128
+bentoml==1.4.39
+pillow==11.0.0
+# torchvision (pinned separately, CUDA index): torchvision==0.26.0+cu128
