@@ -64,25 +64,55 @@ Task IDs continue the shared space (T118+).
 
 ## Phase 1 — MLflow 2.18 → 3.x (US1, P1) → SC-036 + SC-038
 
-- [ ] **T119** [US1] Bump MLflow to `3.14.0` everywhere, same version: `infra/mlflow/Dockerfile`
+- [X] **T119** [US1] Bump MLflow to `3.14.0` everywhere, same version: `infra/mlflow/Dockerfile`
   (`mlflow==3.14.0` + psycopg2/boto3 minors), `gateway/requirements.txt` + `training/requirements.txt`
   (`mlflow-skinny==3.14.0`). Rebuild the gateway + mlflow images. *(Keep this gateway rebuild SEPARATE
   from US3's Python/dep bump — grilled.)* (FR-055)
-- [ ] **T120** [US1] **Fresh backend** (grilled): drop the `pgdata` volume so the 3.x server inits a clean
+  > **DONE (2026-06-28):** server (`mlflow==3.14.0`) + both skinny clients bumped; psycopg2/boto3 left at
+  > validated minors. Gateway+mlflow images rebuilt clean; built-image smoke confirms mlflow 3.14.0 +
+  > `start_span_no_context` present + `MlflowClient` imports. **Native venv gotcha:** re-running
+  > `pip install -r training/requirements.txt` re-resolved `datasets==3.1.0`'s `fsspec<=2024.9.0` cap and
+  > downgraded fsspec `2026.6.0→2024.9.0`, breaking `bentoml 1.4.39` (needs `fsspec>=2025.7.0`). Pinned
+  > fsspec back to the validated **2026.6.0** (bentoml-happy; datasets' cap is the same benign pre-007
+  > violation). All of mlflow/datasets/bentoml/torch/transformers/peft import; `torch.cuda True`.
+- [X] **T120** [US1] **Fresh backend** (grilled): drop the `pgdata` volume so the 3.x server inits a clean
   store (sidesteps the schema migration + the Postgres-password rotation gotcha). **Re-seed essentials**
   so the platform resolves again: re-register + promote the serving LLM (`qwen2.5-7b` → `@serving`) and
   run `scripts/seed_vision_model.py`. Datasets need no re-seed (content-addressed on MinIO). Old
   experiment artifacts in the MinIO `mlflow` bucket are left orphaned (harmless). (FR-055)
-- [ ] **T121** [US1] Port `gateway/app/tracing.py` to the non-deprecated 3.x tracing API — verified shape:
+  > **DONE (2026-06-28):** dropped ONLY `mlops-lite_pgdata` (miniodata + grafanadata preserved). Brought
+  > the stack up (up_all) — fresh postgres + MLflow 3.14, all 4 native daemons healthy. Re-seeded: vision
+  > `vision-mobilenet` v1, and LLM `qwen2.5-7b-instruct-q4_k_m` v1 → `@serving` (verified `/models`).
+  > **Two 3.x migration changes had to be handled (NOT in the original spec):**
+  > 1. **DNS-rebinding Host-header validation** — MLflow 3.x rejects the gateway's `Host: mlflow:5000`
+  >    with `403 Invalid Host header`. Fixed by adding `--allowed-hosts mlflow:5000,localhost:5000,
+  >    127.0.0.1:5000,localhost:${MLFLOW_PORT},127.0.0.1:${MLFLOW_PORT}` to the mlflow server command
+  >    (`MLFLOW_SERVER_ALLOWED_HOSTS`). The in-container healthcheck (`localhost:5000`) must be covered.
+  > 2. **Stricter model-version source validation** — 3.x rejects a local `file://` source unless tied to
+  >    a run's artifact dir. The LLM registry entry is a routing pointer (weights served locally by
+  >    llama.cpp; `/infer` never reads `source`), so it's registered with an `s3://`-scheme pointer
+  >    (`s3://models/llm/qwen2.5-7b-instruct-q4_k_m/Q4_K_M.gguf`), mirroring how vision's `s3://` source
+  >    is accepted. No object is required (MLflow doesn't fetch it at registration).
+- [X] **T121** [US1] Port `gateway/app/tracing.py` to the non-deprecated 3.x tracing API — verified shape:
   `span = mlflow.start_span_no_context(name, inputs=…, attributes=…, start_time_ns=…, experiment_id=…)`
   then `span.end(end_time_ns=…)` (set outputs/status on the span). Preserve fire-and-forget, fail-open,
   span-outside-`_gpu_lock`, frame-count, lazy worker-thread init, and the
   `MLFLOW_TRACING_ENABLED`/`MLFLOW_TRACE_CAPTURE_IO` toggles + container passthrough exactly. (FR-057)
-- [ ] **T122** [P] [US1] Re-validate on the 3.x server: `test_serving` / `test_registry` /
+  > **DONE (2026-06-28):** ported `_emit_sync` to `mlflow.start_span_no_context(...)` + `span.end(outputs,
+  > status, end_time_ns)`; dropped the held `MlflowClient` (`_client`→lazily-imported `_mlflow` module).
+  > Offline contract checks (toggles + disabled-no-op + fail-open) green; live `test_tracing_rest` +
+  > `test_tracing_stream` confirm REST + stream traces land via the 3.x API with SSE passthrough intact.
+- [X] **T122** [P] [US1] Re-validate on the 3.x server: `test_serving` / `test_registry` /
   `test_datasets` / `test_finetune` / `test_drift_loop` + `test_tracing_rest` / `test_tracing_stream` /
   `test_tracing_resilience`; confirm the re-seeded registry resolves (serving `@serving` + vision),
   datasets are intact on MinIO, and traces land via the 3.x API (prior run/trace history intentionally
   not carried over). (SC-036, SC-038)
+  > **DONE (2026-06-28) — 20/20 green on the migrated 3.14 stack.** First batch 18 passed (registry,
+  > serving, datasets, tracing rest+stream+resilience). finetune+drift initially 409'd on the
+  > one-model-in-VRAM mutex (serving still resident from the tracing `/infer`s) — **expected, not a
+  > regression**; after serving idle-released VRAM both passed (2/2). Confirms SC-036 (registry/datasets/
+  > training/drift/tracing unchanged on 3.x) + SC-038 (tracing on `start_span_no_context`, REST+stream
+  > intact). Trainer logged to MLflow 3.14 via the bumped skinny client (no version skew).
 
 ## Phase 2 — Pin floating images (US2, P1) → SC-037
 

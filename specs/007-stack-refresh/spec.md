@@ -159,6 +159,17 @@ fine-tune + drift loop (`test_finetune`, `test_drift_loop`) still pass on the fr
   deprecated shim (FR-057).
 - **Skinny/server version skew**: all MLflow clients and the server MUST be the **same** 3.x version —
   a 2.18 client against a 3.x server (or vice-versa) is unsupported (FR-055).
+- **3.x server hardening (discovered at build)**: MLflow 3.x ships two new validations the gateway
+  trips on. (a) **DNS-rebinding Host-header check** — the server `403`s requests whose `Host` isn't
+  allowlisted, including the gateway's `Host: mlflow:5000`; the server MUST run with `--allowed-hosts`
+  (`MLFLOW_SERVER_ALLOWED_HOSTS`) covering `mlflow:5000`, the in-container healthcheck `localhost:5000`,
+  and the published `localhost:${MLFLOW_PORT}` / `127.0.0.1:${MLFLOW_PORT}`. (b) **Model-version source
+  validation** — a local `file://` source is rejected unless tied to a run's artifact dir; the serving
+  LLM's registry entry is a routing pointer (llama.cpp serves the GGUF locally; `/infer` never reads
+  `source`), so it is registered with an `s3://`-scheme pointer like the vision model (FR-055).
+- **GPU mutex on re-validation**: `test_finetune`/`test_drift_loop` `409` if a serving `/infer` (e.g. the
+  tracing smokes) left the LLM resident — the one-model-in-VRAM mutex (Principle II), not a regression;
+  re-run after serving idle-releases VRAM (~120s).
 - **Frozen GPU stack**: any transitive pull that would move torch/transformers/peft is a violation —
   the bumps in US3/US5 must not perturb the cu128 torch family (FR-060).
 - **Pinned-image drift**: pins must be the *validated* versions, captured after a clean bring-up — not

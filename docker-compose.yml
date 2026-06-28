@@ -73,6 +73,7 @@ services:
       --backend-store-uri postgresql://${POSTGRES_USER:-mlops}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/mlflow
       --artifacts-destination s3://mlflow
       --serve-artifacts
+      --allowed-hosts mlflow:5000,localhost:5000,127.0.0.1:5000,localhost:${MLFLOW_PORT:-5500},127.0.0.1:${MLFLOW_PORT:-5500}
     ports:
       # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
       - "${BIND_ADDR:-127.0.0.1}:${MLFLOW_PORT:-5500}:5000"
