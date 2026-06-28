@@ -150,11 +150,19 @@ Task IDs continue the shared space (T118+).
 
 ## Phase 4 — UI refresh, stay on Next 15 (US4, P3) → SC-040
 
-- [ ] **T127** [US4] `ui/package.json` → latest **Next 15.x** + React `19.2.x` + tooling (TypeScript,
+- [X] **T127** [US4] `ui/package.json` → latest **Next 15.x** + React `19.2.x` + tooling (TypeScript,
   Tailwind, PostCSS, autoprefixer, `@types/*`); `npm install` to refresh `package-lock.json`;
   `next build`; bounce the `ui` daemon (`pkill -f '[n]ext-server'`, supervisor restarts). NOT Next 16. (FR-059)
-- [ ] **T128** [P] [US4] `test_ui_security` / `test_ui_smoke` / `test_ui_resilience` green; six tabs +
+  > **DONE (2026-06-28):** **Next stays `15.5.19` — already the latest 15.x** (bumped for the CVE in 004),
+  > so no Next move. React/react-dom `19.0.0`→`19.2.7`; tooling: @types/node `22.20.0`, @types/react
+  > `19.2.17`, @types/react-dom `19.2.3`, typescript `5.9.3`, tailwindcss `3.4.19` (stay on 3.x, not 4),
+  > postcss `8.5.15`, autoprefixer `10.5.2`. `npm install` refreshed `package-lock.json`; `next build`
+  > clean (all 6 tabs + BFF routes); ui daemon bounced → supervisor restarted next-server v15.5.19.
+- [X] **T128** [P] [US4] `test_ui_security` / `test_ui_smoke` / `test_ui_resilience` green; six tabs +
   BFF contract (allowlist, origin guard, `[::1]`, non-leaky errors, key absent from payloads) unchanged. (SC-040)
+  > **DONE (2026-06-28):** 3/3 green — security + smoke + resilience all pass on the refreshed UI; six tabs
+  > render and the BFF contract (allowlist, origin guard, `[::1]`, non-leaky errors, key never in payloads)
+  > is unchanged. SC-040 met.
 
 ## Phase 5 — Safe native (non-GPU) bumps (US5, P3) → SC-041
 
