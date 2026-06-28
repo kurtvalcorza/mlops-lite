@@ -56,8 +56,10 @@ async def infer_stream(req: StreamRequest):
         # mutex) and emitted fire-and-forget in the finally. The SSE bytes are an untouched passthrough.
         start_ns = time.time_ns()
         frames = 0
-        # Pessimistic default: an unexpected mid-stream failure leaves the trace errored — only a fully
-        # delivered stream flips it to OK below (parity with REST /infer; 006 Codex review).
+        saw_done = False
+        # Pessimistic default: an unexpected mid-stream failure leaves the trace errored — only a stream
+        # that delivered the terminal `done` frame flips it to OK below (parity with REST /infer; 006
+        # Codex review).
         trace_status, outcome, error_detail = "ERROR", "error", None
         try:
             # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
@@ -79,8 +81,16 @@ async def infer_stream(req: StreamRequest):
                             # stay byte-identical (FR-050).
                             async for chunk in r.aiter_raw():
                                 frames += chunk.count(b"data:")
+                                if b'"event": "done"' in chunk:
+                                    saw_done = True
                                 yield chunk
-                            trace_status, outcome = "OK", "completed"  # full stream delivered
+                            # aiter_raw ending != success: the supervisor can close the response
+                            # mid-stream on a backend failure with no error frame, so only a delivered
+                            # terminal `done` frame proves a complete stream (006 Codex review).
+                            if saw_done:
+                                trace_status, outcome = "OK", "completed"
+                            else:
+                                outcome, error_detail = "truncated", "stream closed before done frame"
                 except httpx.HTTPError as e:
                     trace_status, outcome, error_detail = "ERROR", "error", f"serving unreachable: {e}"
                     yield _sse({"event": "error", "detail": f"serving unreachable: {e}"})

@@ -49,15 +49,16 @@ def wait_for_trace(prompt_substr, timeout=25):
     Returns the trace dict (status/execution_time_ms/request_metadata/...) or None on timeout —
     accounts for the fire-and-forget export landing a beat after the HTTP response.
     """
-    exp = experiment_id()
-    if exp is None:
-        return None
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            for t in _search(exp):
-                if prompt_substr in (trace_inputs(t) or ""):
-                    return t
+            # Poll for the experiment INSIDE the timeout: on a fresh MLflow the fire-and-forget exporter
+            # may not have created `mlops-lite-inference` yet when /infer returns (006 Codex review).
+            exp = experiment_id()
+            if exp is not None:
+                for t in _search(exp):
+                    if prompt_substr in (trace_inputs(t) or ""):
+                        return t
         except Exception:
             pass
         time.sleep(1)
