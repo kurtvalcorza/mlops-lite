@@ -6,6 +6,9 @@
 /out/
 next-env.d.ts
 
+# typescript incremental build cache
+*.tsbuildinfo
+
 # production
 /build
 

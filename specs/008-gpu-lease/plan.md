@@ -37,7 +37,12 @@ as the gate. The estimate may stay as a *hint* in `/health`, but admission is th
 
 **Lease primitive (GRILLED — atomic lockfile)**: a PID-stamped lockfile on the WSL Ubuntu filesystem,
 acquired via `O_CREAT|O_EXCL` (atomic create), with `os.kill(pid, 0)` stale-holder reclamation on acquire
-(FR-063). It is **cross-process** — the serving supervisor, trainer, and vision are *separate native
+(FR-063). *Implementation note (build):* the read-decide-claim window is serialized by an `fcntl.flock`
+on a persistent sidecar so stale reclamation cannot race (two reclaimers must not both clobber a freshly
+re-acquired holder, which would re-open the very double-hold the lease exists to prevent); the flock also
+auto-releases on a holder's death, a kernel-level backstop to the `os.kill` check. flock + O_EXCL are
+belt-and-suspenders realizations of the same "atomic host lockfile, self-healing" intent — both stdlib, no
+new dep. It is **cross-process** — the serving supervisor, trainer, and vision are *separate native
 processes* that share the WSL filesystem and self-arbitrate via the shared `serving/gpu_lease.py` module;
 no gateway round-trip on the GPU host. *Rejected*: **(b) gateway-brokered token** — the Docker gateway only
 proxies and never touches the GPU, and training is fire-and-forget (the gateway returns while the run
