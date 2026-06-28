@@ -19,12 +19,11 @@ NOT the 3.x `mlflow.start_span_no_context` (absent here) nor the wall-clock `@ml
 Everything is best-effort: any tracing error is swallowed; inference is never affected.
 """
 import asyncio
+import concurrent.futures
 import logging
 import os
 import threading
 import time
-
-from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger("gateway.tracing")
 
@@ -49,8 +48,15 @@ _init_lock = threading.Lock()
 _last_init_monotonic = 0.0
 _INIT_RETRY_SEC = 30.0  # when MLflow is unreachable, retry init at most this often (off-path)
 
-# asyncio holds only weak refs to tasks; keep strong refs so a fire-and-forget emit can't be GC'd
-# mid-export ("Task was destroyed but it is pending") and silently drop the trace.
+# Trace exports run on a DEDICATED thread pool — never FastAPI's shared request threadpool and never the
+# registry client's HTTP path — so a slow/hung MLflow can pin at most these few threads and can NOT alter
+# registry/promotion timeout behavior (the old process-wide MLFLOW_HTTP_* override did, throttling
+# /models + _resolve_serving_version — 006 Codex review).
+_EXPORT_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="trace-export")
+_MAX_PENDING = 64  # backpressure: drop traces rather than grow unbounded when MLflow is slow/backed up
+
+# asyncio only weak-refs run_in_executor futures; keep strong refs so a fire-and-forget emit can't be
+# GC'd mid-export ("Future ... was never retrieved") and silently drop the trace.
 _tasks: set = set()
 
 
@@ -59,11 +65,11 @@ def _configure() -> None:
     if not _ENABLED:
         logger.info("inference tracing DISABLED (MLFLOW_TRACING_ENABLED is falsy)")
         return
-    # Fast-fail HTTP backstop so a slow MLflow can't pin a background worker indefinitely. retries=0;
-    # a few seconds of timeout (the artifact write to MinIO needs >1s when healthy — too short drops
-    # traces even from a live server). This bounds the *worker*, not the request (which is off-path).
-    os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
-    os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
+    # NB: do NOT set MLFLOW_HTTP_REQUEST_TIMEOUT / MLFLOW_HTTP_REQUEST_MAX_RETRIES here — they are
+    # PROCESS-WIDE and would also throttle the registry client (registry.py shares the MLflow stack for
+    # /models, promotion, and _resolve_serving_version, which must keep MLflow's robust default
+    # timeout/retries). The exporter is bounded instead by its own dedicated _EXPORT_POOL, so a slow
+    # MLflow can't pin request threads or change registry behavior (006 Codex review).
     # The skinny 2.18 span processor logs a benign `'MlflowSpanProcessor' object has no attribute
     # '_metrics'` AttributeError on span-end (the trace still exports). On 2.18 it surfaces via the
     # tracking-client logger as well as the tracing loggers, so silence all three to keep the gateway
@@ -148,12 +154,15 @@ def emit(name, *, inputs=None, outputs=None, attributes=None, start_ns, end_ns, 
     """
     if not _ENABLED:
         return
+    if len(_tasks) >= _MAX_PENDING:
+        # Backpressure: MLflow is slow/backed up — drop this trace rather than queue unbounded.
+        return
     try:
-        task = asyncio.create_task(
-            run_in_threadpool(_emit_sync, name, inputs, outputs, attributes, start_ns, end_ns, status)
-        )
-        _tasks.add(task)
-        task.add_done_callback(_tasks.discard)
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(
+            _EXPORT_POOL, _emit_sync, name, inputs, outputs, attributes, start_ns, end_ns, status)
+        _tasks.add(fut)
+        fut.add_done_callback(_tasks.discard)
     except RuntimeError:
         # No running loop (not expected on the request path) — best-effort inline, still swallowed.
         _emit_sync(name, inputs, outputs, attributes, start_ns, end_ns, status)
