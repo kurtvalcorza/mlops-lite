@@ -54,17 +54,24 @@ else
   [ -x "$PY" ] || fail "venv creation failed"
 fi
 
-# 3. Pinned dependencies (idempotent — skip if the core set already imports).
+# 3. Pinned dependencies. Only the torch-family cu128 wheels are expensive, so gate JUST those on import;
+#    the requirements installs ALWAYS run (idempotent + fast when satisfied) so a version bump on an
+#    existing venv actually lands — e.g. 007's mlflow-skinny 3.14 / prefect 3.7.6. A stale native client
+#    against a newer MLflow server is unsupported (FR-055), so this must not be skipped.
 echo "[3/6] pinned deps (torch cu128 + training + bento) ..."
-if "$PY" -c 'import torch, torchvision, transformers, peft, bentoml' 2>/dev/null; then
-  ok "core deps already importable"
+"$PY" -m pip install --upgrade pip -q
+if "$PY" -c 'import torch, torchvision' 2>/dev/null; then
+  ok "torch-family already importable (cu128 download skipped)"
 else
-  step "pip installing (first run downloads torch — several minutes)"
-  "$PY" -m pip install --upgrade pip -q
+  step "pip installing torch cu128 (first run downloads torch — several minutes)"
   "$PY" -m pip install -q torch==2.11.0 torchvision==0.26.0 --index-url "$CU_INDEX"
-  "$PY" -m pip install -q -r "$REPO/training/requirements.txt"
-  "$PY" -m pip install -q -r "$REPO/serving/bento/requirements.txt"
 fi
+"$PY" -m pip install -q -r "$REPO/training/requirements.txt"
+"$PY" -m pip install -q -r "$REPO/serving/bento/requirements.txt"
+# fsspec hold (007): datasets 3.1.0 caps fsspec<=2024.9.0 but bentoml needs >=2025.7.0 — the re-resolve
+# above can downgrade it and break bentoml. Pin to the validated 2026.6.0 LAST so it wins (overrides
+# datasets' conservative cap; both work). See scripts/native_env.lock.
+"$PY" -m pip install -q 'fsspec==2026.6.0'
 if "$PY" -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)'; then
   ok "torch.cuda available (capability $("$PY" -c 'import torch;print(torch.cuda.get_device_capability())'))"
 else

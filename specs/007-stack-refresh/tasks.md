@@ -27,6 +27,16 @@ Task IDs continue the shared space (T118+).
 > (Next stays 15.5.19), native prefect 3.7.6 + pillow 12.2.0. Every increment re-validated green on the
 > target machine; full-suite "failures" are live-stack isolation artifacts (all pass individually).
 >
+> **Codex review fixes (PR #3, 2026-06-28) — 2× P2:** (1) **bootstrap idempotency** — `scripts/bootstrap.sh`
+> step 3 gated the dep install on torch/etc importing, so a re-run on an existing venv never applied the
+> bumped `mlflow-skinny`/`prefect` (silent version skew vs the 3.14 server). Split the expensive cu128
+> torch install (still gated) from the `pip install -r` requirements (now ALWAYS run, idempotent) + pin
+> `fsspec==2026.6.0` last so the always-run install can't re-trigger the datasets-cap downgrade. Verified:
+> a full bootstrap re-run leaves mlflow 3.14.0 / prefect 3.7.6 / fsspec 2026.6.0. (2) **MLflow allowlist
+> vs LAN** — the fixed `--allowed-hosts` broke the documented `BIND_ADDR=0.0.0.0` LAN opt-in (403s).
+> Made it `${MLFLOW_ALLOWED_HOSTS:-<loopback default>}` (mirrors the BIND_ADDR override pattern), doc'd in
+> `.env.example`. Compose interpolation + override verified; mlflow healthy + registry/serving green.
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.
