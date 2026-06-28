@@ -18,10 +18,14 @@ Endpoints:
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # serving/ on path
+import gpu_lease  # noqa: E402  (shared, stdlib-only GPU lease — 008 US1)
 
 LLAMA_BIN = os.path.expanduser(os.getenv("LLAMA_BIN", "~/llama.cpp/build/bin/llama-server"))
 MODEL = os.path.expanduser(os.getenv("MODEL", "~/models/gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf"))
@@ -32,7 +36,7 @@ NGL = os.getenv("NGL", "999")
 CTX = os.getenv("CTX", "4096")
 IDLE_TIMEOUT = float(os.getenv("IDLE_TIMEOUT", "120"))  # seconds idle before VRAM release
 VRAM_GB = float(os.getenv("VRAM_GB", "12"))             # from hardware-profile.md
-TRAINER_URL = os.getenv("TRAINER_URL", "http://localhost:8091")  # peer daemon (one-GPU mutex)
+LEASE_TENANT = "llm-serving"                            # this daemon's GPU lease identity (008 US1)
 
 _lock = threading.RLock()
 _proc = None
@@ -66,45 +70,46 @@ def _resident() -> bool:
     return _proc is not None and _proc.poll() is None
 
 
-def _trainer_busy() -> bool:
-    """True if the training daemon is mid-run — it then owns the single GPU (Principle II)."""
-    try:
-        with urllib.request.urlopen(f"{TRAINER_URL}/health", timeout=2) as r:
-            return bool(json.load(r).get("busy"))
-    except Exception:
-        return False  # trainer not up → GPU is free for serving
-
-
 def _ensure_loaded() -> float:
-    """Start llama-server if needed; return cold-start load_ms (0.0 if already resident)."""
+    """Start llama-server if needed; return cold-start load_ms (0.0 if already resident).
+
+    008 US1: a cold load first acquires the single race-free GPU lease (FR-062). The lease
+    *subsumes* the old `_trainer_busy()` HTTP poll (it refuses atomically while a training run
+    holds the slot) and the old `_fits()` static estimate (admission now reads live free VRAM,
+    FR-064). Both rejections still surface as RuntimeError → 507, preserving the prior behavior.
+    """
     global _proc, _last_load_ms
     if _resident() and _server_ready():
-        return 0.0
-    # Cold load: the symmetric half of one-model-in-VRAM — don't load onto a GPU a training
-    # run is using (the trainer already refuses to start while a model is resident here).
-    if _trainer_busy():
+        return 0.0  # already loaded → we already hold the lease; no re-acquire
+    try:
+        gpu_lease.acquire(LEASE_TENANT, est_gb=_estimate_vram_gb(), vram_budget_gb=VRAM_GB)
+    except gpu_lease.LeaseHeld as e:
+        holder = (e.holder or {}).get("tenant", "another GPU tenant")
         raise RuntimeError(
-            "GPU busy: a training run is active (one model in VRAM, Principle II); "
-            "retry once it completes")
-    if not _fits():
-        raise RuntimeError(
-            f"model needs ~{_estimate_vram_gb():.1f} GB but the VRAM budget is "
-            f"{VRAM_GB:.0f} GB (constitution Principle II / FR-004)")
-    t0 = time.perf_counter()
-    _proc = subprocess.Popen(
-        [LLAMA_BIN, "-m", MODEL, "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
-         "-ngl", NGL, "--ctx-size", CTX, "--alias", MODEL_ALIAS],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(120):  # up to ~60s
-        if _server_ready():
-            break
-        if _proc.poll() is not None:
-            raise RuntimeError("llama-server exited during startup")
-        time.sleep(0.5)
-    else:
-        raise RuntimeError("llama-server did not become ready in time")
-    _last_load_ms = round((time.perf_counter() - t0) * 1000, 1)
-    return _last_load_ms
+            f"GPU busy: {holder} holds the GPU (one model in VRAM, Principle II); "
+            f"retry once it releases")
+    except gpu_lease.VramExceeded as e:
+        raise RuntimeError(str(e))
+    # We hold the lease now — start llama-server; release the lease if startup fails (no deadlock).
+    try:
+        t0 = time.perf_counter()
+        _proc = subprocess.Popen(
+            [LLAMA_BIN, "-m", MODEL, "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
+             "-ngl", NGL, "--ctx-size", CTX, "--alias", MODEL_ALIAS],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(120):  # up to ~60s
+            if _server_ready():
+                break
+            if _proc.poll() is not None:
+                raise RuntimeError("llama-server exited during startup")
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("llama-server did not become ready in time")
+        _last_load_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return _last_load_ms
+    except BaseException:
+        _unload()  # kill the half-started proc AND release the lease
+        raise
 
 
 def _unload() -> None:
@@ -116,6 +121,7 @@ def _unload() -> None:
         except subprocess.TimeoutExpired:
             _proc.kill()
     _proc = None
+    gpu_lease.release(LEASE_TENANT)  # free the GPU slot for the next tenant (idle-release / failure)
 
 
 def _idle_watcher() -> None:
@@ -214,10 +220,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             with _lock:
+                holder = gpu_lease.current_holder()  # who holds the single GPU lease (008 FR-068)
+                free = gpu_lease.free_vram_gb()       # live free VRAM (admission ground truth, FR-064)
                 self._send(200, {
                     "ok": True, "resident": _resident(), "model": MODEL_ALIAS,
                     "vram_budget_gb": VRAM_GB, "est_vram_gb": round(_estimate_vram_gb(), 1),
-                    "fits": _fits(),
+                    "fits": _fits(),  # kept as a hint only; live VRAM is the gate (FR-064)
+                    "vram_free_gb": round(free, 1) if free is not None else None,
+                    "lease_holder": holder.get("tenant") if holder else None,
                 })
         elif self.path == "/metrics":
             with _lock:

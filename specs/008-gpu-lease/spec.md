@@ -4,7 +4,10 @@
 
 **Created**: 2026-06-28
 
-**Status**: **DRAFT — GRILLED (2026-06-28), build-ready**
+**Status**: **BUILT & VALIDATED ON HARDWARE (2026-06-28)** — feat/008-gpu-lease; constitution ratified
+to v1.4.0. Atomic lockfile lease (flock-guarded O_CREAT|O_EXCL + os.kill reclaim) closes the TOCTOU
+race; vision served on device=cuda under the lease, never co-resident with the LLM; Infer tab
+status-line + classify-disable-with-hint. See tasks.md status block for the validation evidence.
 
 **Grilled decisions (2026-06-28):**
 1. **Lease primitive = ATOMIC LOCKFILE** (resolves FR-062's open fork). A shared PID-stamped lockfile on

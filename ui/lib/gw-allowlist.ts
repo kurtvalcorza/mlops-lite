@@ -9,10 +9,11 @@ export type AllowEntry = { method: string; pattern: string };
 
 export const ALLOWLIST: AllowEntry[] = [
   // Infer tab
-  { method: 'GET', pattern: 'models' }, // model picker
+  { method: 'GET', pattern: 'serving/state' }, // GPU/lease status line + classify gating (008 US3)
   { method: 'POST', pattern: 'infer/stream' }, // streaming inference (SSE)
   { method: 'POST', pattern: 'vision/classify' }, // image classify
   // Models tab
+  { method: 'GET', pattern: 'models' }, // list models + serving version
   { method: 'GET', pattern: 'models/:name' }, // versions
   { method: 'POST', pattern: 'models/:name/promote' }, // promote
   // Datasets tab

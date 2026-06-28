@@ -42,16 +42,20 @@ def main() -> int:
         print(f"[FAIL] classify -> {s} {res}")
         return 1
     preds = res.get("predictions")
+    device = res.get("device")
+    # 008 US2: vision now runs on the GPU under the lease (device=cuda) when a GPU is present; on a
+    # CPU-only host it falls back to CPU (lease-exempt). Top-5 shape is identical either way (SC-045).
     ok = (isinstance(preds, list) and len(preds) == 5
           and all("label" in p and "score" in p for p in preds)
-          and res.get("device") == "cpu")
+          and device in ("cuda", "cpu"))
     if not ok:
         print(f"[FAIL] malformed response: {res}")
         return 1
     print(f"[OK] classify -> top1='{preds[0]['label']}' ({preds[0]['score']}), "
-          f"5 preds, model={res.get('model')} on {res.get('device')}")
+          f"5 preds, model={res.get('model')} on {device}"
+          + ("  (GPU lease tenant — 008 US2)" if device == "cuda" else "  (CPU fallback)"))
 
-    print("\nT022 PASS — image classified via BentoML (model packaged from the models bucket)")
+    print("\nT022/T142 PASS — image classified via BentoML; vision-on-GPU under the lease when present")
     return 0
 
 

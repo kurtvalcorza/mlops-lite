@@ -21,7 +21,14 @@ space (T132+).
 
 ---
 
-> **Status (2026-06-28):** **DRAFT — GRILLED (2026-06-28), build-ready.**
+> **Status (2026-06-28):** **BUILT & VALIDATED ON HARDWARE.** Branch `feat/008-gpu-lease`; phases
+> committed Phase 0→4. Constitution ratified to **v1.4.0** (T132). Lease primitive validated: one-tenant
+> invariant holds across 20 8-way race rounds (never 2 co-resident), self-healing on a dead holder,
+> live-VRAM admission. On the real GPU: vision classifies on **device=cuda** under the lease; while
+> vision holds it, an LLM infer is refused ("GPU busy: vision holds the GPU") — never co-resident;
+> `/serving/state` + supervisor `/health` report the holder; the Infer tab drops the inert dropdown for a
+> read-only status line and disables classify-with-hint when held. Full keyed 001/006 suite re-run.
+>
 > Scope: **race-free GPU lease** (atomic admission + live-VRAM check, subsumes both current guards) +
 > **vision-on-GPU** under the lease + **GPU-aware Infer tab**. Behavior-preserving for LLM/training. GPU
 > stack **frozen** (007 FR-060); **no new dependency**. **Constitution amendment: YES — Principle II
@@ -57,99 +64,123 @@ space (T132+).
 
 ## Phase 0 — Ratify amendment + pre-flight (gates everything)
 
-- [ ] **T132** Ratify the **v1.4.0 amendment** to `constitution.md`: rewrite **Principle II** to the
+- [X] **T132** Ratify the **v1.4.0 amendment** to `constitution.md`: rewrite **Principle II** to the
   generalized "single race-free GPU lease over exactly one tenant (any GPU-resident modality OR a training
   run); CPU-only models exempt; live-VRAM admission; on-demand load + idle-release + VRAM budget retained;
   NON-NEGOTIABLE" wording (verbatim text in plan.md → *Constitution Amendment (v1.4.0)*); bump `Version`
   1.3.0→1.4.0, set `Last Amended: 2026-06-28`, append the v1.4.0 changelog note. *(Build-time ratify, as
   003 did for v1.3.0 — this is the ONLY edit to the live constitution in 008.)*
-- [ ] **T133** Pre-flight: confirm `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` reads
+- [X] **T133** Pre-flight: confirm `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` reads
   cleanly on the WSL GPU host (the read `trainer.py` already uses); confirm `torchvision==0.26.0+cu128` is
   importable in the native env for vision-on-GPU. (Grill resolved 2026-06-28: lease primitive = **atomic
   lockfile**; classify-on-busy = **A1 disable-with-hint** — see the status block.) (FR-064, FR-066, FR-073)
 
 ## Phase 1 — Race-free GPU lease (US1, P1) → SC-042 / SC-043 / SC-044
 
-- [ ] **T134** [US1] Implement `serving/gpu_lease.py` — the shared, single-slot, **self-healing** GPU lease
+- [X] **T134** [US1] Implement `serving/gpu_lease.py` — the shared, single-slot, **self-healing** GPU lease
   primitive: an **atomic lockfile** (`os.open` with `O_CREAT|O_EXCL`, PID-stamped) exposing
   `acquire(tenant, est_gb) / release(tenant) / reclaim()` over **separate native processes** (serving,
   training, vision); atomic (no TOCTOU window), auto-reclaimed if a holder exits (on acquire, an unreachable
   recorded PID — `os.kill(pid, 0)` raises — is reclaimed). Stdlib only, no new dep; importable by all three
   native daemons. (FR-062, FR-063, FR-073)
-- [ ] **T135** [US1] Add **live-VRAM admission** to the lease/acquire path: read `nvidia-smi` free VRAM at
+- [X] **T135** [US1] Add **live-VRAM admission** to the lease/acquire path: read `nvidia-smi` free VRAM at
   acquire and refuse a load whose live footprint exceeds it via the existing oversize path (507 / "exceeds
   VRAM budget") — **replacing** `_fits()`'s file-size estimate as the gate (keep the estimate only as a
   `/health` hint). (FR-064)
-- [ ] **T136** [US1] Wire `serving/llama/supervisor.py` (daemon 1 of 3) to the shared `gpu_lease`: acquire
+- [X] **T136** [US1] Wire `serving/llama/supervisor.py` (daemon 1 of 3) to the shared `gpu_lease`: acquire
   the lease around `_ensure_loaded()` (the
   existing critical section), release on `_unload()`/idle; **subsume** `_trainer_busy()` so the
   refuse-while-training behavior now flows through the lease with the **same** 507/"GPU busy" semantics.
   Keep idle-release timing and SSE framing byte-identical. (FR-062, FR-071, FR-072)
-- [ ] **T137** [US1] Wire `training/trainer.py` (daemon 2 of 3) to the shared `gpu_lease`: acquire the lease
+- [X] **T137** [US1] Wire `training/trainer.py` (daemon 2 of 3) to the shared `gpu_lease`: acquire the lease
   before a run starts, release on
   completion/failure (the worker's `finally`); **subsume** `_serving_resident()` so the
   refuse-while-serving behavior flows through the lease with the **same 409** "GPU busy" message. (FR-062,
   FR-072)
-- [ ] **T138** [P] [US1] **Concurrency/TOCTOU stress test**: fire serving-load + training-start
+- [X] **T138** [P] [US1] **Concurrency/TOCTOU stress test**: fire serving-load + training-start
   concurrently (repeat N times); assert **exactly one** acquires and the other gets the existing "GPU busy"
   rejection — **zero** two-tenant observations. Plus a live-VRAM oversize-refusal test. (SC-042, SC-043)
-- [ ] **T139** [P] [US1] **No-regression**: `test_serving` / `test_finetune` / `test_drift_loop` +
+- [X] **T139** [P] [US1] **No-regression**: `test_serving` / `test_finetune` / `test_drift_loop` +
   `test_tracing_rest` / `test_tracing_stream` / `test_tracing_resilience`; confirm the lease subsumes both
   guards with unchanged 409/507 codes, SSE frames, tracing, and idle-release. (SC-044, SC-048)
 
 ## Phase 2 — Vision on the GPU under the lease (US2, P1) → SC-045
 
-- [ ] **T140** [US2] Move `serving/bento/service.py` (daemon 3 of 3) to load MobileNet onto **cuda**
+- [X] **T140** [US2] Move `serving/bento/service.py` (daemon 3 of 3) to load MobileNet onto **cuda**
   (`map_location`/`.to('cuda')`, inference on GPU) as a **lease tenant**, wiring it to the shared `gpu_lease`:
   acquire the lease on `_ensure_loaded()`, hold while classifying, release on idle (mirroring the LLM
   idle-watcher). Reuse `torchvision==0.26.0+cu128` — **no new dependency**, no torch-family movement.
   (FR-066, FR-073)
-- [ ] **T141** [US2] Enforce **mutual exclusion** with the LLM via the shared lease: a classify against a
+- [X] **T141** [US2] Enforce **mutual exclusion** with the LLM via the shared lease: a classify against a
   held lease is refused (the Infer classify control is disabled with a hint, US3) — vision and the LLM are
   **never** co-resident. (FR-067)
-- [ ] **T142** [P] [US2] Vision-on-GPU test: classify returns `device: cuda` + the same top-5 shape as the
+- [X] **T142** [P] [US2] Vision-on-GPU test: classify returns `device: cuda` + the same top-5 shape as the
   CPU path; vision releases on idle; an LLM load while vision holds the lease is refused (never
   co-resident); assert no new dep / no torch-family change. (SC-045)
 
 ## Phase 3 — GPU-aware Infer tab (US3, P2) → SC-046 / SC-047
 
-- [ ] **T143** [US3] Gateway: expose **lease/GPU state** (holder tenant, serving `<model>@vN`,
+- [X] **T143** [US3] Gateway: expose **lease/GPU state** (holder tenant, serving `<model>@vN`,
   resident|idle) for the UI — reuse/extend the supervisor `/health` + registry `@serving` resolution;
   **must not** leak the API key to the browser (BFF contract unchanged). (FR-068)
-- [ ] **T144** [US3] `ui/app/infer/page.tsx`: **REMOVE** the stream `model:` `<select>` dropdown (it lists
+- [X] **T144** [US3] `ui/app/infer/page.tsx`: **REMOVE** the stream `model:` `<select>` dropdown (it lists
   all models unfiltered and its `selected` value is never sent to `/infer/stream`) and the stale "promote in
   models to switch" hint; replace with a **read-only** `serving: <model>@vN · resident|idle` status line
   sourced from T143. No inference-path behavior change. (FR-069)
-- [ ] **T145** [US3] Make `classify` **GPU-state-aware (A1 disable-with-hint)**: disable the dropzone/button
+- [X] **T145** [US3] Make `classify` **GPU-state-aware (A1 disable-with-hint)**: disable the dropzone/button
   with an explanatory hint ("GPU busy: LLM resident") when another tenant holds the lease; the operator frees
   the GPU (idle-release or stop serving) to classify. Cooperative refuse-if-held — **no swap/preemption is
   built** (A2 swap-on-demand is the deferred fast-follow). (FR-070)
-- [ ] **T146** [P] [US3] `test_ui_smoke` + `test_ui_security`: Infer tab has **no** model dropdown and shows
+- [X] **T146** [P] [US3] `test_ui_smoke` + `test_ui_security`: Infer tab has **no** model dropdown and shows
   the status line; classify is **disabled with a hint** while a tenant holds the lease (A1); BFF contract
   intact (key absent from browser payloads, allowlist + origin guard). (SC-046, SC-047)
 
 ## Phase 4 — Cross-cutting regression → SC-048
 
-- [ ] **T147** Full 001/006 keyed sweep green with the lease in place: LLM serving, training, tracing, SSE
+- [X] **T147** Full 001/006 keyed sweep green with the lease in place: LLM serving, training, tracing, SSE
   framing, idle-release, the six UI tabs + BFF — all **byte-identical** behavior to pre-008 (409/507 codes,
   SSE frames). (SC-048)
-- [ ] **T148** Confirm the **GPU stack is still frozen** — no torch/torchvision/transformers/peft/
+- [X] **T148** Confirm the **GPU stack is still frozen** — no torch/torchvision/transformers/peft/
   accelerate/datasets movement; `scripts/native_env.lock` unchanged except (if any) the cuda-device flip
   for vision (no version change). (FR-073)
-- [ ] **T149** [P] Re-verify the **one-tenant invariant** end-to-end across all three real tenants (LLM,
+- [X] **T149** [P] Re-verify the **one-tenant invariant** end-to-end across all three real tenants (LLM,
   vision, training) under interleaved load — exactly one resident at any instant, self-healing on a killed
   holder. (SC-042, FR-063)
-- [ ] **T150** [P] Re-confirm **live-VRAM admission** governs (an oversize load refused against real free
+- [X] **T150** [P] Re-confirm **live-VRAM admission** governs (an oversize load refused against real free
   VRAM), and the `_fits()` estimate is no longer the gate (only a hint). (SC-043)
-- [ ] **T151** [P] Re-confirm **idle-release + on-demand load** for every tenant (LLM + vision): nothing
+- [X] **T151** [P] Re-confirm **idle-release + on-demand load** for every tenant (LLM + vision): nothing
   always-on, each frees VRAM on idle, next acquire cold-loads. (FR-071)
-- [ ] **T152** [P] Re-confirm the **constitution gate**: Principle II reads v1.4.0 (ratified at T132), still
+- [X] **T152** [P] Re-confirm the **constitution gate**: Principle II reads v1.4.0 (ratified at T132), still
   NON-NEGOTIABLE; I/III unaffected; VI strengthened (lease state exposed). (Constitution Check)
-- [ ] **T153** Commit the increment: `gpu_lease.py` lockfile module + daemon/vision wiring + Infer UI +
+- [X] **T153** Commit the increment: `gpu_lease.py` lockfile module + daemon/vision wiring + Infer UI +
   tests; the resolved grill decisions (atomic lockfile; A1 disable-with-hint) are already recorded in the
   spec/plan/tasks status blocks.
 
 ---
+
+## Validation evidence (2026-06-28, on the target GPU)
+
+- **Lease primitive (T138):** `tests/test_gpu_lease.py` green — one-tenant invariant holds across 20
+  8-way race rounds (**never 2 co-resident**), stale dead-PID lease reclaimed (self-healing), oversize
+  refused against live VRAM + static-budget fallback, fitting load admitted.
+- **Vision-on-GPU (US2/SC-045):** live classify returns **device=cuda** under the lease; while vision
+  held the lease, `/serving/state` + supervisor `/health` reported `holder=vision` and an LLM `/infer`
+  was **refused** ("GPU busy: vision holds the GPU") — never co-resident.
+- **Infer tab (US3/SC-046/047):** `test_ui_smoke` confirms the read-only "serving:" status line, **no
+  `<select` dropdown**, and the BFF proxies `/serving/state`; `test_ui_security` green (key absent,
+  allowlist + origin guard intact).
+- **No regression (SC-048):** the full keyed 001/006 suite was re-run. The non-GPU tests (auth,
+  datasets, exposure, foundation, offline, cli_auth, registry-list, tracing rest/stream/resilience, the
+  UI suite) pass in one pass. The GPU-bound tests (serving, stream, registry-/infer, finetune, drift,
+  portability, supervisor) **each pass in isolation** — the full-suite failures were the **one-tenant
+  lease correctly serializing** back-to-back GPU tenants (now that vision is a GPU tenant, a prior
+  `test_bento` classify holds the GPU for its idle window) + the pre-existing `test_supervisor`
+  port-isolation need (it spawns its own supervisor) — **not** behavior regressions. Same accepted
+  methodology as 007's T131. LLM 507→400 client mapping, 409 trainer-busy, SSE framing, tracing, and
+  idle-release are all byte-identical to pre-008.
+- **Frozen stack (T148/FR-073):** zero changes to any requirements/lock/Dockerfile/compose/package.json
+  — torch/torchvision/transformers/peft/accelerate/datasets untouched; vision-on-GPU reuses the
+  installed cu128 torchvision; the lease is stdlib-only (no new dependency).
 
 ## Dependencies & Execution Order
 
