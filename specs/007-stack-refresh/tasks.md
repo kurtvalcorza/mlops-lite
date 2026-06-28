@@ -76,6 +76,16 @@ Task IDs continue the shared space (T118+).
 > host-forwarding glitch were validation-env churn artifacts, not script defects — vision seed is proven
 > in T120; cleared by a full stack restart.)
 >
+> **Claude review (GitHub Action, 2026-06-28) — "no blockers, ready to merge modulo one nit":** confirmed
+> the tracing port, bootstrap fixes, MinIO digest, allowed-hosts + dep bumps all correct. One actionable
+> item fixed: `reseed_registry.sh` hard-coded `"version":"1"` in the promote → captures the version from
+> the register response and promotes THAT (a re-run now promotes the freshly-registered version vs
+> orphaning it behind v1; verified: reseed registered v4 → promoted v4 → serving=v4). Other notes were
+> cosmetic/intentional: tracing `mlflow` local shadow (cosmetic), mlflow image on py3.11 vs gateway 3.12
+> (deliberate US3 gateway-only scope; future alignment), `@types/react-dom` 19.2.3 (already the latest
+> 19.2.x — independent versioning, nothing to align), up_all warning-not-exit (correct: gateway
+> /platform/health is the hard gate).
+>
 > **Verified pre-flight (2026-06-28):** latest on PyPI — MLflow `3.14.0` + `mlflow-skinny 3.14.0` (both
 > exist); FastAPI `0.138.1`, uvicorn `0.49.0`, pydantic `2.13.4`, boto3 `1.43.36`, prometheus-client
 > `0.25.0`, httpx `0.28.1` (current). npm — Next latest `16.2.9` (we stay on **15.x**), React `19.2.7`.

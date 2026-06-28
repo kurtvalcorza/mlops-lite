@@ -4,7 +4,8 @@
 #   - serving LLM: register + promote `@serving` so `/infer`'s registry_version resolves,
 #   - vision model: re-register the version (the model.pt object survives on MinIO, but its registry
 #     entry lived in pgdata) — seed_vision_model.py always creates a fresh version, so this re-registers.
-# Datasets need NO re-seed (content-addressed on MinIO). Safe to re-run (adds a new version each time).
+# Datasets need NO re-seed (content-addressed on MinIO). Re-runnable: each run registers a fresh version
+# and promotes THAT version to @serving (older versions remain as registry history, none orphaned).
 #
 # Run in WSL after the stack is up:  bash scripts/reseed_registry.sh
 set -uo pipefail
@@ -35,12 +36,18 @@ export MLFLOW_TRACKING_URI="http://localhost:${MLFLOW_PORT:-5500}"
 NAME="${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}"
 SRC="s3://models/llm/${NAME}/Q4_K_M.gguf"
 echo "[2/2] registering + promoting the serving LLM ($NAME) ..."
-reg_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GW/models" \
+# Capture the register RESPONSE (body + status) so we promote the version we just created — not a
+# hard-coded v1. On a re-run the gateway assigns v2/v3/..., and promoting THAT version (vs always v1)
+# keeps the freshly-registered version as @serving instead of orphaning it behind a stale v1.
+reg_resp="$(curl -s -w '\n%{http_code}' -X POST "$GW/models" \
   -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d "{\"name\":\"$NAME\",\"source\":\"$SRC\",\"tags\":{\"kind\":\"llm\",\"format\":\"gguf\",\"runtime\":\"llama.cpp\"}}")"
-[ "$reg_code" = "201" ] && echo "  registered $NAME" || echo "  [warn] register -> HTTP $reg_code (already present?)"
+reg_code="$(printf '%s' "$reg_resp" | tail -n1)"
+ver="$(printf '%s' "$reg_resp" | sed '$d' | grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+"' | grep -oE '[0-9]+' | head -1)"
+[ "$reg_code" = "201" ] && echo "  registered $NAME v${ver:-?}" || echo "  [warn] register -> HTTP $reg_code (already present?)"
+ver="${ver:-1}"  # fallback if the body couldn't be parsed (e.g. register skipped on an existing model)
 prom_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GW/models/$NAME/promote" \
-  -H "X-API-Key: $KEY" -H "Content-Type: application/json" -d "{\"version\":\"1\"}")"
-[ "$prom_code" = "200" ] && echo "  promoted $NAME v1 -> @serving" || { echo "  [FAIL] promote -> HTTP $prom_code" >&2; exit 1; }
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" -d "{\"version\":\"$ver\"}")"
+[ "$prom_code" = "200" ] && echo "  promoted $NAME v$ver -> @serving" || { echo "  [FAIL] promote -> HTTP $prom_code" >&2; exit 1; }
 
 echo "Re-seed complete — serving LLM @serving + vision registered; datasets intact on MinIO."
