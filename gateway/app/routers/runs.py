@@ -40,6 +40,11 @@ async def launch_run(req: RunRequest):
     if r.status_code == 409:
         RUN_OPS.labels(op="launch", status="busy").inc()
         raise HTTPException(status_code=409, detail=r.json().get("error", "trainer busy"))
+    if r.status_code == 507:
+        # Live-VRAM admission refused the run (008.1 #11): forward it as the documented oversize
+        # refusal with the trainer's hint, not a generic 502 (Codex PR#5 P2).
+        RUN_OPS.labels(op="launch", status="rejected").inc()
+        raise HTTPException(status_code=507, detail=r.json().get("error", "exceeds VRAM budget"))
     if r.status_code not in (200, 202):
         RUN_OPS.labels(op="launch", status="error").inc()
         raise HTTPException(status_code=502, detail=f"trainer error {r.status_code}: {r.text[:200]}")

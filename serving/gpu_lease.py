@@ -80,15 +80,31 @@ def free_vram_gb():
         return None
 
 
-def _alive(pid) -> bool:
-    """True if `pid` is a live process (os.kill(pid, 0) — FR-063 stale-holder detection).
+def _proc_start(pid):
+    """Process start-time (clock ticks since boot, /proc/<pid>/stat field 22), or None.
+
+    Recorded alongside the PID so a *recycled* PID is distinguishable from the original holder
+    (Codex P2 #7): a reused PID belongs to a different process with a different start-time, so the
+    stale lease is not mistaken for a live tenant. The comm field (2) can contain spaces/parens, so
+    parse the fields *after* the final ')'.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            data = f.read()
+        return int(data[data.rfind(")") + 1:].split()[19])  # field 22 → index 19 after state
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _alive(pid, start=None) -> bool:
+    """True if `pid` is the live process that recorded the lease (os.kill + start-time match).
 
     Liveness (not a wall-clock TTL) is deliberate (Claude review F4): a training run legitimately
     holds the lease for many minutes/hours, so a TTL-based reclaim could wrongly evict a live long
-    run and let a second tenant load onto the GPU — a worse failure than the theoretical case this
-    trades against (a dead holder's PID being recycled by an unrelated process before the next
-    acquire). On Linux PIDs cycle through a large pid_max space, making that window tiny on a
-    single-operator host; liveness keeps long holds safe, which matters more here.
+    run and let a second tenant load onto the GPU — a worse failure than the case it trades against.
+    The PID-reuse gap that liveness alone leaves (Codex #7) is closed by also matching the recorded
+    start-time when present: a process that reused the PID has a different start-time → treated as
+    dead → the stale lease self-heals.
     """
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -97,14 +113,39 @@ def _alive(pid) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but owned by another user — still a live holder
+        pass  # exists but owned by another user — can't signal it, but /proc/<pid>/stat is
+        # world-readable so the start-time check below still runs (PID-reuse stays detectable)
     except OSError:
         return False
+    if start is not None:
+        cur = _proc_start(pid)
+        if cur is not None and cur != start:
+            return False  # same PID, different process (recycled) — the original holder is gone
     return True
 
 
+def _holder_live(holder) -> bool:
+    """A lease is live while its **VRAM is occupied** (Codex P1 #1).
+
+    When a `vram_pid` is recorded (the LLM's `llama-server` child), that child's liveness *is* the
+    lease's — the owner daemon (supervisor) holds no VRAM itself, so the lease must NOT stay held
+    just because the supervisor is alive after its child died (that would pin the GPU while VRAM is
+    actually free). Conversely an orphaned child after a supervisor crash keeps the lease held (its
+    VRAM is still allocated), so no second tenant co-resides. With no `vram_pid` (vision/training
+    hold VRAM in-process, and the LLM before its child is registered), liveness is the owner PID.
+    The supervisor re-claims its own lease across a child crash via acquire()'s same-(owner-)PID
+    idempotent path, independent of this check.
+    """
+    if not holder:
+        return False
+    vram_pid = holder.get("vram_pid")
+    if vram_pid is not None:
+        return _alive(vram_pid, holder.get("vram_start"))
+    return _alive(holder.get("pid"), holder.get("pid_start"))
+
+
 def _read_holder():
-    """Parse the lockfile into {tenant, pid, acquired_at}, or None if absent/corrupt."""
+    """Parse the lockfile into the holder record, or None if absent/corrupt/unreadable."""
     try:
         with open(LEASE_PATH, encoding="utf-8") as f:
             return json.load(f)
@@ -112,6 +153,10 @@ def _read_holder():
         return None
     except OSError:
         return None
+
+
+def _lease_exists() -> bool:
+    return os.path.exists(LEASE_PATH)
 
 
 @contextlib.contextmanager
@@ -128,16 +173,31 @@ def _coord():
             os.close(fd)
 
 
-def _write_claim(tenant: str) -> None:
-    """Atomically stamp the lockfile with our claim (O_CREAT|O_EXCL — the slot is free here)."""
+def _write_claim(tenant: str) -> dict:
+    """Atomically stamp the lockfile with our claim (O_CREAT|O_EXCL — the slot is free here) and
+    return the written record.
+
+    Records the owner PID **and its start-time** so a recycled PID can't be mistaken for us (#7).
+    """
+    pid = os.getpid()
+    rec = {"tenant": tenant, "pid": pid, "pid_start": _proc_start(pid), "acquired_at": time.time()}
     fd = os.open(LEASE_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump({"tenant": tenant, "pid": os.getpid(), "acquired_at": time.time()}, f)
+        json.dump(rec, f)
+    return rec
 
 
 def _unlink_quiet() -> None:
     with contextlib.suppress(FileNotFoundError):
         os.unlink(LEASE_PATH)
+
+
+def _replace_holder(rec: dict) -> None:
+    """Atomically overwrite the lockfile with `rec` (write-temp + os.replace). Caller holds _coord()."""
+    tmp = f"{LEASE_PATH}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rec, f)
+    os.replace(tmp, LEASE_PATH)
 
 
 def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = None) -> dict:
@@ -150,15 +210,35 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
     with _coord():
         holder = _read_holder()
         if holder is not None:
-            hpid = holder.get("pid")
-            if hpid == os.getpid():
-                _unlink_quiet()  # our own prior/stale claim — replace it (idempotent re-acquire)
-            elif _alive(hpid):
+            if holder.get("pid") == os.getpid():
+                if holder.get("tenant") == tenant:
+                    # Already ours — idempotent re-acquire. Return the on-disk record WITHOUT deleting
+                    # the claim or re-running admission (Codex #3): re-running VRAM admission while our
+                    # own model is resident (free VRAM low) could raise and leave us with no lease.
+                    vram_pid = holder.get("vram_pid")
+                    if vram_pid is not None and not _alive(vram_pid, holder.get("vram_start")):
+                        # Our previous VRAM child died and we're cold-restarting. Strip the stale
+                        # vram_pid so liveness reverts to our (live) owner PID during the reload —
+                        # otherwise _holder_live (which keys on vram_pid when present) would treat the
+                        # lease as dead and another tenant could acquire mid-reload → co-residency
+                        # (Codex PR#5 P1). set_vram_owner() re-stamps the new child once it's up.
+                        holder.pop("vram_pid", None)
+                        holder.pop("vram_start", None)
+                        _replace_holder(holder)
+                    return holder
+                _unlink_quiet()  # same process, different tenant (shouldn't happen) — replace
+            elif _holder_live(holder):
                 raise LeaseHeld(holder)
             else:
-                _unlink_quiet()  # dead holder — self-heal (FR-063)
+                _unlink_quiet()  # dead holder (owner + any VRAM child both gone) — self-heal (FR-063)
+        elif _lease_exists():
+            # Lockfile present but unreadable/corrupt (e.g. a crash between O_EXCL create and the
+            # json.dump) — reclaim it, else the O_EXCL write below would FileExistsError and every
+            # tenant would fail instead of self-healing (Codex P1 #2).
+            _unlink_quiet()
 
-        # Admission against the live GPU (we hold the slot now; nothing else is loading).
+        # Admission against the live GPU. Only a FRESH claim reaches here (a same-tenant re-acquire
+        # returned above), so if this raises, no valid lease is lost — the slot is genuinely empty.
         if est_gb:
             free = free_vram_gb()
             if free is not None:
@@ -172,8 +252,22 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
                     f"model needs ~{est_gb:.1f} GB but the VRAM budget is {vram_budget_gb:.0f} GB "
                     f"(constitution Principle II / FR-004)")
 
-        _write_claim(tenant)
-        return {"tenant": tenant, "pid": os.getpid()}
+        return _write_claim(tenant)  # full record (tenant, pid, pid_start, acquired_at)
+
+
+def set_vram_owner(tenant: str, vram_pid: int) -> None:
+    """Record the process that actually holds VRAM (e.g. the LLM's `llama-server` child) on our
+    lease (Codex P1 #1). Acquire stamps the owner *daemon* PID before the child exists; the daemon
+    calls this once the child is up. The lease then stays live if the daemon crashes but the child
+    orphans (its VRAM is still allocated). Only the owner (same pid + tenant) may set it; no-op
+    otherwise. Atomic via os.replace.
+    """
+    with _coord():
+        holder = _read_holder()
+        if holder and holder.get("pid") == os.getpid() and holder.get("tenant") == tenant:
+            holder["vram_pid"] = vram_pid
+            holder["vram_start"] = _proc_start(vram_pid)
+            _replace_holder(holder)
 
 
 def release(tenant: str) -> None:
@@ -188,7 +282,7 @@ def reclaim() -> bool:
     """Drop a stale claim left by a dead holder (FR-063). Returns True if one was reclaimed."""
     with _coord():
         holder = _read_holder()
-        if holder and not _alive(holder.get("pid")):
+        if holder and not _holder_live(holder):
             _unlink_quiet()
             return True
     return False
@@ -203,6 +297,6 @@ def current_holder():
     always made inside `acquire()` under the flock; nothing here arbitrates the GPU.
     """
     holder = _read_holder()
-    if holder and _alive(holder.get("pid")):
+    if _holder_live(holder):
         return holder
     return None

@@ -62,8 +62,12 @@ function StreamConsole({ serving }: { serving: ServingState | null }) {
     tailRef.current?.scrollTo({ top: tailRef.current.scrollHeight });
   }, [tokens]);
 
+  // When vision/training holds the GPU lease, a stream would be refused — reflect that in the status
+  // and disable send (Codex #9), symmetric to the classify-disable-with-hint.
+  const streamHeld = !!serving?.holder && serving.holder !== 'llm';
+
   const run = useCallback(async () => {
-    if (!prompt.trim() || status === 'loading' || status === 'streaming') return;
+    if (!prompt.trim() || status === 'loading' || status === 'streaming' || streamHeld) return;
     setTokens('');
     setMeta('');
     setErr('');
@@ -102,7 +106,7 @@ function StreamConsole({ serving }: { serving: ServingState | null }) {
     } finally {
       abortRef.current = null;
     }
-  }, [prompt, status]);
+  }, [prompt, status, streamHeld]);
 
   const stop = () => abortRef.current?.abort();
   const busy = status === 'loading' || status === 'streaming';
@@ -119,12 +123,19 @@ function StreamConsole({ serving }: { serving: ServingState | null }) {
       <div className="mb-3 flex flex-wrap items-center gap-2 text-caption-md">
         <span className="text-mute">serving:</span>
         <span className="hairline rounded-sm bg-soft px-2 py-1 text-ink">{modelLabel}</span>
-        {serving && (
-          <span className={serving.resident ? 'st-accent' : 'text-ash'}>
-            · {serving.resident ? 'resident' : 'idle'}
-          </span>
-        )}
-        <span className="text-ash">[i] the resident GGUF serves the stream</span>
+        {serving &&
+          (streamHeld ? (
+            <span className="st-danger">· GPU busy: {serving.holder} resident</span>
+          ) : (
+            <span className={serving.resident ? 'st-accent' : 'text-ash'}>
+              · {serving.resident ? 'resident' : 'idle'}
+            </span>
+          ))}
+        <span className="text-ash">
+          {streamHeld
+            ? `[!] free the GPU (${serving?.holder} holds it) to stream`
+            : '[i] the resident GGUF serves the stream'}
+        </span>
       </div>
 
       {/* dark streaming console — the one raised surface */}
@@ -166,7 +177,8 @@ function StreamConsole({ serving }: { serving: ServingState | null }) {
       <div className="flex gap-2">
         <button
           onClick={run}
-          disabled={busy || !prompt.trim()}
+          disabled={busy || !prompt.trim() || streamHeld}
+          title={streamHeld ? `GPU busy: ${serving?.holder} holds the lease` : undefined}
           className="rounded-sm bg-ink px-4 py-1 text-button-md text-canvas disabled:opacity-40"
         >
           [+] send

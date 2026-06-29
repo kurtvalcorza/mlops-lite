@@ -67,7 +67,8 @@ def _server_ready() -> bool:
 
 
 def _resident() -> bool:
-    return _proc is not None and _proc.poll() is None
+    p = _proc  # snapshot — /health reads this without _lock, so don't re-read the global mid-check
+    return p is not None and p.poll() is None
 
 
 def _ensure_loaded() -> float:
@@ -97,6 +98,15 @@ def _ensure_loaded() -> float:
             [LLAMA_BIN, "-m", MODEL, "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
              "-ngl", NGL, "--ctx-size", CTX, "--alias", MODEL_ALIAS],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Record the child (the actual VRAM holder) on the lease IMMEDIATELY — its PID is valid as
+        # soon as Popen returns, even before the server is ready. The lease's liveness then tracks
+        # the llama-server child, not this supervisor, for the whole ~60s load: if the supervisor
+        # crashes mid-load, the still-loading (orphaned) child keeps the lease held — no second
+        # tenant can co-reside (Codex P1 #1). Registering here (not after the ready-wait) shrinks the
+        # vram_pid-unset window to just the Popen call. (PR_SET_PDEATHSIG was rejected: the cold-load
+        # Popen runs in an ephemeral HTTP worker thread, so the parent-death signal would SIGKILL
+        # llama-server when that request thread ends — killing the model after one request.)
+        gpu_lease.set_vram_owner(LEASE_TENANT, _proc.pid)
         for _ in range(120):  # up to ~60s
             if _server_ready():
                 break
@@ -120,6 +130,18 @@ def _unload() -> None:
             _proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             _proc.kill()
+            # Wait for the kill to land + CUDA VRAM to be freed BEFORE releasing the lease (Codex
+            # #10) — else the next tenant could acquire and start allocating while the killed
+            # llama-server is still tearing down (transient co-residency).
+            try:
+                _proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+    # Only release the lease once the child is actually gone. If a SIGKILLed child is somehow still
+    # alive (e.g. uninterruptible D-state), KEEP the lease — its vram_pid keeps it live so no tenant
+    # co-resides — and leave _proc set so a later idle/unload pass retries the reap (Codex PR#5 P2).
+    if _proc is not None and _proc.poll() is None:
+        return
     _proc = None
     gpu_lease.release(LEASE_TENANT)  # free the GPU slot for the next tenant (idle-release / failure)
 
@@ -219,16 +241,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            with _lock:
-                holder = gpu_lease.current_holder()  # who holds the single GPU lease (008 FR-068)
-                free = gpu_lease.free_vram_gb()       # live free VRAM (admission ground truth, FR-064)
-                self._send(200, {
-                    "ok": True, "resident": _resident(), "model": MODEL_ALIAS,
-                    "vram_budget_gb": VRAM_GB, "est_vram_gb": round(_estimate_vram_gb(), 1),
-                    "fits": _fits(),  # kept as a hint only; live VRAM is the gate (FR-064)
-                    "vram_free_gb": round(free, 1) if free is not None else None,
-                    "lease_holder": holder.get("tenant") if holder else None,
-                })
+            # Deliberately NOT under `_lock` (Codex #8): the generation lock is held for the whole
+            # backend call, which can outlast the gateway's 5s /health timeout. These are read-only
+            # snapshots (a stale bool/lockfile read is fine) — blocking them on a long generation
+            # would make /serving/state time out and wrongly report the GPU idle mid-generation.
+            holder = gpu_lease.current_holder()  # who holds the single GPU lease (008 FR-068)
+            free = gpu_lease.free_vram_gb()       # live free VRAM (admission ground truth, FR-064)
+            self._send(200, {
+                "ok": True, "resident": _resident(), "model": MODEL_ALIAS,
+                "vram_budget_gb": VRAM_GB, "est_vram_gb": round(_estimate_vram_gb(), 1),
+                "fits": _fits(),  # kept as a hint only; live VRAM is the gate (FR-064)
+                "vram_free_gb": round(free, 1) if free is not None else None,
+                "lease_holder": holder.get("tenant") if holder else None,
+            })
         elif self.path == "/metrics":
             with _lock:
                 body = (

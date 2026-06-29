@@ -14,8 +14,10 @@ Runs in WSL (fcntl + multiprocessing fork). Stdlib-only; self-skips off Linux.
 
   python3 tests/test_gpu_lease.py
 """
+import json
 import multiprocessing as mp
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -133,13 +135,117 @@ def main() -> int:
             failures += 1
         finally:
             gpu_lease.free_vram_gb = real_free
+
+        # 4. Corrupt lockfile (crash mid-write) is reclaimed, not a permanent FileExistsError (#2).
+        _cleanup()
+        with open(_LEASE, "w", encoding="utf-8") as f:
+            f.write("{not valid json")  # truncated/corrupt claim
+        try:
+            gpu_lease.acquire("after-corrupt")
+            print("[OK] corrupt lockfile reclaimed on acquire — self-healing intact (#2)")
+            gpu_lease.release("after-corrupt")
+        except Exception as ex:
+            print(f"[FAIL] corrupt lockfile not reclaimed: {type(ex).__name__}: {ex}")
+            failures += 1
+
+        # 5. Same-process re-acquire is idempotent and never drops the lease, even if admission
+        #    would now fail because our own model is resident and free VRAM is low (#3).
+        _cleanup()
+        gpu_lease.acquire("llm-serving", est_gb=6.0, vram_budget_gb=12.0)
+        gpu_lease.free_vram_gb = lambda: 0.5  # pretend almost no free VRAM now
+        try:
+            gpu_lease.acquire("llm-serving", est_gb=6.0, vram_budget_gb=12.0)  # same pid+tenant
+            held = gpu_lease.current_holder()
+            if held and held.get("tenant") == "llm-serving":
+                print("[OK] same-process re-acquire idempotent; lease preserved under low VRAM (#3)")
+            else:
+                print("[FAIL] re-acquire dropped the lease under low VRAM")
+                failures += 1
+        except gpu_lease.VramExceeded:
+            print("[FAIL] re-acquire wrongly re-ran admission and raised VramExceeded (#3)")
+            failures += 1
+        finally:
+            gpu_lease.free_vram_gb = real_free
+            gpu_lease.release("llm-serving")
+
+        # 6. PID reuse: a lease stamped with our PID but a mismatched start-time is treated as
+        #    stale (the original holder is gone), so it self-heals instead of blocking forever (#7).
+        _cleanup()
+        with open(_LEASE, "w", encoding="utf-8") as f:
+            json.dump({"tenant": "ghost", "pid": os.getpid(), "pid_start": -1, "acquired_at": 0}, f)
+        if gpu_lease.current_holder() is None:
+            print("[OK] stale lease with mismatched start-time treated as dead — PID-reuse safe (#7)")
+        else:
+            print("[FAIL] mismatched start-time lease seen as live")
+            failures += 1
+
+        # 7. VRAM-owner liveness: a dead owner with a still-alive VRAM child keeps the lease held
+        #    (no co-residency after a supervisor crash); reclaimable once the child also exits (#1).
+        _cleanup()
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            with open(_LEASE, "w", encoding="utf-8") as f:
+                json.dump({"tenant": "llm-serving", "pid": 2147480000, "pid_start": 1,
+                           "vram_pid": child.pid, "vram_start": gpu_lease._proc_start(child.pid),
+                           "acquired_at": 0}, f)
+            held = gpu_lease.current_holder() is not None
+            print(f"[{'OK' if held else 'FAIL'}] orphaned VRAM child keeps the lease held after "
+                  f"owner death (#1)")
+            failures += 0 if held else 1
+            try:
+                gpu_lease.acquire("vision")
+                print("[FAIL] a second tenant acquired while the orphan child holds VRAM (#1)")
+                failures += 1
+                gpu_lease.release("vision")
+            except gpu_lease.LeaseHeld:
+                print("[OK] second tenant refused while the orphan child holds VRAM (#1)")
+        finally:
+            child.terminate()
+            child.wait()
+        reclaimable = gpu_lease.reclaim() or gpu_lease.current_holder() is None
+        print(f"[{'OK' if reclaimable else 'FAIL'}] lease reclaimable once owner + VRAM child both "
+              f"gone (#1)")
+        failures += 0 if reclaimable else 1
+
+        # 8. Live owner but DEAD VRAM child → reclaimable: the owner (supervisor) holds no VRAM
+        #    itself, so the lease must not stay pinned after its llama-server child dies (#1 fix).
+        _cleanup()
+        with open(_LEASE, "w", encoding="utf-8") as f:
+            json.dump({"tenant": "llm-serving", "pid": os.getpid(),
+                       "pid_start": gpu_lease._proc_start(os.getpid()),
+                       "vram_pid": 2147480000, "vram_start": 1, "acquired_at": 0}, f)
+        if gpu_lease.current_holder() is None:
+            print("[OK] live owner + dead VRAM child → lease reclaimable (owner holds no VRAM) (#1)")
+        else:
+            print("[FAIL] lease pinned by a live owner after its VRAM child died (#1)")
+            failures += 1
+
+        # 9. Same-OWNER re-acquire with a dead VRAM child strips the stale vram_pid, so the lease
+        #    reverts to owner-PID liveness during the cold reload — otherwise another tenant would see
+        #    it as dead (vram-priority) and acquire mid-reload → co-residency (Codex PR#5 P1).
+        _cleanup()
+        with open(_LEASE, "w", encoding="utf-8") as f:
+            json.dump({"tenant": "llm-serving", "pid": os.getpid(),
+                       "pid_start": gpu_lease._proc_start(os.getpid()),
+                       "vram_pid": 2147480000, "vram_start": 1, "acquired_at": 0}, f)
+        pre_reclaimable = gpu_lease.current_holder() is None  # dead vram → looks free to others
+        gpu_lease.acquire("llm-serving")  # same owner re-acquires → strips the dead vram_pid
+        rec = gpu_lease._read_holder()
+        stripped = rec is not None and "vram_pid" not in rec
+        held_after = gpu_lease.current_holder() is not None  # now owner-live → held during reload
+        ok = pre_reclaimable and stripped and held_after
+        print(f"[{'OK' if ok else 'FAIL'}] same-owner re-acquire strips dead vram_pid → lease held by "
+              f"owner during reload (PR#5 P1)")
+        failures += 0 if ok else 1
+        gpu_lease.release("llm-serving")
     finally:
         _cleanup()
 
     if failures:
         print(f"\n{failures} lease check(s) failed.")
         return 1
-    print("\nT138 PASS — atomic one-tenant lease (no TOCTOU), self-healing, live-VRAM admission")
+    print("\nT138 PASS — atomic one-tenant lease (no TOCTOU), self-healing (dead-PID, corrupt-file, "
+          "PID-reuse, orphaned-VRAM-child), idempotent re-acquire, live-VRAM admission")
     return 0
 
 
