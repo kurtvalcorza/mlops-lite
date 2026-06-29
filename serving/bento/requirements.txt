@@ -6,3 +6,9 @@
 bentoml==1.4.39
 pillow==12.2.0
 # torchvision (pinned separately, CUDA index): torchvision==0.26.0+cu128
+# 009 US2 — embeddings (CPU, off-lease BentoML service). sentence-transformers reuses the torch
+# already in the venv (no extra CUDA index needed for CPU inference). 009 US4 — tabular (CPU): lightgbm
+# is a light CPU dep, one joblib artifact. Both are additive + swappable (Principle V/III, FR-084).
+sentence-transformers==3.3.1
+lightgbm==4.5.0
+joblib==1.4.2

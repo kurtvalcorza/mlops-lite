@@ -7,6 +7,7 @@
 // CPU renderers (embed/predict) ignore it (FR-082). Each renderer takes the same PanelProps.
 import type { ComponentType } from 'react';
 import { ClassifyPanel } from './ClassifyPanel';
+import { EmbedPanel } from './EmbedPanel';
 import { StreamPanel } from './StreamPanel';
 import type { PanelProps } from './types';
 
@@ -16,7 +17,7 @@ export type { PanelProps, ServingState, TaskEntry } from './types';
 export const RENDERERS: Record<string, ComponentType<PanelProps>> = {
   'text-generation': StreamPanel,
   'image-classification': ClassifyPanel,
-  // 'embedding': EmbedPanel,      // added in 009 Phase 2 (US2)
+  embedding: EmbedPanel, // 009 Phase 2 (US2) — CPU, off-lease, always-on
   // 'asr': TranscribePanel,       // added in 009 Phase 3 (US3)
   // 'tabular': TabularPanel,      // added in 009 Phase 4 (US4)
 };
