@@ -14,7 +14,20 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from . import platform_health, platform_metrics, tracing
 from .auth import auth_mode, require_api_key
-from .routers import datasets, embed, infer, models, monitor, runs, stream, tabular, transcribe, vision
+from .routers import (
+    batch,
+    datasets,
+    embed,
+    infer,
+    models,
+    monitor,
+    runs,
+    stream,
+    tabular,
+    transcribe,
+    validation,
+    vision,
+)
 
 app = FastAPI(title="MLOps-Lite Gateway", version="1.2.0")
 
@@ -30,6 +43,8 @@ app.include_router(stream.router, tags=["streaming"], dependencies=_protected)
 app.include_router(embed.router, tags=["embeddings"], dependencies=_protected)  # 009 US2 (CPU, off-lease)
 app.include_router(transcribe.router, tags=["asr"], dependencies=_protected)  # 009 US3 (whisper.cpp, GPU-lease)
 app.include_router(tabular.router, tags=["tabular"], dependencies=_protected)  # 009 US4 (CPU, off-lease)
+app.include_router(validation.router, tags=["validation"], dependencies=_protected)  # 014 US2
+app.include_router(batch.router, tags=["batch"], dependencies=_protected)  # 014 US1 (offline batch)
 
 REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"])
 
@@ -64,8 +79,10 @@ def root():
             "/healthz", "/metrics", "/platform/health", "/infer", "/serving/health", "/serving/state",
             "/models", "/models/{name}", "/models/{name}/promote",
             "/datasets", "/datasets/{name}", "/datasets/{name}/{version}",
+            "/datasets/{name}/{version}/validate",
             "/runs", "/runs/{id}", "/runs/{id}/events", "/training/health",
-            "/monitor", "/monitor/check",
+            "/batch", "/batch/{id}",
+            "/monitor", "/monitor/check", "/monitor/quality/check",
             "/vision/classify", "/vision/health",
             "/embed", "/embed/health",
             "/transcribe", "/transcribe/health",

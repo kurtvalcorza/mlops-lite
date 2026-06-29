@@ -8,6 +8,23 @@ type Version = { version: string; size_bytes: number; sha256: string; format: st
 type Dataset = { name: string; versions: Version[] };
 type Manifest = { name: string; version: string; size_bytes: number; sha256: string; format: string };
 
+// 014 US2 — the hand-rolled dataset-validation report.
+type Rule = {
+  name: string;
+  passed: boolean;
+  disposition: 'gate' | 'warn';
+  value: unknown;
+  threshold: unknown;
+  detail: string;
+};
+type ValidationReport = {
+  passed: boolean;
+  rules: Rule[];
+  stats: { row_count: number; columns: string[] };
+  gate_failures: string[];
+  warnings: string[];
+};
+
 export default function DatasetsPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [err, setErr] = useState('');
@@ -47,15 +64,7 @@ export default function DatasetsPage() {
                 <p className="text-body-strong text-ink">{d.name}</p>
                 <ul className="mt-1 space-y-1">
                   {d.versions.map((v) => (
-                    <li key={v.version} className="flex items-baseline justify-between gap-3 text-caption-md">
-                      <span className="text-ink">
-                        <span className="st-mute">[+]</span> {v.version}
-                        <span className="ml-2 text-ash">{v.format}</span>
-                      </span>
-                      <span className="text-mute">
-                        {v.size_bytes} B · {v.sha256.slice(0, 12)}…
-                      </span>
-                    </li>
+                    <VersionRow key={v.version} name={d.name} version={v} />
                   ))}
                 </ul>
               </div>
@@ -67,6 +76,68 @@ export default function DatasetsPage() {
         </Panel>
       </div>
     </>
+  );
+}
+
+// 014 US2 — a dataset version row with an inline "validate" action that renders the readiness report.
+function VersionRow({ name, version: v }: { name: string; version: Version }) {
+  const [report, setReport] = useState<ValidationReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const validate = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      setReport(
+        await gwPost<ValidationReport>(
+          `datasets/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}/validate`,
+          {},
+        ),
+      );
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <li className="text-caption-md">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-ink">
+          <span className="st-mute">[+]</span> {v.version}
+          <span className="ml-2 text-ash">{v.format}</span>
+        </span>
+        <span className="flex items-center gap-3 text-mute">
+          <span>
+            {v.size_bytes} B · {v.sha256.slice(0, 12)}…
+          </span>
+          <button onClick={validate} disabled={busy} className="hairline rounded-sm px-2 text-ink disabled:opacity-40">
+            {busy ? '[~]…' : '[?] validate'}
+          </button>
+        </span>
+      </div>
+      {err && <p className="mt-1 st-danger">[x] {err}</p>}
+      {report && (
+        <div className="mt-1 hairline rounded-sm p-2">
+          <p className={report.passed ? 'st-success' : 'st-danger'}>
+            [{report.passed ? '✓' : 'x'}] readiness {report.passed ? 'passed' : 'FAILED'} ·{' '}
+            {report.stats.row_count} rows
+            {report.gate_failures.length > 0 && <span> · gate: {report.gate_failures.join(', ')}</span>}
+            {report.warnings.length > 0 && <span className="st-warning"> · warn: {report.warnings.join(', ')}</span>}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {report.rules.map((r) => (
+              <li key={r.name} className={r.passed ? 'text-ash' : r.disposition === 'gate' ? 'st-danger' : 'st-warning'}>
+                [{r.passed ? '✓' : r.disposition === 'gate' ? 'x' : '!'}] {r.name} ({r.disposition})
+                {!r.passed && r.detail ? ` — ${r.detail}` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </li>
   );
 }
 

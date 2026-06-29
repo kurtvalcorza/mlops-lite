@@ -26,11 +26,14 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'datasets' },
   { method: 'POST', pattern: 'datasets' }, // upload
   { method: 'GET', pattern: 'datasets/:name' }, // idempotency pre-check
+  { method: 'POST', pattern: 'datasets/:name/:version/validate' }, // 014 US2: dataset validation report
   // Runs tab
   { method: 'POST', pattern: 'runs' }, // launch
   { method: 'GET', pattern: 'runs/:id/events' }, // live run (SSE)
   { method: 'POST', pattern: 'studies' }, // 012: launch an HPO study
   { method: 'GET', pattern: 'studies/:id' }, // 012: poll study status + best trial
+  { method: 'POST', pattern: 'batch' }, // 014 US1: launch an offline batch-inference job
+  { method: 'GET', pattern: 'batch/:id' }, // 014 US1: poll batch status + result link
   // Monitor tab
   { method: 'POST', pattern: 'monitor/check' }, // drift check
   // Health tab (+ smoke probe)

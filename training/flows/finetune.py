@@ -67,6 +67,42 @@ def _s3():
     )
 
 
+class DatasetValidationError(ValueError):
+    """A training run was rejected because its dataset failed a hard-gate readiness rule (014 FR-132).
+    Carries the structured report so the trainer/UI can surface exactly which rule failed."""
+
+    def __init__(self, report: dict):
+        self.report = report
+        super().__init__(
+            f"dataset failed validation (gate rules: {report.get('gate_failures')}) — "
+            "fix the dataset and retry")
+
+
+def _load_validation():
+    """The shared gateway validation module (gateway/app/validation.py) — its pure rule functions
+    (parse_rows / run_rules) are stdlib-only, so this imports without the gateway's heavier deps."""
+    gw = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                      "gateway")
+    if gw not in sys.path:
+        sys.path.insert(0, gw)
+    from app import validation
+    return validation
+
+
+def validate_dataset_or_raise(dataset_name: str, dataset_version: str) -> dict:
+    """Hard gate (014 FR-132): load the dataset version's bytes, run the shared validation rules, and
+    **raise** `DatasetValidationError` if a gate rule (required-columns / min-row-count, by default)
+    fails — BEFORE any MLflow run or GPU acquisition, so a bad dataset never reaches `train_lora`. Warn
+    rules are recorded in the returned report but don't block. Returns the report on a pass."""
+    val = _load_validation()
+    raw = _s3().get_object(Bucket=DATASETS_BUCKET,
+                           Key=f"{dataset_name}/{dataset_version}/data")["Body"].read()
+    report = val.run_rules(val.parse_rows(raw))
+    if not report["passed"]:
+        raise DatasetValidationError(report)
+    return report
+
+
 @task
 def fetch_dataset(name: str, version: str) -> list:
     """Pull the pinned dataset version from MinIO and parse JSONL instruction/response pairs."""
@@ -221,6 +257,10 @@ def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
             "LLM-flow chaining (parent_version) isn't supported — the registered artifact is the serving "
             "GGUF, not a trainable adapter; chain a vision/embeddings fine-tune instead")
 
+    # 014/FR-132: hard-gate on dataset readiness BEFORE the MLflow run or any GPU work — a failing
+    # dataset is rejected fast at the edge, never crashing deep in the LoRA loop (no wasted run/VRAM).
+    validation_report = validate_dataset_or_raise(dataset_name, dataset_version)
+
     mlflow.set_tracking_uri(MLFLOW_URI)
     mlflow.set_experiment("lora-finetune")
     with mlflow.start_run() as run:
@@ -230,6 +270,10 @@ def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                       steps=steps, lora_r=lora_r, seed=seed,
                       lora_alpha=(lora_alpha if lora_alpha is not None else lora_r * 2), lr=lr)
         mlflow.log_params(params)  # full config recorded → reproducible (FR-012)
+        # 014/FR-133: record the (passing) dataset's validation warnings on the run — fail-open, the
+        # gate already ran before this run started so MLflow being down can't block it.
+        if validation_report.get("warnings"):
+            mlflow.set_tag("validation_warnings", ",".join(validation_report["warnings"]))
 
         rows = fetch_dataset(dataset_name, dataset_version)
         with tempfile.TemporaryDirectory(prefix="lora-") as tmp:
