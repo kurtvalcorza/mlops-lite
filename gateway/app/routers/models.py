@@ -114,7 +114,14 @@ async def evaluate(name: str, req: EvaluateRequest):
 async def compare(name: str, req: CompareRequest):
     """Offline champion-challenger (011 US3, FR-106): score the current `@serving` champion and the
     challenger on the same held-out benchmark — **sequentially** (one model in VRAM) — and declare a
-    per-metric winner. Blocking (loads models) → run it off the event loop."""
+    per-metric winner. Blocking (loads models) → run it off the event loop.
+
+    **Live-path limitation (until SC-068):** the per-modality predictors score whichever model the
+    serving supervisor currently holds, so today both legs hit the *same* resident `@serving` model
+    and the live comparison is degenerate (champion ≈ challenger). On-demand loading of a *specific*
+    registered version is the on-hardware step that makes a live comparison meaningful; until then,
+    drive `compare()` with seeded per-version metrics (or the injected predictor in tests). The
+    sequential-load VRAM invariant (Principle II) holds regardless."""
     try:
         res = await run_in_threadpool(
             evaluation.compare, name, req.challenger, req.benchmark, metric_name=req.metric)

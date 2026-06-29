@@ -55,6 +55,27 @@ def test_perplexity_lower_better():
     assert m.perplexity([[1.0]]) > m.perplexity([[0.1]])  # higher NLL → higher perplexity
 
 
+def test_direction_for_recovers_known_metric_directions():
+    # the gate must never silently assume higher-better: a direction is recoverable from the metric
+    # name alone, so an eval tag missing TAG_DIRECTION still gates lower-better metrics correctly.
+    assert m.direction_for("wer") == m.LOWER
+    assert m.direction_for("perplexity") == m.LOWER
+    assert m.direction_for("accuracy") == m.HIGHER
+    assert m.direction_for("auc") == m.HIGHER
+    assert m.direction_for("nonsense-metric") is None
+
+
+def test_read_eval_recovers_lower_direction_when_tag_absent():
+    # a WER eval tag written WITHOUT TAG_DIRECTION must still read back as lower-better (not the old
+    # silent HIGHER default that would invert the gate).
+    client = FakeClient({("asr", "1"): FakeMV({
+        "task": "asr", m.TAG_METRIC: "wer", m.TAG_VALUE: "0.2",
+        # TAG_DIRECTION intentionally omitted
+    })})
+    ev = m.read_eval(client, "asr", "1")
+    assert ev["metric"] == "wer" and ev["direction"] == m.LOWER
+
+
 def test_metric_for_resolves_default_and_fallback_and_rejects_unknown():
     assert m.metric_for("text-generation").name == "task_accuracy"
     assert m.metric_for("text-generation", "perplexity").name == "perplexity"

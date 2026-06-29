@@ -26,10 +26,13 @@ Heavier libs (`jiwer`, `sacrebleu`, `scikit-learn`) remain swappable behind this
 """
 import hashlib
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+_log = logging.getLogger(__name__)
 
 # mlflow + the registry module are imported lazily inside the functions that touch MLflow, so the
 # pure metric/verdict/benchmark logic imports (and unit-tests) with zero third-party dependencies —
@@ -189,6 +192,17 @@ METRICS = {
 PERPLEXITY = Metric("perplexity", LOWER, perplexity)
 
 
+def direction_for(metric_name: Optional[str]) -> Optional[str]:
+    """The known direction (`higher`/`lower`) of a metric by name, from the registry — or None if the
+    name isn't one we define. Lets `read_eval` recover a missing direction tag instead of guessing."""
+    if metric_name == PERPLEXITY.name:
+        return PERPLEXITY.direction
+    for m in METRICS.values():
+        if m.name == metric_name:
+            return m.direction
+    return None
+
+
 def metric_for(modality: str, name: Optional[str] = None) -> Metric:
     """The primary Metric for a modality (or an explicitly-named one, incl. the perplexity fallback)."""
     if name:
@@ -307,7 +321,7 @@ def _log_eval(c, name: str, version: str, result: dict) -> None:
     from mlflow.exceptions import MlflowException
 
     tags = {
-        TAG_METRIC: result["metric"], TAG_VALUE: repr(result["value"]),
+        TAG_METRIC: result["metric"], TAG_VALUE: str(result["value"]),
         TAG_DIRECTION: result["direction"], TAG_MODALITY: result["modality"],
         TAG_BENCHMARK: result["benchmark"], TAG_BENCHMARK_HASH: result["benchmark_hash"],
     }
@@ -337,9 +351,20 @@ def read_eval(c, name: str, version: Optional[str]) -> Optional[dict]:
         value = float(tags[TAG_VALUE])
     except (TypeError, ValueError):
         return None
+    metric = tags[TAG_METRIC]
+    # Direction governs the whole gate, so never *silently* assume higher-better: prefer the logged
+    # tag, else recover it from the metric registry by name (every known metric declares its
+    # direction — so a WER/perplexity tag written without TAG_DIRECTION still gates lower-better and
+    # the gate can't invert). Only an unknown metric with no tag falls back to higher-better, loudly.
+    direction = tags.get(TAG_DIRECTION) or direction_for(metric)
+    if not direction:
+        _log.warning("eval tags for %s@%s carry metric %r with no direction (tag or registry); "
+                     "assuming higher-better — set %s to gate it correctly",
+                     name, version, metric, TAG_DIRECTION)
+        direction = HIGHER
     return {
-        "version": str(version), "metric": tags[TAG_METRIC], "value": value,
-        "direction": tags.get(TAG_DIRECTION, HIGHER), "modality": tags.get(TAG_MODALITY),
+        "version": str(version), "metric": metric, "value": value,
+        "direction": direction, "modality": tags.get(TAG_MODALITY),
         "benchmark": tags.get(TAG_BENCHMARK), "benchmark_hash": tags.get(TAG_BENCHMARK_HASH),
     }
 
