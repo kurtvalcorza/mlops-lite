@@ -9,6 +9,11 @@ safetensors==0.4.5
 # Vocab handling for HF->GGUF base conversion (Qwen tokenizer) + its protobuf dep.
 sentencepiece==0.2.0
 protobuf==5.29.1
+# 010 US2 — the embeddings fine-tune flow (flows/embeddings_finetune.py) imports sentence-transformers
+# directly. Already installed in the shared ~/mlops-train venv (pinned by serving/bento/requirements.txt
+# for the 009 embeddings *service*); pinned here too so the training env is self-describing. MUST match
+# the serving pin (same venv); it reuses the frozen cu128 torch, so no new CUDA index / no stack bump.
+sentence-transformers==3.3.1
 # Tracking + registry client (matches the MLflow server) and S3 for artifact upload.
 # 007 US1: 2.18.0 -> 3.14.0 (same version as the server). GPU/FT stack stays frozen; the Prefect bump
 # is US5 (T129). torch is the cu128 wheel installed separately and is intentionally untouched here.
