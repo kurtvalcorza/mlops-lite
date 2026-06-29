@@ -135,7 +135,7 @@ def _register(model, output_name, run_id, *, base_model, dataset_name, dataset_v
 
 @flow(name="embeddings-finetune")
 def embeddings_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
-                             base_model: str = DEFAULT_BASE, epochs: int = 1, batch_size: int = 16,
+                             base_model: str | None = DEFAULT_BASE, epochs: int = 1, batch_size: int = 16,
                              warmup_ratio: float = 0.1, seed: int = 0,
                              parent_version: str | None = None) -> dict:
     """End-to-end embeddings fine-tune → registered, servable `task=embedding` version.

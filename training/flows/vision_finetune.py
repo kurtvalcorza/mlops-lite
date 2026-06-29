@@ -187,7 +187,7 @@ def _register(output_name, state_dict, categories, run_id, *, backbone, dataset_
 
 @flow(name="vision-finetune")
 def vision_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
-                         base_model: str = DEFAULT_BACKBONE, epochs: int = 3, lr: float = 1e-3,
+                         base_model: str | None = DEFAULT_BACKBONE, epochs: int = 3, lr: float = 1e-3,
                          batch_size: int = 8, unfreeze_epochs: int = 0, seed: int = 0,
                          parent_version: str | None = None) -> dict:
     """End-to-end vision transfer-learning fine-tune → registered, servable image-classification version.
