@@ -59,8 +59,10 @@ _ALL = {
         "grace_s": float(os.getenv("EMBED_GRACE", "120")),
     },
     # 009 US3 — ASR: the whisper.cpp native CUDA supervisor, a GPU-lease tenant (load-on-demand,
-    # idle-release VRAM). Like the llama supervisor it loads nothing until the first /transcribe, so a
-    # short grace suffices — the supervisor process is up fast even though the model loads lazily.
+    # idle-release VRAM). **Opt-in** (NOT in the default set below): unlike embed/tabular — whose deps
+    # bootstrap.sh installs — whisper.cpp needs a manual CUDA build (serving/whispercpp/build.sh), so
+    # on a host that hasn't built it run.sh would exit and stall bring-up (Codex review). Enable once
+    # built:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,asr,ui
     "asr": {
         "cmd": ["bash", os.path.join(REPO, "serving", "whispercpp", "run.sh")],
         "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
@@ -82,7 +84,7 @@ _ALL = {
 }
 _SELECTED = [n.strip()
              for n in os.getenv("SUPERVISE_DAEMONS",
-                                "serving,training,vision,embed,asr,tabular,ui").split(",")
+                                "serving,training,vision,embed,tabular,ui").split(",")
              if n.strip() in _ALL]
 
 

@@ -26,10 +26,28 @@ import numpy as np
 from botocore.client import Config
 
 S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("TABULAR_MODEL", "tabular-lgbm")
-KEY = os.getenv("TABULAR_MODEL_KEY", f"{NAME}/v1/model.joblib")
+KEY = os.getenv("TABULAR_MODEL_KEY", f"{NAME}/v1/model.joblib")  # fallback if the registry is down
+SERVING_ALIAS = os.getenv("TABULAR_ALIAS", "serving")
 IDLE_TIMEOUT = float(os.getenv("TABULAR_IDLE_TIMEOUT", "600"))
+
+
+def _resolve_object():
+    """The (bucket, key) of the @serving tabular version, resolved from MLflow (Codex review): serve
+    whatever version is currently promoted, not a fixed v1 key — so promoting a new artifact takes
+    effect on the next (cold) load. Falls back to the env BUCKET/KEY if the registry is unreachable."""
+    try:
+        from mlflow.tracking import MlflowClient
+        src = MlflowClient(tracking_uri=MLFLOW_URI).get_model_version_by_alias(NAME, SERVING_ALIAS).source or ""
+        if src.startswith("s3://"):
+            bucket, _, key = src[len("s3://"):].partition("/")
+            if bucket and key:
+                return bucket, key
+    except Exception:
+        pass
+    return BUCKET, KEY
 
 
 def _s3():
@@ -51,9 +69,11 @@ class TabularService:
 
     def _ensure_loaded(self):
         """Caller holds self._lock. Lazy-load the joblib artifact on first use (scale-from-zero).
-        CPU-only, no GPU lease."""
+        Resolves the @serving version's object each cold load so a promotion is picked up after an
+        idle-release/reload. CPU-only, no GPU lease."""
         if self._bundle is None:
-            blob = _s3().get_object(Bucket=BUCKET, Key=KEY)["Body"].read()
+            bucket, key = _resolve_object()
+            blob = _s3().get_object(Bucket=bucket, Key=key)["Body"].read()
             self._bundle = joblib.load(io.BytesIO(blob))
         self._last_used = time.time()
 

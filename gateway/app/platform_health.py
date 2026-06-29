@@ -26,19 +26,28 @@ _TARGETS = {
     "tabular": f"{TABULAR_URL}/readyz",
     "asr": f"{ASR_URL}/health",
 }
+# Optional daemons: probed + reported, but their absence does NOT fail `all_healthy` (Codex review).
+# ASR (whisper.cpp) needs a manual CUDA build and is opt-in in the supervisor's default set, so a host
+# that hasn't built it must still bring the platform up cleanly (up_all gates on all_healthy).
+_OPTIONAL = {"asr"}
 
 
 async def aggregate() -> dict:
-    """Best-effort probe of each daemon; returns per-daemon reachability + an overall flag."""
+    """Best-effort probe of each daemon; returns per-daemon reachability + an overall flag.
+
+    `all_healthy` reflects the REQUIRED daemons only — an opt-in daemon (ASR) that isn't built/running
+    is still reported under `daemons`, but does not hold back bring-up.
+    """
     daemons = {}
     async with httpx.AsyncClient(timeout=3) as client:
         for name, url in _TARGETS.items():
             try:
                 r = await client.get(url)
-                daemons[name] = {"reachable": r.status_code == 200, "url": url}
+                daemons[name] = {"reachable": r.status_code == 200, "url": url,
+                                 "optional": name in _OPTIONAL}
             except httpx.HTTPError:
-                daemons[name] = {"reachable": False, "url": url}
+                daemons[name] = {"reachable": False, "url": url, "optional": name in _OPTIONAL}
     return {
-        "all_healthy": all(d["reachable"] for d in daemons.values()),
+        "all_healthy": all(d["reachable"] for n, d in daemons.items() if n not in _OPTIONAL),
         "daemons": daemons,
     }

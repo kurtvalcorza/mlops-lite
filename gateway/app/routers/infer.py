@@ -34,7 +34,10 @@ async def _resolve_serving_version() -> str | None:
     task tags still resolves — i.e. existing /infer behavior is preserved exactly. Best-effort.
     """
     try:
-        target = await run_in_threadpool(registry.resolve_serving_target, "text-generation")
+        # prefer_name=SERVING_MODEL: /infer always proxies to the single llama supervisor, so report
+        # THAT model's version, never another promoted text-generation model (Codex review).
+        target = await run_in_threadpool(
+            registry.resolve_serving_target, "text-generation", SERVING_MODEL)
         if target:
             return target["version"]
         served = await run_in_threadpool(registry.get_serving, SERVING_MODEL)

@@ -130,29 +130,53 @@ def set_version_tags(name: str, version: str, tags: dict) -> dict:
 
 def _resolve_engine(c: MlflowClient, mv) -> Optional[str]:
     """The serving engine for a version: its own `serving_engine` tag, else (for a LoRA adapter
-    carrying a `base_model` tag) the base model's serving engine (FR-076) — adapters are served on
-    the base's path and never need separate engine wiring. None if neither resolves."""
+    carrying a `base_model` tag) the base model's engine (FR-076) — adapters are served on the base's
+    path and never need separate engine wiring.
+
+    The trainer tags an adapter's `base_model` with the **raw HF/local base string** (e.g.
+    `Qwen/Qwen2.5-0.5B-Instruct`), not a registered model name, so the `@serving`-alias lookup misses
+    for real trained adapters (Codex review). Resolve robustly: (1) the base's `@serving` engine, then
+    (2) the newest registered version of a model literally named `base`, then (3) — since every LoRA
+    adapter in this platform is converted to GGUF and served by llama.cpp — default a tagged adapter
+    to `llama.cpp` rather than returning None and dropping it from routing."""
     tags = dict(mv.tags or {})
     engine = tags.get(ENGINE_TAG)
     if engine:
         return engine
     base = tags.get(BASE_MODEL_TAG)
-    if base:
-        try:
-            bmv = c.get_model_version_by_alias(base, SERVING_ALIAS)
-            return dict(bmv.tags or {}).get(ENGINE_TAG)
-        except MlflowException:
-            return None
-    return None
+    if not base:
+        return None
+    try:  # (1) base is a registered model with a @serving alias (the FR-076 happy path)
+        bmv = c.get_model_version_by_alias(base, SERVING_ALIAS)
+        eng = dict(bmv.tags or {}).get(ENGINE_TAG)
+        if eng:
+            return eng
+    except MlflowException:
+        pass
+    try:  # (2) base is a registered model without an alias → its newest version's engine
+        for bmv in sorted(c.search_model_versions(f"name='{base}'"),
+                          key=lambda m: int(m.version), reverse=True):
+            eng = dict(bmv.tags or {}).get(ENGINE_TAG)
+            if eng:
+                return eng
+    except MlflowException:
+        pass
+    # (3) raw HF/local base string (the trainer's actual behavior) → a LoRA adapter is GGUF/llama.cpp.
+    return "llama.cpp"
 
 
-def resolve_serving_target(task: str) -> Optional[dict]:
+def resolve_serving_target(task: str, prefer_name: Optional[str] = None) -> Optional[dict]:
     """The model+engine currently serving `task`, resolved from registry metadata (FR-075).
 
     Finds versions tagged `task=<task>` (`search_model_versions("tags.task='…'")`) and returns the
     one its model has promoted to the `@serving` alias — so routing follows the alias + task tag, not
     a hard-coded endpoint→model map. Returns None when no serving version carries the task (e.g. the
     modality isn't seeded yet), which callers surface as "not configured".
+
+    `prefer_name` disambiguates when several models share a task (Codex review): the gateway's /infer
+    always proxies to the single llama supervisor configured by SERVING_MODEL, so a second promoted
+    text-generation model (e.g. a test/LoRA model) must NOT be reported as the served version. When
+    `prefer_name`'s own `@serving` version carries the task it wins; otherwise the first match is used.
     """
     c = _client()
     # Single-quote-escape the task so a value can't break out of the filter string.
@@ -161,16 +185,22 @@ def resolve_serving_target(task: str) -> Optional[dict]:
         versions = c.search_model_versions(f"tags.{TASK_TAG}='{safe}'")
     except MlflowException as e:
         raise RegistryError(str(e)) from e
+    first = None
     for mv in versions:
-        if _serving_version(c, mv.name) == str(mv.version):  # only the promoted version serves
-            return {
-                "name": mv.name,
-                "version": str(mv.version),
-                "task": task,
-                "serving_engine": _resolve_engine(c, mv),
-                "source": mv.source,
-            }
-    return None
+        if _serving_version(c, mv.name) != str(mv.version):  # only the promoted version serves
+            continue
+        entry = {
+            "name": mv.name,
+            "version": str(mv.version),
+            "task": task,
+            "serving_engine": _resolve_engine(c, mv),
+            "source": mv.source,
+        }
+        if prefer_name is not None and mv.name == prefer_name:
+            return entry  # the configured backend model wins over any other task-mate
+        if first is None:
+            first = entry
+    return first
 
 
 def list_tasks() -> list:

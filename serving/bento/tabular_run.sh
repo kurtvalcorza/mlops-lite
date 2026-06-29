@@ -11,6 +11,7 @@ REPO="$(cd "$DIR/../.." && pwd)"
 [[ -f "$REPO/.env" ]] && { set -a; . "$REPO/.env"; set +a; }
 
 VENV="${VENV:-$HOME/mlops-train}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:${MLFLOW_PORT:-5500}}"  # resolve @serving
 export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:9000}"
 # Bridge MinIO creds -> AWS_* for boto3; fail fast if neither is set (no minioadmin default).
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:?set MINIO_ROOT_USER (.env / scripts/gen_secrets)}}"

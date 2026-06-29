@@ -17,6 +17,12 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   exit 1
 fi
 
+# whisper-server's --convert (enabled by default in the ASR supervisor) shells out to ffmpeg to accept
+# non-WAV uploads (m4a/mp3/webm) — the console accepts audio/*. Warn if ffmpeg is absent so non-WAV
+# clips don't fail at request time (set WHISPER_CONVERT=0 to serve WAV-only without ffmpeg).
+command -v ffmpeg >/dev/null 2>&1 || \
+  echo "[warn] ffmpeg not found — non-WAV audio (m4a/mp3/webm) won't convert; install ffmpeg or set WHISPER_CONVERT=0." >&2
+
 if [[ ! -d "$SRC_DIR" ]]; then
   echo ">> cloning whisper.cpp -> $SRC_DIR"
   git clone https://github.com/ggml-org/whisper.cpp "$SRC_DIR"

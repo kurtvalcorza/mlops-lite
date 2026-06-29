@@ -12,6 +12,12 @@ REPO="$(cd "$DIR/../.." && pwd)"
 [[ -f "$REPO/.env" ]] && { set -a; . "$REPO/.env"; set +a; }
 
 VENV="${VENV:-$HOME/mlops-train}"
+# Off-lease guarantee at the PROCESS level (Codex review): MLflow's sentence_transformers flavor
+# constructs `SentenceTransformer(...)` with no device arg, which auto-selects CUDA on a GPU host and
+# would allocate VRAM *before* the service's `.to("cpu")` runs — violating off-lease + risking OOM of
+# the active GPU tenant. Hiding the GPU from this daemon makes the embeddings service unable to touch
+# VRAM at all. (Embeddings *fine-tuning* is a separate GPU path; only serving is pinned to CPU here.)
+export CUDA_VISIBLE_DEVICES=""
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:${MLFLOW_PORT:-5500}}"
 export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:9000}"
 # Bridge MinIO creds -> AWS_* for the MLflow artifact download; fail fast if neither is set.

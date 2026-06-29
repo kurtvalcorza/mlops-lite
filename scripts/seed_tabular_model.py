@@ -26,7 +26,6 @@ S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("TABULAR_MODEL", "tabular-lgbm")
-KEY = f"{NAME}/v1/model.joblib"
 FEATURES = ["f0", "f1", "f2", "f3"]
 
 
@@ -56,15 +55,22 @@ def main() -> int:
     joblib.dump({"booster": booster, "features": FEATURES}, buf)
     blob = buf.getvalue()
 
-    print(f"uploading joblib artifact to s3://{BUCKET}/{KEY} ({len(blob)//1024} KiB) ...")
-    _s3().put_object(Bucket=BUCKET, Key=KEY, Body=blob)
-    source = f"s3://{BUCKET}/{KEY}"
-
     c = MlflowClient(tracking_uri=MLFLOW_URI)
     try:
         c.create_registered_model(NAME)
     except MlflowException:
         pass
+    # Write a VERSIONED object key so promoting a new version doesn't overwrite the prior artifact —
+    # the service resolves the @serving version's source, so each version keeps its own bytes (Codex
+    # review). The next version number is monotonic; the registered source is authoritative regardless.
+    existing = c.search_model_versions(f"name='{NAME}'")
+    next_v = max((int(mv.version) for mv in existing), default=0) + 1
+    key = f"{NAME}/v{next_v}/model.joblib"
+    source = f"s3://{BUCKET}/{key}"
+
+    print(f"uploading joblib artifact to {source} ({len(blob)//1024} KiB) ...")
+    _s3().put_object(Bucket=BUCKET, Key=key, Body=blob)
+
     mv = c.create_model_version(
         name=NAME, source=source,
         tags={"kind": "tabular", "arch": "lightgbm", "framework": "lightgbm",

@@ -43,6 +43,9 @@ ASR_PORT = int(os.getenv("ASR_PORT", "8095"))
 IDLE_TIMEOUT = float(os.getenv("ASR_IDLE_TIMEOUT", "120"))  # seconds idle before VRAM release
 VRAM_GB = float(os.getenv("VRAM_GB", "12"))                 # from hardware-profile.md
 LEASE_TENANT = "asr"                                        # this daemon's GPU lease identity (009 US3)
+# whisper-server's --convert uses ffmpeg to accept non-WAV uploads (m4a/mp3/webm). The UI accepts
+# audio/*, so default it on; an operator whose whisper build/ffmpeg lacks it can disable (Codex review).
+WHISPER_CONVERT = os.getenv("WHISPER_CONVERT", "1") not in ("", "0", "false", "False")
 
 _lock = threading.RLock()
 _proc = None
@@ -99,6 +102,12 @@ def _ensure_loaded() -> float:
     global _proc, _last_load_ms
     if _resident() and _server_ready():
         return 0.0  # already loaded → we already hold the lease; no re-acquire
+    # Resident but NOT ready (a stuck/unresponsive child) → reap it BEFORE relaunching (Codex review).
+    # Otherwise we'd Popen a second child, overwrite _proc, and orphan the first — which still holds
+    # VRAM + the port; when the second (failed) child exits, _unload() would release the lease while
+    # the orphan still occupies the GPU, breaking the single-tenant invariant.
+    if _resident():
+        _unload()  # kill the stuck child + release the lease; we re-acquire fresh below
     try:
         gpu_lease.acquire(LEASE_TENANT, est_gb=_estimate_vram_gb(), vram_budget_gb=VRAM_GB)
     except gpu_lease.LeaseHeld as e:
@@ -110,9 +119,10 @@ def _ensure_loaded() -> float:
         raise RuntimeError(str(e))
     try:
         t0 = time.perf_counter()
-        _proc = subprocess.Popen(
-            [WHISPER_BIN, "-m", MODEL, "--host", "127.0.0.1", "--port", str(WHISPER_PORT)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = [WHISPER_BIN, "-m", MODEL, "--host", "127.0.0.1", "--port", str(WHISPER_PORT)]
+        if WHISPER_CONVERT:
+            cmd.append("--convert")  # accept non-WAV uploads via ffmpeg (the UI accepts audio/*)
+        _proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Record the child (the actual VRAM holder) on the lease IMMEDIATELY — same reasoning as the
         # llama supervisor (Codex 008.1 P1 #1): the lease's liveness then tracks the whisper-server
         # child, not this supervisor, so an orphaned child keeps the lease held (no co-residency) and
@@ -204,6 +214,11 @@ def _do_transcribe(body: dict) -> dict:
     language = body.get("language", "auto")
     with _lock:
         load_ms = _ensure_loaded()
+        # Stamp _last_used right after a successful (cold) load — BEFORE the backend call (Codex
+        # review): if inference then fails (e.g. corrupt audio), the idle watcher still reaps the
+        # whisper-server child and releases the lease, instead of holding VRAM forever after a failed
+        # first transcribe (its guard requires _last_used to be truthy).
+        _last_used = time.time()
         payload, content_type = _multipart(
             {"temperature": "0.0", "response_format": "json", "language": language},
             "file", filename, audio)
