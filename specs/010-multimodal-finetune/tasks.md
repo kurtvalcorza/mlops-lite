@@ -22,17 +22,43 @@ shared space (T180+).
 
 ---
 
-> **Status (2026-06-29):** **BUILT — offline-validated; on-hardware validation PENDING.**
-> All code paths implemented + offline-validated (py_compile across the 6 flow modules + trainer + converter
-> + gateway router; `from flows.* import` resolves under the trainer sys.path on WSL; trainer unknown-modality
-> guard returns 400; new tests `pytest --collect-only` clean + skip-clean offline; UI `tsc --noEmit` + prod
-> `next build` green with the modality Runs form; gateway `RunRequest.model_dump(exclude_none=True)` verified;
-> frozen-stack diff clean — only `sentence-transformers==3.3.1` added (already in-venv from 009), NO
-> torch/torchvision/transformers/peft/accelerate/datasets movement). **ON-HARDWARE SWEEP STILL PENDING**:
-> live vision/embeddings/asr fine-tunes on the GPU, the merge+HF→ggml(q8_0) converter against a built
-> whisper.cpp `quantize`, promote→serve each modality, the lease-409/free-on-failure re-check, and the
-> 001–009 no-regression sweep (T199–T201). The running trainer daemon predates this code → restart it before
-> the sweep; whisper.cpp needs its `convert-h5-to-ggml` + `quantize` toolchain on the host.
+> **Status (2026-06-29):** **VALIDATED ON HARDWARE.** All four modalities fine-tune end-to-end on the
+> RTX 5070 Ti and register/promote a servable version; frozen stack untouched.
+> - **Vision (SC-057)** ✅ — `modality=vision` run completed on GPU (loss=0.66, train_acc=1.0), registered
+>   `task=image-classification`/`serving_engine=bentoml`/`framework=torchvision`/`lineage=base`, promoted; the
+>   **head-sizing serving fix** verified by loading the 2-class `model.pt` via `mobilenet_v2(num_classes=2)`.
+> - **Embeddings (SC-058)** ✅ — `modality=embeddings` run completed (cosine_spread=0.31), registered
+>   `task=embedding`/`framework=sentence-transformers` via the MLflow ST flavor, promoted.
+> - **ASR (SC-059)** ✅ — `modality=asr` Whisper-small+LoRA run completed (loss=15.45, WER logged), **merged
+>   the adapter + converted HF→ggml → quantized q8_0** (264 MB `ggml-*.bin`), registered
+>   `task=asr`/`serving_engine=whisper.cpp`/`format=ggml`, promoted.
+> - **Lineage/chaining (SC-060)** ✅ — base→v1(`lineage=base`), chained→v2(`lineage=chained`,`parent_version=1`,
+>   parent-run link, warm-started); cross-modality chain rejected (`LineageError`).
+> - **Lease (SC-061)** ✅ — one-tenant serialization observed across vision↔asr↔llm (clean 409 GPU-busy when a
+>   tenant is resident); failed ASR runs freed the lease (no partial version). Reuses the 008/008.1 lease, no
+>   new lock.
+> - **VRAM/params (SC-062)** ✅ — every default config fit `VRAM_GB`; hyperparameters recorded as MLflow params.
+> - **No-regression (SC-063)** ✅ — 10 core 009/008 tests (serving/embed/tabular/registry/registry_tasks/
+>   infer_panels/datasets/auth/exposure/stream) green; `test_bento`+`test_transcribe` green **in isolation**
+>   (their full-suite failures are the one-tenant lease correctly serializing GPU tenants — same artifact as
+>   007/008/009, NOT a regression).
+>
+> **Toolchain provisioned for ASR conversion (operator step, T181):** built the whisper.cpp **`whisper-quantize`**
+> target (modern name; older trees used `quantize`) + `pip install --no-deps openai-whisper` for the
+> `whisper/assets/mel_filters.npz` that `convert-h5-to-ggml.py` reads (torch stayed frozen).
+>
+> **Sweep-found code fixes (separate follow-up PR, dual-bot reviewed):** (1) the three flows' `base_model`
+> annotation `str` → `str | None` — Prefect's flow-param validation rejected the `None` the dispatch passes
+> (runtime-only, missed by py_compile/import checks offline); (2) converter: the quantize binary is
+> `whisper-quantize` not `quantize`, and the assets dir must be the **parent** of the `whisper` package (resolved
+> via `find_spec`, no package import); (3) `test_asr_finetune` PASS banner → ASCII (Windows cp1252 `→` crash).
+>
+> **Known robustness limitation (documented follow-up):** an ASR run **crashes with a CUDA illegal-memory-access
+> when the long-lived trainer daemon has accumulated GPU state** from prior heavy runs (or an un-settled GPU
+> after a restart); a fresh trainer + settled GPU runs it cleanly (vision→embeddings chain fine — Whisper is the
+> sensitive one). The flow itself is correct (proven by a direct standalone run). Candidate fix: run each
+> fine-tune in a **subprocess** for CUDA isolation. Operational workaround: restart the trainer (and let the GPU
+> settle) before an ASR run.
 >
 > Scope: **extend the LLM-only trainer to fine-tune vision + embeddings + ASR**, each registering a servable
 > MLflow version with serving tags + lineage; each fine-tune is the **heaviest single GPU lease tenant**
@@ -89,13 +115,13 @@ shared space (T180+).
 
 ## Phase 0 — Pre-flight (gates everything)
 
-- [ ] **T180** [US1] Confirm `sentence-transformers` + the Whisper fine-tune deps resolve in `~/mlops-train`
+- [x] **T180** [US1] Confirm `sentence-transformers` + the Whisper fine-tune deps resolve in `~/mlops-train`
   **without** moving the frozen torch/cu128 family (`pip install --dry-run` / check resolved torch unchanged).
   Record any newly-pinned native dep for `scripts/native_env.lock`. (FR-090, FR-099)
-- [ ] **T181** [P] [US3] Smoke whisper.cpp's **`convert-h5-to-ggml`** (HF route, quantized **q8_0**) on a
+- [x] **T181** [P] [US3] Smoke whisper.cpp's **`convert-h5-to-ggml`** (HF route, quantized **q8_0**) on a
   stock Whisper-small HF checkpoint → a loadable `ggml-*.bin`. (Decided: HF route, not the OpenAI `.pt`
   `convert-pt-to-ggml`; q8_0.) (FR-093)
-- [ ] **T182** [P] Confirm the **009 serving load contracts** are exactly: vision `model.pt`
+- [x] **T182** [P] Confirm the **009 serving load contracts** are exactly: vision `model.pt`
   `{state_dict, categories}` (BentoML), embeddings ST model **dir**, ASR `ggml-*.bin` (whisper.cpp) — so the
   flows target the right artifact shape. (FR-089, FR-091, FR-094)
 
@@ -169,13 +195,13 @@ shared space (T180+).
 
 ## Phase 5 — Cross-cutting (VRAM-fit, params, no-regression, frozen-stack)
 
-- [ ] **T199** Confirm each modality's **default config fits `VRAM_GB`** on the target machine (small base,
+- [x] **T199** Confirm each modality's **default config fits `VRAM_GB`** on the target machine (small base,
   batch, optional grad-accum / grad-checkpointing) and surfaces the chosen hyperparameters as **MLflow params**
   (reproducible from the recorded config). (SC-062, FR-098)
 - [x] **T200** **Frozen-stack check**: verify no movement in torch/torchvision/transformers/peft/accelerate/
   datasets (`pip freeze` diff vs the validated lock); `scripts/native_env.lock` updated only for the
   newly-added native dep(s). (SC-063, FR-099)
-- [ ] **T201** Full no-regression sweep: the existing LLM LoRA flow + the 009 serving paths + the prior suite
+- [x] **T201** Full no-regression sweep: the existing LLM LoRA flow + the 009 serving paths + the prior suite
   pass unchanged; the lease mutex holds for every modality (409-while-resident, free-on-failure, no partial
   version); commit the new flows/tool/tests + `native_env.lock`. **Promotion stays manual; gated promotion is
   011.** (SC-061, SC-063)

@@ -184,7 +184,7 @@ def _register(output_name, ggml_path, run_id, *, base_model, dataset_name, datas
 
 @flow(name="asr-finetune")
 def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
-                      base_model: str = DEFAULT_BASE, epochs: int = 3, lr: float = 1e-4,
+                      base_model: str | None = DEFAULT_BASE, epochs: int = 3, lr: float = 1e-4,
                       grad_accum: int = 4, warmup_ratio: float = 0.1, lora_r: int = 8, seed: int = 0,
                       quant: str = "q8_0", parent_version: str | None = None) -> dict:
     """End-to-end ASR fine-tune → merge → HF→ggml(q8_0) → registered, servable `task=asr` version.

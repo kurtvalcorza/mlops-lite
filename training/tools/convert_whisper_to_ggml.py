@@ -25,30 +25,45 @@ import sys
 WHISPER_CPP_DIR = os.path.expanduser(os.getenv("WHISPER_CPP_DIR", "~/whisper.cpp"))
 HF_CONVERT = os.path.expanduser(
     os.getenv("WHISPER_HF_CONVERT", os.path.join(WHISPER_CPP_DIR, "models", "convert-h5-to-ggml.py")))
-QUANTIZE_BIN = os.path.expanduser(
-    os.getenv("WHISPER_QUANTIZE", os.path.join(WHISPER_CPP_DIR, "build", "bin", "quantize")))
 
 
 def _log(msg):
     print(msg, flush=True)
 
 
-def _whisper_assets_dir() -> str:
-    """The OpenAI-whisper package dir convert-h5-to-ggml.py reads for mel filters + the tokenizer.
+def _quantize_bin() -> str:
+    """The whisper.cpp quantize binary. Prefer WHISPER_QUANTIZE; else look under build/bin — modern
+    whisper.cpp names the target **`whisper-quantize`** (older trees used `quantize`), so try both."""
+    env = os.getenv("WHISPER_QUANTIZE")
+    if env:
+        return os.path.expanduser(env)
+    for name in ("whisper-quantize", "quantize"):
+        p = os.path.join(WHISPER_CPP_DIR, "build", "bin", name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(WHISPER_CPP_DIR, "build", "bin", "whisper-quantize")  # for the not-found error
 
-    Prefer WHISPER_ASSETS_DIR; else auto-locate the installed `openai-whisper` package. Raise a clear
-    error if neither resolves (so the failure is "install/point at whisper assets", not a cryptic
-    converter traceback)."""
+
+def _whisper_assets_dir() -> str:
+    """The directory passed to convert-h5-to-ggml.py as its `<whisper-repo>` arg.
+
+    The script reads `<dir>/whisper/assets/mel_filters.npz`, so `dir` must be the **parent** of the
+    `whisper` package (the site-packages of an installed openai-whisper, or a cloned openai/whisper repo
+    root) — NOT the package dir itself. Prefer WHISPER_ASSETS_DIR; else locate the installed `whisper`
+    package WITHOUT importing it (`find_spec` doesn't run its `__init__`, so a `--no-deps` openai-whisper
+    — installed purely for the assets — still resolves even if tiktoken/numba aren't present)."""
     env = os.getenv("WHISPER_ASSETS_DIR")
     if env:
         return os.path.expanduser(env)
-    try:
-        import whisper  # openai-whisper, if installed
-        return os.path.dirname(os.path.abspath(whisper.__file__))
-    except Exception as e:
-        raise FileNotFoundError(
-            "whisper assets dir not found: set WHISPER_ASSETS_DIR to the openai-whisper package dir "
-            "(it carries the mel filters + tokenizer convert-h5-to-ggml.py needs)") from e
+    import importlib.util
+    spec = importlib.util.find_spec("whisper")
+    if spec and spec.origin:
+        pkg = os.path.dirname(os.path.abspath(spec.origin))   # <site-packages>/whisper
+        if os.path.exists(os.path.join(pkg, "assets", "mel_filters.npz")):
+            return os.path.dirname(pkg)                        # <site-packages> (the dir_whisper arg)
+    raise FileNotFoundError(
+        "whisper assets not found: `pip install openai-whisper` (its whisper/assets/mel_filters.npz is "
+        "what convert-h5-to-ggml.py reads), or set WHISPER_ASSETS_DIR to a dir containing whisper/assets/")
 
 
 def _run(cmd: list, what: str) -> None:
@@ -85,10 +100,12 @@ def convert_whisper_to_ggml(hf_model_dir: str, out_path: str, quant: str = "q8_0
             os.replace(f16, out_path)
         _log(f"ggml (f16) written: {out_path} ({os.path.getsize(out_path)} bytes)")
         return out_path
-    if not os.path.exists(QUANTIZE_BIN):
-        raise FileNotFoundError(f"whisper.cpp quantize binary not found at {QUANTIZE_BIN} "
-                                f"(build whisper.cpp or set WHISPER_QUANTIZE; or pass quant='f16')")
-    _run([QUANTIZE_BIN, f16, out_path, quant], f"quantize -> {quant}")
+    qbin = _quantize_bin()
+    if not os.path.exists(qbin):
+        raise FileNotFoundError(f"whisper.cpp quantize binary not found at {qbin} "
+                                f"(build the whisper-quantize target or set WHISPER_QUANTIZE; or "
+                                f"pass quant='f16')")
+    _run([qbin, f16, out_path, quant], f"quantize -> {quant}")
     if not os.path.exists(out_path):
         raise RuntimeError(f"quantize produced no {out_path}")
     try:

@@ -107,7 +107,7 @@ def main() -> int:
         return 1
     print(f"[OK] promoted {OUTPUT} v{mv['version']} to serving")
 
-    print("\nT194 PASS — audio dataset -> Whisper+LoRA run -> merged + HF→ggml(q8_0) -> tagged, "
+    print("\nT194 PASS — audio dataset -> Whisper+LoRA run -> merged + HF->ggml(q8_0) -> tagged, "
           "promotable asr version")
     return 0
 
