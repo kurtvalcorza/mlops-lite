@@ -5,7 +5,8 @@
 **Input**: Feature specification from `specs/009-inference-modalities/spec.md` (registry task/engine
 metadata + a task-driven Infer panel + three new served modalities: embeddings, ASR, tabular)
 
-**Status**: **DRAFT — GRILLED (2026-06-28), build-ready**
+**Status**: **BUILT (2026-06-29) — offline-validated; on-hardware validation PENDING** (was DRAFT —
+GRILLED 2026-06-28, build-ready)
 
 **Grilled decisions (2026-06-28):** (a) **embeddings = CPU, off-lease, always-available BentoML service**
 (corrected from GPU-lease tenant) — `serving_engine=bentoml`, `@bentoml.api(batchable=True)` for CPU

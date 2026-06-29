@@ -4,7 +4,10 @@
 
 **Created**: 2026-06-28
 
-**Status**: **DRAFT — GRILLED (2026-06-28), build-ready**
+**Status**: **BUILT (2026-06-29) — offline-validated; on-hardware validation PENDING** (was DRAFT —
+GRILLED 2026-06-28, build-ready). All five phases implemented; py_compile + tsc + pytest-collect +
+the stdlib gpu_lease unit test green, new modality tests skip-clean. Pending on the GPU host: deps
+install + whisper.cpp CUDA build, then the keyed no-regression + lease-swap sweep (see tasks.md).
 
 **Grilled decisions (2026-06-28):**
 1. **Embeddings = CPU, off-lease, always-available BentoML service** (corrected from GPU-lease tenant).
