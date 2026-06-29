@@ -20,8 +20,18 @@ def load_quality():
     return mod
 
 
+class FakeClientError(Exception):
+    """Mimics botocore's ClientError shape so quality._missing() can tell a 404 from a transient error."""
+
+    def __init__(self, code="404"):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
 class FakeS3:
-    """Minimal in-memory S3: enough surface for quality.py's put/get/head/list over the results bucket."""
+    """Minimal in-memory S3: enough surface for quality.py's put/get/head/list over the results bucket.
+    Missing keys raise a 404-shaped ClientError (like real boto3), so the not-found vs transient
+    distinction in attach_label is exercised faithfully."""
 
     def __init__(self):
         self.objs = {}  # key -> bytes
@@ -31,15 +41,16 @@ class FakeS3:
 
     def get_object(self, Bucket, Key):
         if Key not in self.objs:
-            raise KeyError(Key)
+            raise FakeClientError("NoSuchKey")
         return {"Body": io.BytesIO(self.objs[Key])}
 
     def head_object(self, Bucket, Key):
         if Key not in self.objs:
-            raise KeyError(Key)
+            raise FakeClientError("404")
         return {}
 
     def list_objects_v2(self, Bucket, Prefix="", **kw):
+        # single un-truncated page (no IsTruncated) — quality._list_keys terminates after one call.
         return {"Contents": [{"Key": k} for k in sorted(self.objs) if k.startswith(Prefix)]}
 
 

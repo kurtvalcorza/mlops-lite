@@ -3,9 +3,11 @@
 The bento runs natively in WSL (CPU); the gateway forwards a base64 image as the multipart upload
 BentoML expects. Same hybrid-split as LLM serving — `serve_up.ps1` injects the bento's IP.
 """
+import asyncio
 import base64
 import hashlib
 import os
+import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -18,14 +20,18 @@ from .. import quality, registry
 router = APIRouter()
 
 BENTO_URL = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
+# The vision model this gateway's bento serves — `prefer_name` for the registry resolve, so with
+# several promoted image-classification models the logged version attributes to the right one.
+VISION_SERVING_MODEL = os.getenv("VISION_SERVING_MODEL")
 VISION_REQUESTS = Counter("gateway_vision_total", "Vision classify requests", ["status"])
 
 
-async def _resolve_vision_version() -> tuple:
+def _resolve_vision_version() -> tuple:
     """Best-effort (model_name, version) currently serving image-classification, for prediction logging
-    — never raises, never blocks the response (None on any failure), mirroring /infer's resolve."""
+    — never raises (None on any failure). Prefers VISION_SERVING_MODEL so the right model is attributed
+    when several image-classification models are promoted (Codex P2). Blocking → call off the loop."""
     try:
-        target = await run_in_threadpool(registry.resolve_serving_target, "image-classification")
+        target = registry.resolve_serving_target("image-classification", VISION_SERVING_MODEL)
         return (target["name"], target["version"]) if target else (None, None)
     except Exception:
         return (None, None)
@@ -74,11 +80,23 @@ async def classify(req: ClassifyRequest):
         raise HTTPException(status_code=409,
                             detail=data.get("detail", "GPU busy — free the GPU and retry"))
     VISION_REQUESTS.labels(status="ok").inc()
-    # 013/FR-119: log the served classification off the request path (fire-and-forget, fail-open). The
-    # input ref is the image's content hash (not the raw bytes) so capture-on logging stays light.
-    name, version = await _resolve_vision_version()
+    # 013/FR-119: log the served classification fully OFF the response path. The prediction id is
+    # generated synchronously (returned to the caller), while the registry version-resolve + the store
+    # write run in a fire-and-forget background task — so a slow/unreachable registry adds no latency to
+    # the served response (Codex P2). The input ref is the image's content hash (capture-on stays light).
+    pid = uuid.uuid4().hex
     input_ref = "sha256:" + hashlib.sha256(raw).hexdigest()[:16]
-    pid = quality.log_prediction(name, version, "image-classification", input_ref, _top_label(data))
+    label = _top_label(data)
+
+    async def _log():
+        name, version = await run_in_threadpool(_resolve_vision_version)
+        quality.log_prediction(name, version, "image-classification", input_ref, label,
+                               prediction_id=pid)
+
+    try:
+        asyncio.ensure_future(_log())
+    except Exception:  # never let logging setup affect the served response (fail-open)
+        pass
     if isinstance(data, dict):
         data = {**data, "prediction_id": pid}
     return data

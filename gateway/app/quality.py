@@ -57,6 +57,10 @@ _log_sem = threading.BoundedSemaphore(_MAX_CONCURRENT_LOGS)
 
 _EVAL = None
 _GAUGES = None
+# Serializes the label check-then-write so concurrent submissions for the same id can't both pass the
+# duplicate check and the second overwrite the first (write-once, single-instance best-effort — S3 has no
+# native compare-and-swap; a multi-replica gateway would need conditional puts, out of scope here).
+_label_write_lock = threading.Lock()
 
 
 class QualityError(Exception):
@@ -151,6 +155,32 @@ def _get_json(key: str):
     return json.loads(_s3().get_object(Bucket=RESULTS_BUCKET, Key=key)["Body"].read())
 
 
+def _list_keys(s3, prefix: str) -> list:
+    """All object keys under `prefix`, paginating past the 1000-object `list_objects_v2` cap. Prediction
+    ids are UUIDs (hex-sorted by S3, not by time), so a truncated first page would window over an
+    arbitrary slice and silently drift the quality metric — the continuation loop avoids that."""
+    keys, token = [], None
+    while True:
+        kw = {"Bucket": RESULTS_BUCKET, "Prefix": prefix}
+        if token:
+            kw["ContinuationToken"] = token
+        page = s3.list_objects_v2(**kw)
+        keys.extend(o["Key"] for o in page.get("Contents", []))
+        if not page.get("IsTruncated"):
+            break
+        token = page.get("NextContinuationToken")
+        if not token:
+            break
+    return keys
+
+
+def _missing(e) -> bool:
+    """True if an S3 head/get error means the key doesn't exist (a 404), vs a transient error — so a
+    transient store blip isn't misreported as 'no such prediction' / 'no existing label'."""
+    resp = getattr(e, "response", None)
+    return isinstance(resp, dict) and resp.get("Error", {}).get("Code") in ("404", "NoSuchKey")
+
+
 # --- US1: label ingestion (by prediction id, delayed-friendly) ------------------------------------
 
 def attach_label(prediction_id: str, label) -> dict:
@@ -162,19 +192,25 @@ def attach_label(prediction_id: str, label) -> dict:
     label_key = f"{LABEL_PREFIX}{prediction_id}.json"
     try:
         s3.head_object(Bucket=RESULTS_BUCKET, Key=pred_key)
-    except Exception:
-        return {"prediction_id": prediction_id, "status": "unknown",
-                "detail": "no logged prediction with this id"}
-    try:  # reject a duplicate — a label is write-once, so served history can't be silently overwritten
-        s3.head_object(Bucket=RESULTS_BUCKET, Key=label_key)
-        return {"prediction_id": prediction_id, "status": "duplicate",
-                "detail": "this prediction already has a label"}
-    except Exception:
-        pass
-    try:
-        _put_json(label_key, {"prediction_id": prediction_id, "label": label, "ts": time.time()})
     except Exception as e:
-        raise QualityError(f"cannot store label for {prediction_id}: {e}") from e
+        if _missing(e):  # a real 404 → genuinely no such prediction
+            return {"prediction_id": prediction_id, "status": "unknown",
+                    "detail": "no logged prediction with this id"}
+        raise QualityError(f"cannot check prediction {prediction_id}: {e}") from e  # transient → surface
+    # Serialize the duplicate-check + write so two concurrent submissions for the same id can't both
+    # see "no label" and the second overwrite the first (write-once, Codex P2).
+    with _label_write_lock:
+        try:  # reject a duplicate — a label is write-once, served history can't be silently overwritten
+            s3.head_object(Bucket=RESULTS_BUCKET, Key=label_key)
+            return {"prediction_id": prediction_id, "status": "duplicate",
+                    "detail": "this prediction already has a label"}
+        except Exception as e:
+            if not _missing(e):  # only a confirmed 404 means "no existing label" — never overwrite on a blip
+                raise QualityError(f"cannot check existing label for {prediction_id}: {e}") from e
+        try:
+            _put_json(label_key, {"prediction_id": prediction_id, "label": label, "ts": time.time()})
+        except Exception as e:
+            raise QualityError(f"cannot store label for {prediction_id}: {e}") from e
     return {"prediction_id": prediction_id, "status": "attached"}
 
 
@@ -198,6 +234,8 @@ def score_window(pairs: list, modality: str, *, window_n: int = WINDOW_N, min_pa
     scored (sliding count-based window). Returns `(metric_name, value, direction, n_used)`, or
     `(metric_name, None, direction, n_used)` when there are too few pairs to be meaningful
     (insufficient data — never a misleading number, FR-123)."""
+    if window_n <= 0:  # `pairs[-0:]` is the WHOLE history, not an empty window — reject the invalid input
+        raise QualityError(f"window_n must be positive, got {window_n}")
     metric = _modality_metric(modality)
     window = pairs[-window_n:]
     if len(window) < min_pairs:
@@ -241,22 +279,32 @@ def evaluate_quality(pairs: list, *, modality: str, model_version: str, baseline
 
 # --- US2: I/O wrapper — join from the store, compute, export, persist ------------------------------
 
-def _load_pairs(model_version: str) -> list:
-    """Join logged predictions ↔ labels by id for one model version, chronologically (oldest→newest).
-    Only labeled predictions become pairs; unlabeled ones stay pending (excluded, never scored)."""
+def _load_pairs(model_version: str, modality: str, model_name=None) -> list:
+    """Join logged predictions ↔ labels by id, chronologically (oldest→newest), for the **same model +
+    version + modality** — MLflow versions are per-model, so LLM v1 and vision v1 coexist; filtering on
+    version alone would score one model's rows against the other's metric (Codex P1). Only labeled
+    predictions become pairs; unlabeled stay pending (excluded). Records with **no captured prediction**
+    (streamed output, or `QUALITY_CAPTURE_IO=0`) are unscorable and excluded — never scored as "none"
+    (Codex P1)."""
     s3 = _s3()
     try:
-        page = s3.list_objects_v2(Bucket=RESULTS_BUCKET, Prefix=PRED_PREFIX)
+        keys = _list_keys(s3, PRED_PREFIX)  # paginated — never truncates past 1000 (review §1)
     except Exception as e:
         raise QualityError(f"cannot list predictions: {e}") from e
     pairs = []
-    for obj in page.get("Contents", []):
+    for key in keys:
         try:
-            pred = _get_json(obj["Key"])
+            pred = _get_json(key)
         except Exception:
             continue
         if str(pred.get("model_version")) != str(model_version):
             continue
+        if pred.get("modality") != modality:
+            continue  # like-for-like: don't mix modalities that share a version string
+        if model_name and pred.get("model_name") != model_name:
+            continue
+        if pred.get("prediction") is None:
+            continue  # uncaptured (streamed / capture-off) → unscorable, excluded (never scored wrong)
         pid = pred.get("prediction_id")
         try:
             label = _get_json(f"{LABEL_PREFIX}{pid}.json")
@@ -296,19 +344,23 @@ def compute_quality(model_name, model_version, modality, *, baseline=None, windo
                     min_pairs: int = MIN_PAIRS, drop_pct: float = DROP_PCT, store: bool = True) -> dict:
     """Compute windowed quality for a model version from the store, export the gauges, and persist a
     QualityReport to the `results` bucket. The breach baseline defaults to the 011 eval baseline."""
-    pairs = _load_pairs(model_version)
+    pairs = _load_pairs(model_version, modality, model_name=model_name)
     if baseline is None:
         baseline = _resolve_baseline(model_name, model_version, modality)
     report = evaluate_quality(pairs, modality=modality, model_version=model_version, baseline=baseline,
                               window_n=window_n, min_pairs=min_pairs, drop_pct=drop_pct,
                               model_name=model_name)
+    g = _gauges()
     if report["value"] is not None:
-        g = _gauges()
         g["score"].labels(model_version=str(model_version), modality=modality).set(report["value"])
-        g["breach"].labels(model_version=str(model_version), modality=modality).set(
-            1 if report["breach"] else 0)
+    # Always clear the breach gauge to the current verdict — including 0 on insufficient data — so a
+    # stale breach=1 from a prior check can't keep showing a false active breach (Codex P2).
+    g["breach"].labels(model_version=str(model_version), modality=modality).set(
+        1 if report["breach"] else 0)
     if store:
-        report_id = f"{model_version}_{int(report['created_at'])}"
+        # ms precision + a short uuid suffix so two checks of the same version in the same second don't
+        # collide and silently overwrite each other's report (review §5).
+        report_id = f"{model_version}_{int(report['created_at'] * 1000)}_{uuid.uuid4().hex[:6]}"
         report["report_id"] = report_id
         try:
             _put_json(f"{QUALITY_PREFIX}{report_id}.json", report)
@@ -321,13 +373,13 @@ def latest_quality_reports(limit: int = 20) -> list:
     """Recent quality reports from the results bucket, newest first (mirrors monitoring.latest_reports)."""
     s3 = _s3()
     try:
-        page = s3.list_objects_v2(Bucket=RESULTS_BUCKET, Prefix=QUALITY_PREFIX)
+        keys = _list_keys(s3, QUALITY_PREFIX)  # paginated (review §1)
     except Exception as e:
         raise QualityError(f"cannot list quality reports: {e}") from e
     reports = []
-    for o in page.get("Contents", []):
+    for key in keys:
         try:
-            reports.append(_get_json(o["Key"]))
+            reports.append(_get_json(key))
         except Exception:
             pass
     reports.sort(key=lambda r: r.get("created_at", 0), reverse=True)
@@ -354,6 +406,20 @@ def note_retrain(now: float = None) -> None:
     global _last_retrain_monotonic
     with _cooldown_lock:
         _last_retrain_monotonic = time.monotonic() if now is None else now
+
+
+def try_reserve_retrain(now: float = None, cooldown_sec: float = None) -> bool:
+    """**Atomically** check-and-start the cooldown: return True (and begin the window) only if not
+    already cooling down, else False. The quality trigger reserves before launching so two concurrent
+    `/monitor/quality/check` calls can't both pass an in_cooldown() check and double-fire (Codex P2)."""
+    cd = RETRAIN_COOLDOWN_SEC if cooldown_sec is None else cooldown_sec
+    t = time.monotonic() if now is None else now
+    global _last_retrain_monotonic
+    with _cooldown_lock:
+        if _last_retrain_monotonic > 0 and (t - _last_retrain_monotonic) < cd:
+            return False
+        _last_retrain_monotonic = t
+        return True
 
 
 def reset_cooldown() -> None:

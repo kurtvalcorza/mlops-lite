@@ -12,7 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import monitoring, quality
 
@@ -103,8 +103,9 @@ class QualityCheck(BaseModel):
     model_name: Optional[str] = None       # registered model name (for the 011 baseline lookup)
     model_version: str                     # the version whose served predictions to score
     modality: str                          # task/modality key (reuses 011's metric registry)
-    window_n: int = quality.WINDOW_N       # sliding count-based window (last N labeled pairs)
-    drop_pct: float = quality.DROP_PCT     # breach: >X% below the 011 baseline
+    # window_n must be positive — pairs[-0:] would score the WHOLE history, not an empty window (Codex P2).
+    window_n: int = Field(default=quality.WINDOW_N, gt=0)  # sliding window = last N labeled pairs
+    drop_pct: float = Field(default=quality.DROP_PCT, ge=0)  # breach: >X% below the 011 baseline
     baseline: Optional[float] = None       # override the auto-resolved 011 eval baseline
     retrain: Optional[RetrainSpec] = None  # when set, a breach fires this run (OR + cooldown)
 
@@ -135,14 +136,17 @@ async def quality_check(body: QualityCheck):
 
     retrain = None
     if report["breach"] and body.retrain is not None:
-        if quality.in_cooldown():
+        # OR + cooldown (asymmetric by design): the input-PSI breach is the *leading* signal and fires
+        # unconditionally (above); the quality breach is the *confirming* signal and debounces against a
+        # retrain from EITHER signal so the two don't storm retrains together (FR-126).
+        if not quality.try_reserve_retrain():  # atomic: reserve the cooldown before launching (no race)
             retrain = {"skipped": "cooldown"}  # OR+cooldown debounce — a retrain fired too recently
         else:
+            # the cooldown is already reserved (try_reserve_retrain) — launching now, fail-soft.
             try:
                 retrain = await run_in_threadpool(_launch_retrain, body.retrain)
                 RETRAINS.labels(result="launched").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="launched").inc()
-                quality.note_retrain()
             except Exception as e:  # fail-soft — the quality report still stands (FR-125)
                 RETRAINS.labels(result="failed").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="failed").inc()

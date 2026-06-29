@@ -8,7 +8,7 @@ keyed stack) are exercised in test_ui/integration; here the logic is pinned with
 import json
 import sys
 
-from _quality import install_fakes, load_quality
+from _quality import FakeClientError, install_fakes, load_quality
 
 q = load_quality()
 
@@ -120,7 +120,7 @@ def test_join_excludes_unlabeled_and_late_label_counts():
     _seed_prediction(fake, q, "c", "3", "vision", "cat", 3.0)
     q.attach_label("c", "cat")            # newer prediction labeled first
     q.attach_label("a", "bird")           # late label for the older prediction
-    pairs = q._load_pairs("3")
+    pairs = q._load_pairs("3", "vision")
     assert len(pairs) == 2                # unlabeled "b" excluded (pending, never scored — SC-076)
     assert [p["ts"] for p in pairs] == [1.0, 3.0]   # chronological; the late label still joined
 
@@ -131,7 +131,58 @@ def test_load_pairs_filters_by_model_version():
     _seed_prediction(fake, q, "b", "4", "vision", "cat", 2.0)  # different version
     q.attach_label("a", "cat")
     q.attach_label("b", "cat")
-    assert len(q._load_pairs("3")) == 1   # model-version skew: v4's pair excluded (FR-121)
+    assert len(q._load_pairs("3", "vision")) == 1   # model-version skew: v4's pair excluded (FR-121)
+
+
+def test_load_pairs_filters_by_modality_and_model_name():
+    # LLM v1 and vision v1 coexist (versions are per-model) — a vision check must not score LLM rows.
+    fake = install_fakes(q)
+    _seed_prediction(fake, q, "v", "1", "image-classification", "cat", 1.0)
+    _seed_prediction(fake, q, "t", "1", "text-generation", "hello", 2.0)
+    q.attach_label("v", "cat")
+    q.attach_label("t", "hello")
+    vis = q._load_pairs("1", "image-classification")
+    assert len(vis) == 1 and vis[0]["prediction"] == "cat"   # only the vision row
+    llm = q._load_pairs("1", "text-generation")
+    assert len(llm) == 1 and llm[0]["prediction"] == "hello"  # only the LLM row
+
+
+def test_load_pairs_excludes_uncaptured_predictions():
+    # streamed / capture-off records log prediction=None — unscorable, must be excluded (not scored "none").
+    fake = install_fakes(q)
+    _seed_prediction(fake, q, "ok", "3", "text-generation", "answer", 1.0)
+    _seed_prediction(fake, q, "stream", "3", "text-generation", None, 2.0)  # uncaptured output
+    q.attach_label("ok", "answer")
+    q.attach_label("stream", "answer")
+    pairs = q._load_pairs("3", "text-generation")
+    assert len(pairs) == 1 and pairs[0]["prediction"] == "answer"  # the None-prediction row excluded
+
+
+def test_attach_label_transient_error_raises_not_unknown(monkeypatch):
+    # a non-404 store error must surface as QualityError (retryable), not be misreported as "unknown".
+    fake = install_fakes(q)
+
+    def boom(Bucket, Key):
+        raise FakeClientError("500")   # transient, not a 404
+    monkeypatch.setattr(fake, "head_object", boom)
+    try:
+        q.attach_label("p1", "cat")
+    except q.QualityError:
+        pass
+    else:
+        raise AssertionError("expected QualityError on a transient store error")
+
+
+def test_list_keys_paginates_past_one_page():
+    # _list_keys must follow IsTruncated/NextContinuationToken, not stop at the first page.
+    class PagedS3:
+        def list_objects_v2(self, Bucket, Prefix="", ContinuationToken=None, **kw):
+            if ContinuationToken is None:
+                return {"Contents": [{"Key": "predictions/a.json"}], "IsTruncated": True,
+                        "NextContinuationToken": "tok2"}
+            return {"Contents": [{"Key": "predictions/b.json"}], "IsTruncated": False}
+    keys = q._list_keys(PagedS3(), "predictions/")
+    assert keys == ["predictions/a.json", "predictions/b.json"]  # both pages collected
 
 
 if __name__ == "__main__":

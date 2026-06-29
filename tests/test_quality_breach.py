@@ -59,6 +59,27 @@ def test_cooldown_debounces_a_recent_retrain():
     q.reset_cooldown()
 
 
+def test_try_reserve_retrain_is_atomic_one_winner():
+    # two concurrent quality checks must not both launch: the first reserve wins, the second is debounced.
+    q.reset_cooldown()
+    assert q.try_reserve_retrain(now=1000.0, cooldown_sec=3600) is True   # first call reserves
+    assert q.try_reserve_retrain(now=1001.0, cooldown_sec=3600) is False  # second is inside cooldown
+    assert q.try_reserve_retrain(now=5000.0, cooldown_sec=3600) is True   # window elapsed → free again
+    q.reset_cooldown()
+
+
+def test_window_n_must_be_positive():
+    # window_n<=0 would make pairs[-0:] the WHOLE history — reject it rather than score everything.
+    pairs = [{"prediction": "x", "label": "y"} for _ in range(30)]
+    for bad in (0, -5):
+        try:
+            q.score_window(pairs, "vision", window_n=bad, min_pairs=1)
+        except q.QualityError:
+            pass
+        else:
+            raise AssertionError(f"expected QualityError for window_n={bad}")
+
+
 def test_cooldown_is_shared_across_signals():
     # the policy is OR + cooldown: a retrain from EITHER signal starts the same clock, so the other
     # signal is debounced. note_retrain() is the single shared gate both triggers call.

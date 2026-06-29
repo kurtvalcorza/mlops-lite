@@ -133,13 +133,22 @@ async def infer_stream(req: StreamRequest):
             # The streamed tokens aren't buffered (the SSE bytes stay byte-identical), so the output is
             # left uncaptured — the prediction id + prompt + version are still logged for later labeling.
             if outcome == "completed":
+                # Fully off the response path: schedule the version-resolve + store write as a detached
+                # task so the generator's teardown (the chunked-encoding terminator) isn't delayed by a
+                # registry call (Codex P2). The streamed bytes are already delivered + unaffected.
+                async def _log():
+                    try:
+                        served = await run_in_threadpool(registry.get_serving, serving.SERVING_MODEL)
+                        version = served["version"] if served else None
+                    except Exception:
+                        version = None
+                    quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
+                                           req.prompt, None)
+
                 try:
-                    served = await run_in_threadpool(registry.get_serving, serving.SERVING_MODEL)
-                    version = served["version"] if served else None
-                except Exception:
-                    version = None
-                quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
-                                       req.prompt, None)
+                    asyncio.ensure_future(_log())
+                except Exception:  # never let logging setup affect the stream
+                    pass
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 
