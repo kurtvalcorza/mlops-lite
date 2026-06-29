@@ -1,0 +1,5 @@
+# Shell scripts run under bash in WSL — CRLF breaks them at parse time
+# (`set -euo pipefail\r` -> "invalid option name"). Force LF so a Windows checkout
+# can't reintroduce CRLF. Surfaced by the 009 on-hardware sweep: build.sh/run.sh/
+# embed_run.sh/tabular_run.sh/reseed_registry.sh/bootstrap.sh had CRLF and failed.
+*.sh text eol=lf
