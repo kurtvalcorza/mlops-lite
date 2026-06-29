@@ -54,9 +54,10 @@ TRAIN_EST_GB = float(os.getenv("TRAIN_EST_GB", "2.0"))
 RUN_FLOW = os.path.join(HERE, "run_flow.py")  # the per-run subprocess entry (CUDA isolation)
 LOG_DIR = os.getenv("TRAINER_LOG_DIR", os.path.join(tempfile.gettempdir(), "mlops-lite-trainer-logs"))
 
-_lock = threading.Lock()           # one run at a time
+_lock = threading.Lock()           # one run OR study at a time (shared single-GPU-tenant gate)
 _runs: dict = {}                   # run_id -> job record
-_active: str | None = None
+_studies: dict = {}                # study_id -> study record (012 HPO)
+_active: str | None = None         # the run_id or study_id currently holding the GPU lease
 
 
 def _gpu_free_mib():
@@ -134,6 +135,31 @@ def _worker(run_id: str, req: dict):
             _active = None
 
 
+def _study_worker(study_id: str, req: dict):
+    """Run one HPO study (012 US1): an Optuna study whose trials are sequential `finetune_flow` runs,
+    each scored by 011's eval metric, best registered. Runs **in the daemon process** (Optuna + MLflow
+    are torch-free) while each trial spawns its own training subprocess (CUDA isolation, via hpo's
+    default train seam) — so trials never co-reside on the GPU. Releases the lease on completion."""
+    global _active
+    rec = _studies[study_id]
+    try:
+        rec["status"] = "running"
+        from flows.hpo import run_study
+        kwargs = {"overrides": req.get("overrides") or None}
+        if req.get("n_trials") is not None:
+            kwargs["n_trials"] = int(req["n_trials"])
+        if req.get("timeout") is not None:
+            kwargs["timeout"] = float(req["timeout"])
+        summary = run_study(req, **kwargs)
+        rec.update(status="completed", summary=summary, best=summary.get("best"))
+    except Exception as e:
+        rec.update(status="failed", error=f"{type(e).__name__}: {e}")
+    finally:
+        with _lock:  # release + clear atomically (same discipline as _worker — closes the TOCTOU window)
+            gpu_lease.release(LEASE_TENANT)
+            _active = None
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body):
         data = json.dumps(body).encode()
@@ -172,9 +198,60 @@ class Handler(BaseHTTPRequestHandler):
             rid = self.path.split("/train/", 1)[1]
             rec = _runs.get(rid)
             return self._send(200 if rec else 404, rec or {"error": f"no run {rid}"})
+        if self.path.startswith("/study/"):
+            sid = self.path.split("/study/", 1)[1]
+            rec = _studies.get(sid)
+            return self._send(200 if rec else 404, rec or {"error": f"no study {sid}"})
         return self._send(404, {"error": "not found"})
 
+    def _post_study(self):
+        """Launch an HPO study (012 US1) — one study at a time on the GPU lease, same one-model-in-VRAM
+        409 gate as /train (a study and a run can't co-reside). The study runs sequentially; total
+        wall-clock ≈ n_trials × per-train-time (surfaced to the caller)."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+        for f in ("dataset_name", "dataset_version", "output_name"):
+            if not req.get(f):
+                return self._send(400, {"error": f"missing field: {f}"})
+        modality = (req.get("modality") or "llm").lower()
+        if modality not in VALID_MODALITIES:
+            return self._send(400, {"error": f"unknown modality {modality!r} "
+                                             f"(expected {'|'.join(VALID_MODALITIES)})"})
+        req["modality"] = modality
+
+        with _lock:
+            global _active
+            if _active is not None:
+                return self._send(409, {"error": f"trainer busy with {_active}"})
+            try:  # acquire the SAME single GPU lease a run uses — a study is one GPU tenant (FR-112)
+                gpu_lease.acquire(LEASE_TENANT, est_gb=TRAIN_EST_GB, vram_budget_gb=VRAM_GB)
+            except gpu_lease.LeaseHeld as e:
+                holder = (e.holder or {}).get("tenant", "another GPU tenant")
+                return self._send(409, {"error": f"GPU busy: {holder} holds the GPU "
+                                                 "(one-model-in-VRAM). Let it idle out, then retry."})
+            except gpu_lease.VramExceeded as e:
+                return self._send(507, {"error": str(e)})
+            study_id = uuid.uuid4().hex[:12]
+            _studies[study_id] = {"study_id": study_id, "status": "queued", "request": req,
+                                  "summary": None, "best": None, "error": None}
+            _active = study_id
+        try:
+            threading.Thread(target=_study_worker, args=(study_id, req), daemon=True).start()
+        except BaseException:  # spawn failed — don't strand the lease/slot (same as /train)
+            with _lock:
+                gpu_lease.release(LEASE_TENANT)
+                _active = None
+            raise
+        return self._send(202, {"study_id": study_id, "status": "queued",
+                                "note": "HPO trials run sequentially on the one GPU; "
+                                        "wall-clock ~= n_trials x per-train-time"})
+
     def do_POST(self):
+        if self.path == "/study":
+            return self._post_study()
         if self.path != "/train":
             return self._send(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length", 0))
