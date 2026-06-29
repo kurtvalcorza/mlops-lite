@@ -22,6 +22,7 @@ selection, winner registration, loser cleanup) is unit-testable with real Optuna
     objective is its scalar `value`.
 """
 import json
+import logging
 import os
 import sys
 import uuid
@@ -29,9 +30,12 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))           # training/flows
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # training/
 
+_log = logging.getLogger(__name__)
+
 DEFAULT_N_TRIALS = int(os.getenv("HPO_N_TRIALS", "15"))  # small — each trial is a full sequential train
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 HPO_EXPERIMENT = os.getenv("HPO_EXPERIMENT", "hpo")
+LEASE_TENANT = "training"  # the GPU-lease identity a study runs under (same as the trainer daemon)
 
 # modality -> the registry `task` tag 011 keys its metric/direction off of.
 MODALITY_TASK = {
@@ -50,13 +54,18 @@ class HpoError(Exception):
 def optimize_direction(modality: str) -> str:
     """Optuna study direction ("maximize"/"minimize") for `modality`, resolved from **011's** metric
     direction (the single definition of "good", FR-114). Falls back to the known per-modality direction
-    only if 011's evaluation module isn't importable."""
+    only if 011's evaluation module isn't importable — and **warns loudly** when it does, because a
+    silently-wrong direction would optimize a study toward *worse* models (e.g. maximizing WER)."""
     try:
         ev = _load_evaluation()
         metric = ev.metric_for(MODALITY_TASK[modality])
         return "maximize" if metric.direction == ev.HIGHER else "minimize"
-    except Exception:
-        return "maximize" if _FALLBACK_HIGHER.get(modality, True) else "minimize"
+    except Exception as e:
+        direction = "maximize" if _FALLBACK_HIGHER.get(modality, True) else "minimize"
+        _log.warning("could not resolve the optimize direction for modality %r from 011's eval "
+                     "registry (%s); falling back to %s — verify this matches the metric's direction",
+                     modality, e, direction)
+        return direction
 
 
 def _load_evaluation():
@@ -86,12 +95,32 @@ def _default_train(req: dict) -> dict:
         req_path, res_path = os.path.join(tmp, "req.json"), os.path.join(tmp, "res.json")
         with open(req_path, "w", encoding="utf-8") as f:
             json.dump(req, f)
-        proc = subprocess.run([sys.executable, run_flow, req_path, res_path], env=os.environ.copy())
+        # Popen + record the child as the lease's VRAM owner (matching the trainer daemon's _worker),
+        # so the single GPU lease's liveness self-heal fires if a trial process dies/hangs — closing
+        # the asymmetry where a hung trial would otherwise strand the lease (review).
+        proc = subprocess.Popen([sys.executable, run_flow, req_path, res_path], env=os.environ.copy())
+        _set_trial_vram_owner(proc.pid)
+        proc.wait()
         rec = read_result(res_path, proc.returncode)
     if rec.get("status") != "completed":
         raise HpoError(rec.get("error", "trial training failed"))
     return {"run_id": rec.get("mlflow_run_id"), "model": rec.get("model"),
             "metrics": rec.get("metrics"), "params": rec.get("params")}
+
+
+def _set_trial_vram_owner(pid: int) -> None:
+    """Record a trial's training subprocess as the GPU lease's VRAM owner (best-effort) so the lease
+    self-heals on its death — same liveness discipline as the trainer daemon's `_worker`. A no-op if
+    the stdlib-only lease isn't importable (e.g. off the WSL host, or in tests)."""
+    try:
+        serving = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "serving")
+        if serving not in sys.path:
+            sys.path.insert(0, serving)
+        import gpu_lease
+        gpu_lease.set_vram_owner(LEASE_TENANT, pid)
+    except Exception:
+        pass
 
 
 def _default_eval(name: str, version: str, modality: str) -> dict:
@@ -185,11 +214,13 @@ def run_study(study_req: dict, *, train_fn=None, eval_fn=None, n_trials: int = D
             "trials": trials_log, "best": None,
         }
         if best is not None:
-            winner = _register_winner(study_id, best, created, client=client)
+            winner, cleanup_failed = _register_winner(study_id, best, created, client=client)
             summary["best"] = winner
             mlflow.set_tags({"best_value": str(best.value), "best_version": winner["version"]})
         else:  # every trial failed — nothing to register; clean up any stragglers
-            _cleanup_versions(created, keep=None, client=client)
+            cleanup_failed = _cleanup_versions(created, keep=None, client=client)
+        # Surface any versions that couldn't be deleted, so a silent leftover isn't invisible to the API.
+        summary["cleanup_failed"] = cleanup_failed
         return summary
 
 
@@ -222,24 +253,27 @@ def _register_winner(study_id, best, created, *, client=None) -> dict:
     }
     for k, v in tags.items():
         c.set_model_version_tag(name, str(version), k, v)
-    _cleanup_versions(created, keep=(name, str(version)), client=c)
-    return {"name": name, "version": str(version), "value": best.value,
-            "metric": ev.get("metric"), "params": best.params}
+    cleanup_failed = _cleanup_versions(created, keep=(name, str(version)), client=c)
+    return ({"name": name, "version": str(version), "value": best.value,
+             "metric": ev.get("metric"), "params": best.params}, cleanup_failed)
 
 
-def _cleanup_versions(created, *, keep, client=None):
+def _cleanup_versions(created, *, keep, client=None) -> list:
     """Delete the versions this study registered except `keep` (the winner) — the losing/failed trials
-    leave **no** surviving version (FR-116). Only ever deletes versions THIS study created."""
+    leave **no** surviving version (FR-116). Only ever deletes versions THIS study created. Returns the
+    list of versions that could NOT be deleted (best-effort cleanup, but surfaced — not swallowed)."""
     if not created:
-        return
+        return []
     c = client or _client()
+    failed = []
     for name, version in created:
         if keep is not None and (name, str(version)) == (keep[0], str(keep[1])):
             continue
         try:
             c.delete_model_version(name, str(version))
-        except Exception:
-            pass  # best-effort cleanup — a leftover trial version is not worth failing the study over
+        except Exception as e:  # a leftover trial version isn't worth failing the study — but record it
+            failed.append({"name": name, "version": str(version), "error": str(e)})
+    return failed
 
 
 def repr_value(v) -> str:

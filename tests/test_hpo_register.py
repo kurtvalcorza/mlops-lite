@@ -67,6 +67,28 @@ def test_eval_failed_version_is_cleaned_up_not_kept():
     assert summary["best"]["version"] != "1"
 
 
+def test_cleanup_failures_are_surfaced_not_swallowed():
+    # a delete that errors must not fail the study, but the version must appear in cleanup_failed so a
+    # silent leftover isn't invisible to the operator.
+    class RaisingClient(FakeClient):
+        def delete_model_version(self, name, version):
+            raise RuntimeError("registry refused the delete")
+
+    train = TrainRecorder("toy-llm")
+    summary = m.run_study(_req(), train_fn=train, eval_fn=_score_by_version,
+                          n_trials=3, client=RaisingClient())
+    assert summary["best"] is not None                      # the study still completed + crowned a winner
+    failed_versions = {f["version"] for f in summary["cleanup_failed"]}
+    losers = {"1", "2", "3"} - {summary["best"]["version"]}
+    assert failed_versions == losers                        # every undeleted loser is surfaced
+
+
+def test_clean_run_reports_no_cleanup_failures():
+    summary = m.run_study(_req(), train_fn=TrainRecorder("toy-llm"), eval_fn=_score_by_version,
+                          n_trials=3, client=FakeClient())
+    assert summary["cleanup_failed"] == []
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

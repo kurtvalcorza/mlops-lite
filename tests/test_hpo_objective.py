@@ -110,6 +110,14 @@ def test_lower_is_better_metric_minimizes():
     assert summary["best"]["value"] == min(completed)
 
 
+def test_optimize_direction_resolves_from_011_registry():
+    # the integration path: direction comes from 011's metric registry by modality — maximize for
+    # higher-better (accuracy), minimize for lower-better (WER). A wrong sign optimizes toward worse.
+    assert m.optimize_direction("llm") == "maximize"
+    assert m.optimize_direction("vision") == "maximize"
+    assert m.optimize_direction("asr") == "minimize"
+
+
 def test_eval_failure_makes_the_trial_fail_not_worst_valid():
     # if 011's eval errors for a candidate, that trial is FAILED (not scored worst-valid, FR-115).
     def train(req):
