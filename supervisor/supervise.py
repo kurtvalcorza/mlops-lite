@@ -66,6 +66,12 @@ _ALL = {
         "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
         "grace_s": float(os.getenv("ASR_GRACE", "30")),
     },
+    # 009 US4 — tabular: a BentoML CPU daemon, OFF the GPU lease (always-on, no VRAM), like embed.
+    "tabular": {
+        "cmd": ["bash", os.path.join(REPO, "serving", "bento", "tabular_run.sh")],
+        "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
+        "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
+    },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).
     # First launch installs deps + builds, so the grace is generous; warm launches `next start` fast.
     "ui": {
@@ -75,7 +81,8 @@ _ALL = {
     },
 }
 _SELECTED = [n.strip()
-             for n in os.getenv("SUPERVISE_DAEMONS", "serving,training,vision,embed,asr,ui").split(",")
+             for n in os.getenv("SUPERVISE_DAEMONS",
+                                "serving,training,vision,embed,asr,tabular,ui").split(",")
              if n.strip() in _ALL]
 
 

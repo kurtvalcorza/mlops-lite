@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from . import platform_health, platform_metrics, tracing
 from .auth import auth_mode, require_api_key
-from .routers import datasets, embed, infer, models, monitor, runs, stream, transcribe, vision
+from .routers import datasets, embed, infer, models, monitor, runs, stream, tabular, transcribe, vision
 
 app = FastAPI(title="MLOps-Lite Gateway", version="1.2.0")
 
@@ -29,6 +29,7 @@ app.include_router(vision.router, tags=["vision"], dependencies=_protected)
 app.include_router(stream.router, tags=["streaming"], dependencies=_protected)
 app.include_router(embed.router, tags=["embeddings"], dependencies=_protected)  # 009 US2 (CPU, off-lease)
 app.include_router(transcribe.router, tags=["asr"], dependencies=_protected)  # 009 US3 (whisper.cpp, GPU-lease)
+app.include_router(tabular.router, tags=["tabular"], dependencies=_protected)  # 009 US4 (CPU, off-lease)
 
 REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"])
 
@@ -68,6 +69,7 @@ def root():
             "/vision/classify", "/vision/health",
             "/embed", "/embed/health",
             "/transcribe", "/transcribe/health",
+            "/predict", "/predict/health",
             "/infer/stream", "/platform/events", "/serving/tasks",
         ],
         "phase": "8 (complete) + 002 US1 (auth) + US2 (supervisor) + 003 US1 (streaming) "

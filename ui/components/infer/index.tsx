@@ -9,6 +9,7 @@ import type { ComponentType } from 'react';
 import { ClassifyPanel } from './ClassifyPanel';
 import { EmbedPanel } from './EmbedPanel';
 import { StreamPanel } from './StreamPanel';
+import { TabularPanel } from './TabularPanel';
 import { TranscribePanel } from './TranscribePanel';
 import type { PanelProps } from './types';
 
@@ -20,5 +21,5 @@ export const RENDERERS: Record<string, ComponentType<PanelProps>> = {
   'image-classification': ClassifyPanel,
   embedding: EmbedPanel, // 009 Phase 2 (US2) — CPU, off-lease, always-on
   asr: TranscribePanel, // 009 Phase 3 (US3) — whisper.cpp, GPU-lease tenant
-  // 'tabular': TabularPanel,      // added in 009 Phase 4 (US4)
+  tabular: TabularPanel, // 009 Phase 4 (US4) — CPU, off-lease, always-on
 };
