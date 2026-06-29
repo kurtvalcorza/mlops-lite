@@ -114,6 +114,19 @@ def test_parse_skips_malformed_jsonl_lines():
     assert len(v.parse_rows(raw, "jsonl")) == 2  # the bad line is dropped, not fatal
 
 
+def test_parse_sniffs_csv_without_explicit_fmt():
+    # The training gate + batch loader call parse_rows() with NO fmt hint — a CSV must still be
+    # detected by its comma-delimited header, not silently parsed as JSONL (→ 0 rows → false gate fail).
+    csv_bytes = b"instruction,response\nq,a\nq2,a2\n"
+    rows = v.parse_rows(csv_bytes)
+    assert len(rows) == 2 and rows[0]["instruction"] == "q"
+
+
+def test_parse_sniffs_jsonl_without_explicit_fmt():
+    jsonl = b'{"instruction":"q","response":"a"}\n{"instruction":"q2","response":"a2"}\n'
+    assert len(v.parse_rows(jsonl)) == 2  # a leading `{` is JSON-ish, not CSV
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

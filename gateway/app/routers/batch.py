@@ -33,7 +33,9 @@ class BatchRequest(BaseModel):
 @router.post("/batch", status_code=202)
 async def launch_batch(req: BatchRequest):
     """Launch a batch-inference job (async; poll GET /batch/{id}). Proxies to the native daemon, which
-    holds the serving lease for its duration and writes a content-addressed result to MinIO."""
+    scores every row through the existing serving tenant (the one-model-in-VRAM lease for GPU modalities;
+    off-lease for tabular) and writes a content-addressed result to MinIO. The daemon's `_active` gate
+    serializes the batch against train/study; it does not acquire its own lease — serving owns VRAM."""
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             r = await client.post(f"{TRAINER_URL}/batch", json=req.model_dump(exclude_none=True))

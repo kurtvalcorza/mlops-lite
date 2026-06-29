@@ -17,6 +17,9 @@ type RunRec = {
 };
 
 const TERMINAL = new Set(['completed', 'failed']);
+// 014 — the trainer emits batch terminal status as 'succeeded'/'failed' (not 'completed'); keep it
+// distinct so the launcher's poll loop actually stops and the spinner clears on a successful batch.
+const BATCH_TERMINAL = new Set(['succeeded', 'failed']);
 
 // 012 — an HPO study: a best trial (winning params + eval metric → a registered, promotable version).
 type StudyBest = {
@@ -428,7 +431,7 @@ function BatchLauncher({ datasets }: { datasets: Dataset[] }) {
       try {
         const b = await gwGet<BatchRec>(`batch/${encodeURIComponent(id)}`);
         setRec(b);
-        if (b.status && TERMINAL.has(b.status) && pollRef.current) {
+        if (b.status && BATCH_TERMINAL.has(b.status) && pollRef.current) {
           clearInterval(pollRef.current);
           pollRef.current = null;
         }
@@ -463,7 +466,7 @@ function BatchLauncher({ datasets }: { datasets: Dataset[] }) {
     }
   };
 
-  const running = rec?.status && !TERMINAL.has(rec.status);
+  const running = rec?.status && !BATCH_TERMINAL.has(rec.status);
 
   return (
     <Panel title="batch inference" hint="POST /batch — score a dataset version offline">

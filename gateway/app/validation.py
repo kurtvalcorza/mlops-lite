@@ -48,7 +48,8 @@ def parse_rows(raw: bytes, fmt=None) -> list:
     `fmt` hints the format, else it's sniffed (a leading `{`/`[` ⇒ JSON-ish)."""
     text = raw.decode("utf-8", errors="replace")
     fmt = (fmt or "").lower()
-    if fmt in ("csv",) or (not fmt and "," in text.splitlines()[0:1] and not text.lstrip().startswith(("{", "["))):
+    first_line = next((ln for ln in text.splitlines() if ln.strip()), "")
+    if fmt in ("csv",) or (not fmt and "," in first_line and not text.lstrip().startswith(("{", "["))):
         return [dict(r) for r in csv.DictReader(io.StringIO(text))]
     rows = []
     for line in text.splitlines():

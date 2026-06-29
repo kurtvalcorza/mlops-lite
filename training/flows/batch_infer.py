@@ -12,6 +12,15 @@ by the same mutex. CPU-backed (tabular) models score **off-lease**. The model st
 batch's back-to-back requests (the idle release won't fire mid-job), giving the acquire-once/hold/release
 shape the grill described, without the daemon loading a second copy.
 
+**Known live gap (inherited SC-068, deferred to the on-hardware step).** `_predict_fn` scores whichever
+version the serving tenant currently holds — it does **not** load/assert `model`/`registry_version`
+before scoring. Those identifiers are recorded in the result manifest for provenance, but on real
+hardware a batch launched while serving holds a *different* version would silently score that resident
+version. This is the same gap 011's `/compare` and 012's `eval_fn` documented; on-demand per-version
+loading is the hardware-validated fix. Until then, promote/serve the intended version first, or inject a
+`predict_fn` (tests do). The mismatch is not yet asserted because the gateway can't introspect the native
+supervisor's resident version off the request path.
+
 Ephemeral Prefect, exactly like `finetune.py`: if Prefect isn't importable the decorator degrades to a
 no-op so the flow still runs.
 """
