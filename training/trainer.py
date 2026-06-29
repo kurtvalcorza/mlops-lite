@@ -54,10 +54,11 @@ TRAIN_EST_GB = float(os.getenv("TRAIN_EST_GB", "2.0"))
 RUN_FLOW = os.path.join(HERE, "run_flow.py")  # the per-run subprocess entry (CUDA isolation)
 LOG_DIR = os.getenv("TRAINER_LOG_DIR", os.path.join(tempfile.gettempdir(), "mlops-lite-trainer-logs"))
 
-_lock = threading.Lock()           # one run OR study at a time (shared single-GPU-tenant gate)
+_lock = threading.Lock()           # one run OR study OR batch at a time (shared single-GPU-tenant gate)
 _runs: dict = {}                   # run_id -> job record
 _studies: dict = {}                # study_id -> study record (012 HPO)
-_active: str | None = None         # the run_id or study_id currently holding the GPU lease
+_batches: dict = {}                # batch_id -> batch record (014 batch inference)
+_active: str | None = None         # the run_id / study_id / batch_id currently holding the daemon slot
 
 
 def _gpu_free_mib():
@@ -160,6 +161,30 @@ def _study_worker(study_id: str, req: dict):
             _active = None
 
 
+def _batch_worker(batch_id: str, req: dict):
+    """Run one batch-inference job (014 US1): score a dataset version through the existing serving path
+    and write a content-addressed result to MinIO. Unlike /train and /study this does **not** acquire
+    the training GPU lease — a GPU-backed batch drives the serving supervisor/bento, which is itself the
+    single one-model-in-VRAM lease tenant (so an online /infer is serialized by that same lease and no
+    second model is pinned); a tabular batch scores off-lease. The `_active` gate still serializes batch
+    against train/study so the daemon runs one job at a time."""
+    global _active
+    rec = _batches[batch_id]
+    try:
+        rec["status"] = "running"
+        from flows.batch_infer import batch_infer_flow
+        out = batch_infer_flow(
+            req["dataset_name"], req["dataset_version"], req["model"],
+            modality=req.get("modality", "llm"), registry_version=req.get("registry_version"),
+            abort_threshold=float(req.get("abort_threshold", 0.5)))
+        rec.update(status="succeeded", result=out)
+    except Exception as e:
+        rec.update(status="failed", error=f"{type(e).__name__}: {e}")
+    finally:
+        with _lock:
+            _active = None  # release the daemon slot (no GPU lease was held — serving owns VRAM)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body):
         data = json.dumps(body).encode()
@@ -202,6 +227,10 @@ class Handler(BaseHTTPRequestHandler):
             sid = self.path.split("/study/", 1)[1]
             rec = _studies.get(sid)
             return self._send(200 if rec else 404, rec or {"error": f"no study {sid}"})
+        if self.path.startswith("/batch/"):
+            bid = self.path.split("/batch/", 1)[1]
+            rec = _batches.get(bid)
+            return self._send(200 if rec else 404, rec or {"error": f"no batch {bid}"})
         return self._send(404, {"error": "not found"})
 
     def _post_study(self):
@@ -249,9 +278,44 @@ class Handler(BaseHTTPRequestHandler):
                                 "note": "HPO trials run sequentially on the one GPU; "
                                         "wall-clock ~= n_trials x per-train-time"})
 
+    def _post_batch(self):
+        """Launch an offline batch-inference job (014 US1) — one daemon job at a time (`_active` gate);
+        GPU exclusivity is enforced by the serving lease the batch drives, not a training-lease acquire."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+        for f in ("dataset_name", "dataset_version", "model"):
+            if not req.get(f):
+                return self._send(400, {"error": f"missing field: {f}"})
+        # Validate modality *before* taking the daemon slot (consistent with /train + /study) — else an
+        # unknown modality would reserve `_active`, spawn a thread, and fail in the worker, wasting a slot.
+        modality = (req.get("modality") or "llm").lower()
+        if modality not in ("llm", "text-generation", "vision", "image-classification", "tabular"):
+            return self._send(400, {"error": f"unknown batch modality {modality!r}"})
+        req["modality"] = modality  # store the normalised value so the worker sees "llm", not "LLM"
+        with _lock:
+            global _active
+            if _active is not None:
+                return self._send(409, {"error": f"trainer busy with {_active}"})
+            batch_id = uuid.uuid4().hex[:12]
+            _batches[batch_id] = {"batch_id": batch_id, "status": "queued", "request": req,
+                                  "result": None, "error": None}
+            _active = batch_id
+        try:
+            threading.Thread(target=_batch_worker, args=(batch_id, req), daemon=True).start()
+        except BaseException:
+            with _lock:
+                _active = None
+            raise
+        return self._send(202, {"batch_id": batch_id, "status": "queued"})
+
     def do_POST(self):
         if self.path == "/study":
             return self._post_study()
+        if self.path == "/batch":
+            return self._post_batch()
         if self.path != "/train":
             return self._send(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length", 0))
