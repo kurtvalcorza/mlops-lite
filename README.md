@@ -82,23 +82,32 @@ never thrashes.
 
 **Additive modality increments (009 serve · 010 train):**
 
-| Modality | Serve (009) | Fine-tune (010) | GPU lease? |
+| Modality | Serve (009) | Serving on GPU lease? | Fine-tune (010) |
 |---|---|---|---|
-| text-generation (LLM) | `llama.cpp` (`/infer`) | PEFT/LoRA → GGUF (US4) | yes (on-demand) |
-| image-classification | BentoML (`/vision/classify`) | transfer-learning head | yes (on-demand) |
-| embedding | BentoML sentence-transformers (`/embed`) | sentence-transformers FT | **no** (CPU) |
-| asr | whisper.cpp daemon (`/transcribe`) | Whisper FT → HF→ggml convert | yes (on-demand, opt-in) |
-| tabular | BentoML LightGBM (`/predict`) | doc-only AutoGluon upgrade path | **no** (CPU) |
+| text-generation (LLM) | `llama.cpp` (`/infer`) | yes (on-demand) | PEFT/LoRA → GGUF (US4) |
+| image-classification | BentoML (`/vision/classify`) | yes (on-demand) | transfer-learning head |
+| embedding | BentoML sentence-transformers (`/embed`) | **no** (CPU) | sentence-transformers FT |
+| asr | whisper.cpp daemon (`/transcribe`) | yes (on-demand, opt-in) | Whisper FT → HF→ggml convert |
+| tabular | BentoML LightGBM (`/predict`) | **no** (CPU) | doc-only AutoGluon upgrade path |
 
-Routing is **registry-metadata-driven** (009): every model version carries a `task` tag
+> The "GPU lease?" column is about **serving** — embeddings and tabular serve on CPU and never touch
+> the lease. **Fine-tuning is different**: *every* fine-tune (all four trainable modalities, embeddings
+> included) is the heaviest single GPU-lease tenant — the trainer acquires the lease before dispatch,
+> so an embedding fine-tune launched while another tenant is resident gets a `409 GPU busy`.
+
+Routing is **registry-metadata-driven for `/infer`** (009): every model version carries a `task` tag
 (text-generation / image-classification / embedding / asr / tabular) and a `serving_engine` tag
-(llama.cpp / bentoml / whisper.cpp). The gateway routes off these tags rather than hard-coded
-endpoint-to-model wiring, and the **Infer tab renders one panel per `task`** discovered from the
-registry — adding a future modality means registering a model with a `task` tag and dropping in a
-small renderer, not re-plumbing the gateway/UI. Fine-tuned versions (010) land with the same serving
-tags **plus lineage** (`base_model`, parent run) so adapters can be chained and 009's servers can
-load them directly. Promotion to `@serving` is **operator-driven** (alias-based) and, since **011**,
-runs through an **evaluation gate** (below).
+(llama.cpp / bentoml / whisper.cpp). The `/infer` path and the Infer tab resolve their target off these
+tags (`resolve_serving_target`) rather than hard-coded model wiring, and the **Infer tab renders one
+panel per `task`** discovered from the registry — adding a future modality means registering a model
+with a `task` tag and dropping in a small renderer. The **non-LLM serving routes**
+(`/vision/classify`, `/embed`, `/predict`, `/transcribe`) currently proxy a **fixed per-daemon env URL**
+(`BENTO_URL` / `EMBED_URL` / `TABULAR_URL` / `ASR_URL`), so promoting a new version of those modalities
+updates the registry tag + Infer-panel metadata but doesn't change which version the daemon serves until
+it reloads. Fine-tuned versions (010) land with the same serving tags **plus lineage** (`base_model`,
+parent run) so adapters can be chained and 009's servers can load them. Promotion to `@serving` is
+**operator-driven** (alias-based) and, since **011**, production promotions run through an **evaluation
+gate** (below).
 
 ## Run it
 
@@ -116,10 +125,13 @@ supervisor + gateway↔daemon IP wiring), and tear it down releasing the GPU:
 `up_all` supervises the **default daemon set** — `serving` (LLM), `training`, `vision`, `embed`,
 `tabular`, and `ui` — and wires their dynamic WSL IPs into the gateway (`SERVING_URL`, `TRAINER_URL`,
 `BENTO_URL`, `EMBED_URL`, `TABULAR_URL`, `ASR_URL`). **ASR is opt-in**: whisper.cpp needs a manual
-CUDA build, so it is not in the default set — build it and enable it explicitly:
+CUDA build, so it is not in the default set — build it and enable it explicitly. The supervisor reads
+`SUPERVISE_DAEMONS` at startup, so if it's already running you must **stop it first** for the expanded
+set to take effect:
 
 ```bash
 bash serving/whispercpp/build.sh                              # one-time: CUDA whisper.cpp build
+bash scripts/supervisor_down.sh                              # stop the running supervisor (if up)
 SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,asr,ui bash scripts/supervisor_up.sh
 ```
 
@@ -132,6 +144,8 @@ python3 supervisor/supervise.py          # WSL: supervises the native daemons (h
 ~/mlops-train/bin/python scripts/seed_vision_model.py   # one-time: seed the vision model
 ./scripts/serve_up.ps1                   # PowerShell: bring up the stack pointed at the daemons
 export GATEWAY_API_KEY=mll_...           # 002/US1: the key gen_secrets printed (protected routes)
+# NOTE: serve_up.ps1 only wires SERVING/TRAINER/BENTO URLs today — for the 009 modalities
+# (embed/tabular/asr) prefer up_all.ps1, which injects EMBED_URL/TABULAR_URL/ASR_URL too.
 pytest                                   # validate every phase against the live, keyed stack
 ```
 
@@ -191,8 +205,9 @@ race-free lease** and moved vision onto the GPU:
 
 Before 011, `promote(name, version)` moved the `@serving` alias on command with no check that the new
 version was actually better — the exact gap that let a prior project serve "whatever last registered."
-011 adds the connective tissue, all wired into the **single `registry.promote` choke-point** so there
-is no ungated back-door:
+011 adds the connective tissue, all wired into the **single `registry.promote` choke-point** — the gate
+applies to every operator/production promotion. (The `scripts/seed_*` bootstrap scripts set the
+`@serving` alias directly via MLflow and are explicit, documented gate exceptions for initial seeding.)
 
 - **Offline eval harness** (`gateway/app/evaluation.py`) scores a model version on a small **held-out
   benchmark** under [`benchmarks/`](benchmarks/) and logs the primary metric to MLflow. Each metric
@@ -209,11 +224,21 @@ is no ungated back-door:
   follow-on.
 
 ```bash
-curl -X POST localhost:8080/models/<name>/evaluate -H "X-API-Key: $KEY"   # score a version → MLflow
-curl -X POST localhost:8080/models/<name>/compare  -H "X-API-Key: $KEY"   # champion vs challenger
-python scripts/eval_model.py <name> <version>                            # one-shot harness (no gateway)
-# POST /models/<name>/promote is now gated — pass the override flag to bypass a block.
+curl -X POST localhost:8080/models/<name>/evaluate -H "X-API-Key: $KEY" \
+  -d '{"version":"1"}'                                                    # score a version → MLflow
+curl -X POST localhost:8080/models/<name>/compare  -H "X-API-Key: $KEY" \
+  -d '{"challenger":"2"}'                                                 # champion (@serving) vs challenger
+python scripts/eval_model.py evaluate <name> <version>                   # one-shot harness (no gateway)
+# POST /models/<name>/promote is now gated — body {"version":"N","override":true} bypasses a block.
 ```
+
+> **Live-path scoring (until SC-068).** The per-modality predictors behind `evaluate`/`compare` score
+> whichever version the serving daemon **currently holds** — they don't yet load the requested version
+> on demand — and `evaluate` then logs that score against the supplied `name@version`. So today a live
+> `compare` of a not-yet-resident challenger is degenerate (both legs hit the resident `@serving`
+> model). For version-specific scoring drive the harness with seeded per-version metrics (or the
+> injected predictor in tests); on-demand version loading is the SC-068 on-hardware step. The
+> sequential-load VRAM invariant (Principle II) holds regardless.
 
 ## Hyperparameter optimization (012)
 
@@ -228,9 +253,13 @@ strictly sequentially** (`n_jobs=1`), each fully releasing VRAM before the next 
 
 ```bash
 curl -X POST localhost:8080/studies -H "X-API-Key: $KEY" \
-  -d '{"name":"qa-demo","modality":"text-generation","dataset":"qa@<ver>","n_trials":3}'
+  -d '{"dataset_name":"qa-demo","dataset_version":"1","output_name":"qa-hpo","modality":"llm","n_trials":3}'
 curl localhost:8080/studies/<study_id> -H "X-API-Key: $KEY"     # study status + best trial
 ```
+
+> `modality` is one of `llm` / `vision` / `embeddings` / `asr` (the trainer's set), not the registry
+> `task` tag. `dataset_name` + `dataset_version` pin the training data; `output_name` is the registered
+> model name the best trial lands under.
 
 ## Inference traces (006, on MLflow 3.x since 007)
 
