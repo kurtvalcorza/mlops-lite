@@ -41,6 +41,7 @@ sys.path.insert(0, HERE)  # so `flow_dispatch` + `flows` are importable
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "serving"))
 import gpu_lease  # noqa: E402  (shared, stdlib-only GPU lease — 008 US1)
 from flow_dispatch import VALID_MODALITIES  # noqa: E402  (shared with run_flow.py — the subprocess)
+from run_flow import read_result  # noqa: E402  (daemon side of the subprocess result protocol)
 
 TRAINER_PORT = int(os.getenv("TRAINER_PORT", "8091"))
 SUPERVISOR_URL = os.getenv("SUPERVISOR_URL", "http://localhost:8090")
@@ -95,27 +96,21 @@ def _run_subprocess(run_id: str, req: dict) -> dict:
             # the lease now self-heals on the child's death even if this daemon thread is wedged.
             gpu_lease.set_vram_owner(LEASE_TENANT, proc.pid)
             proc.wait()
-        # The child writes the result file only on a *handled* outcome. Its absence means a hard crash
-        # (CUDA abort / OOM-kill / signal) — surface it as a failed run with the captured log tail and
-        # register NO partial version (FR-032/FR-097), exactly like the old in-thread failure path.
-        if os.path.exists(result_path):
-            with open(result_path, encoding="utf-8") as f:
-                payload = json.load(f)
-        else:
-            payload = {"ok": False,
-                       "error": f"run subprocess exited {proc.returncode} without a result "
-                                f"(likely a hard CUDA/OOM crash); see {log_path}\n{_tail(log_path)}"}
-    if payload.get("ok"):
-        out = payload["result"]
-        return dict(status="completed", mlflow_run_id=out["run_id"],
-                    model=out["model"], metrics=out["metrics"], params=out["params"])
-    return dict(status="failed", error=payload.get("error", "unknown subprocess failure"))
+        # A missing/corrupt result file means the child died without a handled outcome (hard CUDA/OOM
+        # crash) — read_result maps both that and {ok:false} to a failed run with the log tail, NO
+        # partial version (FR-032/FR-097). Read inside the `with` so result_path still exists.
+        return read_result(result_path, proc.returncode, _tail(log_path))
 
 
 def _tail(path: str, limit: int = 1500) -> str:
+    """The last `limit` chars of a file (failure-path log tail) — seek from the end so a large/verbose
+    training log isn't loaded into memory whole."""
     try:
+        size = os.path.getsize(path)
         with open(path, encoding="utf-8", errors="replace") as f:
-            return f.read()[-limit:]
+            if size > limit:
+                f.seek(size - limit)
+            return f.read()
     except OSError:
         return ""
 

@@ -35,7 +35,56 @@ def _invoke(req: dict):
         return proc.returncode, result
 
 
+def _check_read_result() -> bool:
+    """The daemon side of the protocol (run_flow.read_result) maps a missing/corrupt result file to a
+    hard-crash failed run, and a valid file to the right job-record update. Pure — no GPU/fcntl."""
+    sys.path.insert(0, os.path.join(REPO, "training"))
+    from run_flow import read_result
+
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = os.path.join(tmp, "nope.json")
+        rec = read_result(missing, returncode=137, log_tail="boom: CUDA error")
+        if rec["status"] != "failed" or "without a valid result" not in rec["error"] \
+                or "137" not in rec["error"] or "boom: CUDA error" not in rec["error"]:
+            print(f"[FAIL] missing result file should be a hard-crash failure — got {rec}")
+            return False
+        print("[OK] missing result file -> failed (hard crash) with returncode + log tail")
+
+        corrupt = os.path.join(tmp, "corrupt.json")
+        with open(corrupt, "w", encoding="utf-8") as f:
+            f.write('{"ok": true, "result": {"run_id"')  # truncated (SIGKILL mid-write)
+        rec = read_result(corrupt, returncode=-9, log_tail="")
+        if rec["status"] != "failed" or "without a valid result" not in rec["error"]:
+            print(f"[FAIL] corrupt result file should be a hard-crash failure — got {rec}")
+            return False
+        print("[OK] corrupt result file -> failed (hard crash), not a JSONDecodeError")
+
+        ok = os.path.join(tmp, "ok.json")
+        with open(ok, "w", encoding="utf-8") as f:
+            json.dump({"ok": True, "result": {"run_id": "r1", "model": {"name": "m", "version": "1"},
+                                              "metrics": {"loss": 0.1}, "params": {"seed": 0}}}, f)
+        rec = read_result(ok, returncode=0)
+        if rec["status"] != "completed" or rec["mlflow_run_id"] != "r1" or rec["model"]["version"] != "1":
+            print(f"[FAIL] ok result should be completed — got {rec}")
+            return False
+        print("[OK] ok result -> completed with run/model/metrics/params")
+
+        bad = os.path.join(tmp, "bad.json")
+        with open(bad, "w", encoding="utf-8") as f:
+            json.dump({"ok": False, "error": "ValueError: dataset empty"}, f)
+        rec = read_result(bad, returncode=1)
+        if rec["status"] != "failed" or rec["error"] != "ValueError: dataset empty":
+            print(f"[FAIL] not-ok result should be failed with its error — got {rec}")
+            return False
+        print("[OK] not-ok result -> failed with the flow's error")
+    return True
+
+
 def main() -> int:
+    # 0. Daemon-side result parsing (missing/corrupt/ok/fail) — the hard-crash path included.
+    if not _check_read_result():
+        return 1
+
     # 1. Unknown modality → handled failure: result file written {ok:false}, exit 1 (no flow imported).
     code, result = _invoke({**REQUIRED, "modality": "bogus"})
     if code != 1 or not result or result.get("ok") is not False:
