@@ -101,14 +101,31 @@ def get_serving(name: str) -> Optional[dict]:
     return {"name": name, "version": v, "alias": SERVING_ALIAS} if v else None
 
 
-def promote(name: str, version: str) -> dict:
-    """Point the `serving` alias at `version` (FR-006). Idempotent; overwrites any prior target."""
+def promote(name: str, version: str, override: bool = False) -> dict:
+    """Point the `serving` alias at `version` (FR-006), **gated** (011 FR-105).
+
+    This is the single promotion choke-point — every alias move runs through the evaluation gate, so
+    there is no ungated back-door (SC-066). The gate compares the candidate's logged eval metric
+    against the incumbent's (a metric lookup — it loads no model) and returns a verdict: in the default
+    hard-gate mode a `blocked` verdict refuses the move (the alias stays put) unless `override` is set;
+    a `pass`/`warn` verdict (or an override) moves the alias, with `warn` flagged. The verdict (and
+    whether the alias moved) is always returned for the API + UI to surface.
+
+    Imported lazily to avoid an import cycle (evaluation imports this module).
+    """
+    from . import evaluation
+
     c = _client()
+    verdict = evaluation.gate(name, version, override=override, client=c)
+    if verdict["verdict"] == "blocked":
+        return {"name": name, "serving_version": _serving_version(c, name), "alias": SERVING_ALIAS,
+                "promoted": False, "verdict": verdict}
     try:
         c.set_registered_model_alias(name, SERVING_ALIAS, version)
     except MlflowException as e:
         raise RegistryError(str(e)) from e
-    return {"name": name, "serving_version": str(version), "alias": SERVING_ALIAS}
+    return {"name": name, "serving_version": str(version), "alias": SERVING_ALIAS,
+            "promoted": True, "verdict": verdict}
 
 
 # --- 009 US1: task/serving-engine routing metadata ------------------------------------------------

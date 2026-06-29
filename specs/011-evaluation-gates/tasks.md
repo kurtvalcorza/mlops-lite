@@ -20,11 +20,27 @@ Task IDs continue the shared space (T202+).
 
 ---
 
-> **Status (2026-06-28):** **DRAFT — GRILLED (2026-06-28), build-ready.**
-> Scope: the **keystone** of the MLOps-maturity layer — offline eval harness + gated promotion + offline
-> champion-challenger. Uses **existing MLflow + gateway**; light metric libs only; **no online A/B** (one
-> model in VRAM, Principle II); no constitution amendment (advances Principle VI, hardens Principle IV).
-> Tasks T202–T221.
+> **Status (2026-06-29):** **BUILT** (US1–US3; T216 deferred → 013). Offline eval harness + gated
+> promotion + offline champion-challenger landed in `gateway/app/evaluation.py`, wired into the single
+> `registry.promote` choke-point, surfaced in the Models UI. Uses **existing MLflow + gateway**; **no
+> new dependency** (all primary metrics are pure-Python — see the build note below); **no online A/B**
+> (one model in VRAM, Principle II); no constitution amendment (advances Principle VI, hardens
+> Principle IV). Tasks T202–T221.
+>
+> **Build note — T202/T203/T211/T221 decisions (recorded):**
+> - **Metric libs (T202):** *no new dependency.* The plan floated `jiwer`/`sacrebleu`/`scikit-learn`,
+>   but every committed + stub primary metric (LLM task-accuracy, vision top-1 accuracy, WER,
+>   recall@k, AUC, perplexity) is implemented in **pure Python** in `evaluation.py`, mirroring
+>   `monitoring.py`'s PSI decision (Principle III — keep the gateway image off the scarce C: drive).
+>   The libs remain swappable behind `evaluation.METRICS` (Principle V).
+> - **Per-modality metric + direction (T203):** `text-generation`→task_accuracy (higher) + perplexity
+>   fallback (lower); `image-classification`→accuracy (higher); `asr`→wer (lower); `embedding`→
+>   recall@k (higher); `tabular`→auc (higher). LLM + vision **committed** with bundled fixtures under
+>   `benchmarks/`; ASR/embeddings/tabular are stubs (metric+direction defined, fixture added when
+>   served). Benchmarks are SHA-256 content-hashed for provenance (FR-101).
+> - **Gate defaults (T211):** `EVAL_GATE_MODE=block`, `EVAL_GATE_TOLERANCE=0.01` (relative to the
+>   incumbent), `EVAL_GATE_MISSING_METRIC=warn` (bootstrap-friendly — un-evaluated pre-011 versions
+>   still promote, flagged), no-incumbent ⇒ pass; per-request `override` bypasses a block.
 >
 > **Decided (firm FRs):**
 > 1. **Gate lives in the single `registry.promote` choke-point** — every alias move is gated, no back-door
@@ -57,10 +73,10 @@ Task IDs continue the shared space (T202+).
 
 ## Phase 0 — Pre-flight (gates everything)
 
-- [ ] **T202** [US1] Confirm the light metric libs (`jiwer`, `sacrebleu` and/or `rouge-score`,
+- [x] **T202** [US1] Confirm the light metric libs (`jiwer`, `sacrebleu` and/or `rouge-score`,
   `scikit-learn` metrics) resolve/install clean in the gateway image (dry build) and stay light — no heavy
   transitive pull (Principle III). Record the chosen set. (FR-102)
-- [ ] **T203** [US1] Commit the **grilled per-modality primary metric + small bundled held-out benchmark
+- [x] **T203** [US1] Commit the **grilled per-modality primary metric + small bundled held-out benchmark
   fixture** (all configurable): **LLM = task-accuracy on a small QA held-out set** (higher-better) +
   **perplexity universal fallback** (lower-better) and **vision = top-1 accuracy** (higher-better) for the
   two *served* modalities; **guidance-stub** defaults for **ASR = WER** (lower-better), **embeddings =
@@ -70,53 +86,53 @@ Task IDs continue the shared space (T202+).
 
 ## Phase 1 — Offline eval harness (US1, P1) → SC-064
 
-- [ ] **T204** [US1] Create `gateway/app/evaluation.py`: a per-modality **primary-metric** function set
+- [x] **T204** [US1] Create `gateway/app/evaluation.py`: a per-modality **primary-metric** function set
   (LLM task-accuracy + perplexity fallback, vision top-1 accuracy; sklearn/jiwer/sacrebleu-backed), each
   tagged with its **direction**. Mirror `monitoring.py`'s dependency-light, MinIO/MLflow-reusing style.
   (FR-100, FR-102)
-- [ ] **T205** [US1] In `evaluation.py`, implement `evaluate(model_version, benchmark)` → run the held-out
+- [x] **T205** [US1] In `evaluation.py`, implement `evaluate(model_version, benchmark)` → run the held-out
   benchmark through the **existing serving path** (one model in VRAM), compute the primary metric, and **log
   it to MLflow** against the model version with the **benchmark identifier** (name + version/hash) as
   metadata. (FR-100, FR-101, FR-107)
-- [ ] **T206** [US1] Benchmark fixtures: add small held-out sets under `benchmarks/` (LLM + vision),
+- [x] **T206** [US1] Benchmark fixtures: add small held-out sets under `benchmarks/` (LLM + vision),
   content-addressed / hashed for provenance; wire the harness to load them via the existing dataset surface
   where practical. (FR-101)
-- [ ] **T207** [P] [US1] (optional) `scripts/eval_model.py` — one-shot CLI entry to run the harness for
+- [x] **T207** [P] [US1] (optional) `scripts/eval_model.py` — one-shot CLI entry to run the harness for
   batch eval / seeding the incumbent's metric. (FR-100)
-- [ ] **T208** [P] [US1] `tests/test_eval_harness`: each supported modality computes its primary metric,
+- [x] **T208** [P] [US1] `tests/test_eval_harness`: each supported modality computes its primary metric,
   logs it to MLflow against the version with benchmark provenance, and **re-running yields the same score**
   (reproducible). (SC-064)
 
 ## Phase 2 — Gated promotion (US2, P1) → SC-065 + SC-066 + SC-067
 
-- [ ] **T209** [US2] In `evaluation.py`, implement `gate(name, candidate_version)` → fetch the candidate's
+- [x] **T209** [US2] In `evaluation.py`, implement `gate(name, candidate_version)` → fetch the candidate's
   + the incumbent's (`@serving`) logged eval metric, compare honouring **direction** + **like-for-like**
   (same modality + metric), compute the regression vs **tolerance**, and return a **GateVerdict**
   (`pass`/`warn`/`blocked` + candidate metric + incumbent metric + delta + tolerance + mode). Handle
   **no-incumbent** (pass) and **missing-metric** (policy) explicitly. (FR-103, FR-104)
-- [ ] **T210** [US2] Wire the gate into `gateway/app/registry.py` `promote()`: consult `gate(...)` **before**
+- [x] **T210** [US2] Wire the gate into `gateway/app/registry.py` `promote()`: consult `gate(...)` **before**
   `set_registered_model_alias`; in the **default hard-gate** mode a `blocked` verdict refuses the alias move
   (unless an explicit **override** flag is passed → moves, flagged), in **warn** mode it moves but the
   verdict is flagged. **Single choke-point — no ungated back-door.** Return the verdict from `promote()`.
   (FR-105)
-- [ ] **T211** [US2] Make the gate mode + tolerance + **override flag** + missing-metric policy
+- [x] **T211** [US2] Make the gate mode + tolerance + **override flag** + missing-metric policy
   **configurable** (env / request param); **default = hard-gate with tolerance** per plan.md; the promote
   API response carries the verdict (candidate vs incumbent metric + delta + tolerance + mode). (FR-104,
   FR-105)
-- [ ] **T212** [US2] **UI**: the Models/Runs surface shows each version's **eval metric** and, on a
+- [x] **T212** [US2] **UI**: the Models/Runs surface shows each version's **eval metric** and, on a
   promotion, the **gate verdict** (pass / warn / blocked, with candidate vs incumbent metric + delta).
   (FR-105, SC-067)
-- [ ] **T213** [P] [US2] `tests/test_promotion_gate`: regressing candidate → **refused** (alias unmoved) in
+- [x] **T213** [P] [US2] `tests/test_promotion_gate`: regressing candidate → **refused** (alias unmoved) in
   the **default hard-gate**, **moved + flagged** with the explicit **override**, **flagged** (alias moved)
   in warn; non-regressing candidate promotes in all modes; **missing-metric** + **no-incumbent** hit their
   policies; verdict (candidate vs incumbent + delta + tolerance + mode) returned by the API. (SC-065,
   SC-066)
-- [ ] **T214** [P] [US2] Confirm **no ungated path**: every alias move runs through the gate (the raw
+- [x] **T214** [P] [US2] Confirm **no ungated path**: every alias move runs through the gate (the raw
   registry `promote` is the only mover and it consults the gate). (SC-066)
 
 ## Phase 3 — Champion-challenger via offline held-out eval (US3, P2) → SC-068
 
-- [ ] **T215** [US3] In `evaluation.py`, implement `compare(champion, challenger)` (held-out, the **default
+- [x] **T215** [US3] In `evaluation.py`, implement `compare(champion, challenger)` (held-out, the **default
   and only 011 source**): score both the `@serving` champion and the challenger on the same held-out set,
   **loading sequentially** (one model in VRAM, releasing between), produce a per-metric comparison +
   declared **winner**. (FR-106)
@@ -124,19 +140,19 @@ Task IDs continue the shared space (T202+).
   challenger, score against the same metric, compare to the champion's recorded performance) needs **013's
   prediction + label logging** to be meaningful; recorded as a 013-dependent follow-on, **out of scope for
   011**. (FR-106)
-- [ ] **T217** [US3] **UI/CLI**: surface the champion-challenger comparison (per-metric table + winner);
+- [x] **T217** [US3] **UI/CLI**: surface the champion-challenger comparison (per-metric table + winner);
   ensure the comparison's metric is the same number the gate (US2) uses. (FR-106)
-- [ ] **T218** [P] [US3] `tests/test_champion_challenger`: held-out comparison yields a per-metric winner;
+- [x] **T218** [P] [US3] `tests/test_champion_challenger`: held-out comparison yields a per-metric winner;
   assert the **VRAM mutex is never violated** (champion + challenger scored sequentially — at most one model
   resident). (SC-068)
 
 ## Phase 4 — Cross-cutting regression
 
-- [ ] **T219** Full **001–007 keyed sweep** green with the eval/gate stack in place; serving, registry,
+- [x] **T219** Full **001–007 keyed sweep** green with the eval/gate stack in place; serving, registry,
   datasets, training, drift, and tracing all unchanged. (SC-069)
-- [ ] **T220** Confirm **footprint** unchanged in spirit: no always-on service added, the gateway image
+- [x] **T220** Confirm **footprint** unchanged in spirit: no always-on service added, the gateway image
   stays light (metric libs only), and the gate adds **no model load** to the promote call. (SC-069)
-- [ ] **T221** Commit benchmark fixtures + `evaluation.py` + the `registry.py` gate hook + UI surfacing +
+- [x] **T221** Commit benchmark fixtures + `evaluation.py` + the `registry.py` gate hook + UI surfacing +
   `requirements.txt` metric-lib pins; record the chosen per-modality metrics + gate defaults in the spec.
   (SC-064–SC-069)
 
