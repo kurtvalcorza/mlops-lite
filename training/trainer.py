@@ -294,6 +294,7 @@ class Handler(BaseHTTPRequestHandler):
         modality = (req.get("modality") or "llm").lower()
         if modality not in ("llm", "text-generation", "vision", "image-classification", "tabular"):
             return self._send(400, {"error": f"unknown batch modality {modality!r}"})
+        req["modality"] = modality  # store the normalised value so the worker sees "llm", not "LLM"
         with _lock:
             global _active
             if _active is not None:

@@ -20,6 +20,11 @@ const TERMINAL = new Set(['completed', 'failed']);
 // 014 — the trainer emits batch terminal status as 'succeeded'/'failed' (not 'completed'); keep it
 // distinct so the launcher's poll loop actually stops and the spinner clears on a successful batch.
 const BATCH_TERMINAL = new Set(['succeeded', 'failed']);
+// 014 — batch has its OWN modality set: the trainer's /batch validator accepts only these (LLM, vision,
+// tabular). The training MODALITIES list (embeddings/asr) is invalid for batch and would 400; tabular is
+// valid here but absent there — so don't reuse it for the batch launcher.
+const BATCH_MODALITIES = ['llm', 'vision', 'tabular'] as const;
+type BatchModality = (typeof BATCH_MODALITIES)[number];
 
 // 012 — an HPO study: a best trial (winning params + eval metric → a registered, promotable version).
 type StudyBest = {
@@ -413,7 +418,7 @@ type BatchRec = {
 function BatchLauncher({ datasets }: { datasets: Dataset[] }) {
   const [dsKey, setDsKey] = useState('');
   const [model, setModel] = useState('');
-  const [modality, setModality] = useState<Modality>('llm');
+  const [modality, setModality] = useState<BatchModality>('llm');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [rec, setRec] = useState<BatchRec | null>(null);
@@ -496,10 +501,10 @@ function BatchLauncher({ datasets }: { datasets: Dataset[] }) {
         <Field label="modality">
           <select
             value={modality}
-            onChange={(e) => setModality(e.target.value as Modality)}
+            onChange={(e) => setModality(e.target.value as BatchModality)}
             className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink"
           >
-            {MODALITIES.map((m) => (
+            {BATCH_MODALITIES.map((m) => (
               <option key={m} value={m}>
                 {m}
               </option>
