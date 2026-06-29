@@ -19,7 +19,9 @@ export const ALLOWLIST: AllowEntry[] = [
   // Models tab
   { method: 'GET', pattern: 'models' }, // list models + serving version
   { method: 'GET', pattern: 'models/:name' }, // versions
-  { method: 'POST', pattern: 'models/:name/promote' }, // promote
+  { method: 'POST', pattern: 'models/:name/promote' }, // promote (returns the 011 gate verdict)
+  { method: 'POST', pattern: 'models/:name/evaluate' }, // 011 US1: score a version → log eval metric
+  { method: 'POST', pattern: 'models/:name/compare' }, // 011 US3: offline champion-challenger
   // Datasets tab
   { method: 'GET', pattern: 'datasets' },
   { method: 'POST', pattern: 'datasets' }, // upload

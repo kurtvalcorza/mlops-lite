@@ -6,10 +6,11 @@ in its threadpool rather than stalling the event loop.
 from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import registry
+from .. import evaluation, registry
 
 router = APIRouter()
 
@@ -25,6 +26,19 @@ class RegisterRequest(BaseModel):
 
 class PromoteRequest(BaseModel):
     version: str
+    override: bool = False  # 011 FR-104: explicitly bypass a hard-gate block (promote-with-regression)
+
+
+class EvaluateRequest(BaseModel):
+    version: str
+    benchmark: Optional[str] = None     # path under benchmarks/ (default: the modality's fixture)
+    metric: Optional[str] = None        # override the modality's default primary metric
+
+
+class CompareRequest(BaseModel):
+    challenger: str                     # version to weigh against the current @serving champion
+    benchmark: Optional[str] = None
+    metric: Optional[str] = None
 
 
 @router.post("/models", status_code=201)
@@ -62,7 +76,10 @@ def get_model(name: str):
 
 @router.post("/models/{name}/promote")
 def promote(name: str, req: PromoteRequest):
-    """Promote a specific version to serving — US1 inference then resolves to it (FR-006)."""
+    """Promote a version to serving, **through the evaluation gate** (011 FR-105). The response carries
+    the gate verdict and whether the alias moved (`promoted`): a default hard-gate block keeps the
+    alias put with `promoted=false`; `pass`/`warn` (or an explicit `override`) moves it. US1 inference
+    then resolves to the serving version (FR-006)."""
     try:
         versions = registry.list_versions(name)
     except registry.RegistryError as e:
@@ -70,9 +87,39 @@ def promote(name: str, req: PromoteRequest):
     if not any(v["version"] == str(req.version) for v in versions):
         raise HTTPException(status_code=404, detail=f"{name!r} has no version {req.version}")
     try:
-        res = registry.promote(name, req.version)
+        res = registry.promote(name, req.version, override=req.override)
     except registry.RegistryError as e:
         REGISTRY_OPS.labels(op="promote", status="error").inc()
         raise HTTPException(status_code=502, detail=f"registry error: {e}")
-    REGISTRY_OPS.labels(op="promote", status="ok").inc()
+    REGISTRY_OPS.labels(op="promote", status="blocked" if not res.get("promoted", True) else "ok").inc()
+    return res
+
+
+@router.post("/models/{name}/evaluate")
+async def evaluate(name: str, req: EvaluateRequest):
+    """Score a version on its modality's held-out benchmark and log the primary metric to MLflow with
+    benchmark provenance (011 US1, FR-100). Runs the held-out set through the serving path (one model
+    in VRAM), so the harness is blocking → run it off the event loop."""
+    try:
+        res = await run_in_threadpool(
+            evaluation.evaluate, name, req.version, req.benchmark, metric_name=req.metric)
+    except evaluation.EvalError as e:
+        REGISTRY_OPS.labels(op="evaluate", status="error").inc()
+        raise HTTPException(status_code=400, detail=f"eval error: {e}")
+    REGISTRY_OPS.labels(op="evaluate", status="ok").inc()
+    return res
+
+
+@router.post("/models/{name}/compare")
+async def compare(name: str, req: CompareRequest):
+    """Offline champion-challenger (011 US3, FR-106): score the current `@serving` champion and the
+    challenger on the same held-out benchmark — **sequentially** (one model in VRAM) — and declare a
+    per-metric winner. Blocking (loads models) → run it off the event loop."""
+    try:
+        res = await run_in_threadpool(
+            evaluation.compare, name, req.challenger, req.benchmark, metric_name=req.metric)
+    except evaluation.EvalError as e:
+        REGISTRY_OPS.labels(op="compare", status="error").inc()
+        raise HTTPException(status_code=400, detail=f"compare error: {e}")
+    REGISTRY_OPS.labels(op="compare", status="ok").inc()
     return res

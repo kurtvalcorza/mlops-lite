@@ -13,3 +13,11 @@ mlflow-skinny==3.14.0
 # S3 client for the MinIO-backed dataset registry. 007 US3: 1.35.99 -> 1.43.36 (independent of the
 # mlflow server's boto3 — both are just MinIO clients and need not match).
 boto3==1.43.36
+
+# 011 (evaluation gates), T202 / FR-102 / FR-107 — NO new dependency added. The plan floated light
+# metric libs (jiwer / sacrebleu / scikit-learn), but every 011 primary metric (LLM task-accuracy,
+# vision top-1 accuracy, and the WER / recall@k / AUC / perplexity stubs) is implemented in pure
+# Python in app/evaluation.py — the same Principle-III stance monitoring.py took when it computed PSI
+# by hand rather than pulling Evidently+pandas+scipy onto the constrained Windows C: drive. sklearn
+# would drag in numpy+scipy for math we do exactly in a few lines; jiwer pulls a compiled rapidfuzz.
+# Those libs stay swappable behind evaluation.METRICS (Principle V) if a modality later needs them.
