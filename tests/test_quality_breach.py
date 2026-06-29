@@ -27,6 +27,17 @@ def test_lower_better_breach_threshold():
     assert q.is_breach(0.10, 0.20, "lower", 0.10) is False    # improved
 
 
+def test_baseline_is_like_for_like_only():
+    # the 011 baseline is used ONLY when it's the same metric as the window — else None (no breach), so
+    # a lower-better perplexity baseline can't be compared against a higher-better accuracy window.
+    assert q.baseline_for({"metric": "accuracy", "value": 0.95}, "accuracy") == 0.95
+    assert q.baseline_for({"metric": "perplexity", "value": 15.0}, "accuracy") is None  # mismatch → None
+    assert q.baseline_for(None, "accuracy") is None
+    # and a None baseline can never produce a breach (would otherwise fabricate one).
+    assert q.is_breach(0.8, q.baseline_for({"metric": "perplexity", "value": 15.0}, "accuracy"),
+                       "higher", 0.10) is False
+
+
 def test_no_baseline_or_no_value_never_breaches():
     assert q.is_breach(0.5, None, "higher", 0.10) is False    # nothing to compare against
     assert q.is_breach(None, 0.9, "higher", 0.10) is False    # insufficient data

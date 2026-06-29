@@ -14,6 +14,7 @@ import time
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -133,7 +134,7 @@ async def infer_stream(req: StreamRequest):
             # left uncaptured — the prediction id + prompt + version are still logged for later labeling.
             if outcome == "completed":
                 try:
-                    served = registry.get_serving(serving.SERVING_MODEL)
+                    served = await run_in_threadpool(registry.get_serving, serving.SERVING_MODEL)
                     version = served["version"] if served else None
                 except Exception:
                     version = None

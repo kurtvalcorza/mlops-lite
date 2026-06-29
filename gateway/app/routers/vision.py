@@ -32,7 +32,10 @@ async def _resolve_vision_version() -> tuple:
 
 
 def _top_label(data) -> object:
-    """Top-1 predicted label from the bento response (handles {predictions:[{label}]} / {labels:[…]})."""
+    """Top-1 predicted label from the bento response (handles {predictions:[{label}]} / {labels:[…]}).
+    Guards on dict first: a non-dict response must never raise out of the (fail-open) logging path."""
+    if not isinstance(data, dict):
+        return None
     preds = data.get("predictions") or data.get("labels") or []
     if preds and isinstance(preds[0], dict):
         return preds[0].get("label")

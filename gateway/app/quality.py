@@ -268,15 +268,26 @@ def _load_pairs(model_version: str) -> list:
     return pairs
 
 
+def baseline_for(ev, metric_name):
+    """The 011 baseline value only when it is the **same metric** as the one being scored (like-for-like)
+    — else None (⇒ no breach). Without this guard a version whose 011 eval used a different metric (e.g.
+    the lower-better perplexity fallback) would be compared against a higher-better accuracy window and
+    fabricate a breach; 011's own gate refuses the same mismatch (compute_verdict)."""
+    if not ev or ev.get("metric") != metric_name:
+        return None
+    return ev.get("value")
+
+
 def _resolve_baseline(model_name, model_version, modality):
     """The 011 registered/eval baseline metric for this version (the relative-threshold reference), or
-    None if the version carries no logged eval metric. Best-effort — never fails the quality check."""
+    None if the version is unevaluated or its eval used a different metric. Best-effort — never fails the
+    quality check."""
     if not model_name:
         return None
     try:
         from . import registry
         ev = _eval().read_eval(registry._client(), model_name, model_version)
-        return ev["value"] if ev else None
+        return baseline_for(ev, _modality_metric(modality).name)  # like-for-like only
     except Exception:
         return None
 
