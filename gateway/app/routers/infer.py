@@ -10,8 +10,15 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter, Histogram
 from pydantic import BaseModel
 
-from .. import registry, tracing
-from ..serving import SERVING_MODEL, ModelTooLargeError, ServingError, gpu_state, health, run_inference
+from .. import quality, registry, tracing
+from ..serving import (
+    SERVING_MODEL,
+    ModelTooLargeError,
+    ServingError,
+    gpu_state,
+    health,
+    run_inference,
+)
 
 router = APIRouter()
 
@@ -87,10 +94,15 @@ async def infer(req: InferRequest):
         INFER_REQUESTS.labels(status="ok").inc()
         registry_version = await _resolve_serving_version()
         trace_status, outcome = "OK", "completed"  # success is known — flip the pessimistic default
+        # 013/FR-119: log the served prediction off the request path (fire-and-forget, fail-open) so it
+        # can be scored later against a delayed label. Returns a synchronous id regardless of store state.
+        prediction_id = quality.log_prediction(
+            SERVING_MODEL, registry_version, "text-generation", req.prompt, result.get("text"))
         return {
             "status": "completed",
             "registry_model": SERVING_MODEL,
             "registry_version": registry_version,
+            "prediction_id": prediction_id,
             **result,
         }
     finally:

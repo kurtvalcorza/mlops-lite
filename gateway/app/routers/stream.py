@@ -14,10 +14,11 @@ import time
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import platform_health, serving, tracing
+from .. import platform_health, quality, registry, serving, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -128,6 +129,26 @@ async def infer_stream(req: StreamRequest):
                 end_ns=time.time_ns(),
                 status=trace_status,
             )
+            # 013/FR-119: log the served prediction off the request path (fire-and-forget, fail-open).
+            # The streamed tokens aren't buffered (the SSE bytes stay byte-identical), so the output is
+            # left uncaptured — the prediction id + prompt + version are still logged for later labeling.
+            if outcome == "completed":
+                # Fully off the response path: schedule the version-resolve + store write as a detached
+                # task so the generator's teardown (the chunked-encoding terminator) isn't delayed by a
+                # registry call (Codex P2). The streamed bytes are already delivered + unaffected.
+                async def _log():
+                    try:
+                        served = await run_in_threadpool(registry.get_serving, serving.SERVING_MODEL)
+                        version = served["version"] if served else None
+                    except Exception:
+                        version = None
+                    quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
+                                           req.prompt, None)
+
+                try:
+                    asyncio.ensure_future(_log())
+                except Exception:  # never let logging setup affect the stream
+                    pass
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 
