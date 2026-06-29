@@ -20,14 +20,24 @@ IDs continue the shared space (T154+).
 
 ---
 
-> **Status (2026-06-29):** **BUILT — offline-validated; on-hardware validation PENDING.**
-> All five phases are implemented (US1 enabler + embeddings + ASR + tabular + cross-cutting wiring).
-> Offline-validated: `py_compile` of every gateway/serving/script module, `tsc --noEmit` of the UI,
-> `pytest --collect-only` (all 27 modules import), the stdlib `test_gpu_lease` (13 checks) green in WSL,
-> and the 5 new modality tests skip cleanly when their daemons are down. **Pending on the GPU host**
-> (T154 deps-install + whisper.cpp CUDA build gate, T169 live transcribe, T176 lease-swap sweep, T178
-> keyed no-regression sweep) — run the bring-up (up_all) + seeds, then the keyed suite. The grilled
-> decisions below are unchanged.
+> **Status (2026-06-29):** **VALIDATED ON HARDWARE** (RTX 5070 Ti, 12 GB; WSL2 + Rancher Desktop).
+> All five phases implemented and exercised live. **T154** deps install clean (sentence-transformers
+> 3.3.1 / lightgbm 4.5.0 / joblib 1.4.2), nvidia-smi OK, `tags.task` filter resolves on MLflow 3.14.
+> **whisper.cpp** built from source with CUDA (sm_120a). Registry re-seeded: all 5 models `@serving`
+> with `task`/`serving_engine` tags. **Live modalities (via gateway, keyed):** `/embed` (T164) PASS —
+> 384-dim CPU off-lease, batchable; `/predict` (T174) PASS — LightGBM CPU off-lease; `/infer` PASS —
+> qwen2.5-7b, holder=llm, 5.6 GB resident; vision `/classify` PASS — device=cuda, holder=vision; ASR
+> `/transcribe` (T169) PASS — whisper.cpp, holder=asr. **T176 lease swap LLM→vision→ASR PROVEN** —
+> VRAM 5655→(idle-release 950)→vision 1175→(idle-release)→asr 1575 MiB; vision 409-refused while LLM
+> held the lease ⇒ never two co-resident (Principle II holds). **T178 keyed no-regression:** core
+> security/lifecycle/contract + 009 unit tests pass; `test_gpu_lease` 13 checks green clean (full-suite
+> GPU tests serialize via the single lease — expected, not a regression). **One finding (non-blocking):**
+> `test_registry`'s `/infer` leg surfaces the `text-generation`-tagged version, not an *untagged*
+> promoted `@serving` version — a 009 task-based-resolution vs 001 raw-`@serving` nuance; harmless in
+> real usage (seed scripts always tag; live `/infer` reported the correct tagged version) but worth a
+> follow-up vs T156's "preserve /infer exactly." **Env note:** the bring-up surfaced a real bug —
+> shell scripts checked out CRLF on Windows (core.autocrlf) and failed under bash/WSL; fixed via
+> `.gitattributes` (PR #7). The grilled decisions below are unchanged.
 >
 > **Earlier status (2026-06-28):** DRAFT — GRILLED (2026-06-28), build-ready.
 > Scope: registry `task`/`serving_engine` metadata + gateway routing + dynamic Infer panel (enabler), then
