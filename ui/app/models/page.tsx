@@ -15,13 +15,16 @@ type Version = {
 };
 type ModelDetail = { name: string; serving: { version: string } | null; versions: Version[] };
 
-type MetricBrief = { version: string; metric: string; value: number } | null;
+// A candidate with no logged metric still carries its version (so a missing-metric block is
+// override-able from the panel); metric/value are present only once a version has been evaluated.
+type MetricBrief = { version: string; metric?: string; value?: number } | null;
 type Verdict = {
   verdict: 'pass' | 'warn' | 'blocked';
   reason: string;
   flagged: boolean;
   mode: string;
   tolerance: number;
+  override: boolean;
   candidate: MetricBrief;
   incumbent: MetricBrief;
   delta: number | null;
@@ -196,7 +199,7 @@ function GateVerdict({
         </span>
       </div>
       <p className="mt-1 text-caption-md text-mute">{verdict.reason}</p>
-      {cand && inc && (
+      {cand && inc && cand.value !== undefined && inc.value !== undefined && (
         <p className="mt-1 text-caption-md text-ash">
           candidate v{cand.version} {cand.metric}={cand.value} vs incumbent v{inc.version}{' '}
           {inc.metric}={inc.value}

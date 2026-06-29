@@ -103,6 +103,18 @@ def test_gate_repromoting_serving_version_has_no_incumbent(monkeypatch):
     assert m.gate("clf", "1", client=client)["verdict"] == "pass"
 
 
+def test_gate_exposes_candidate_version_even_without_a_metric(monkeypatch):
+    # an unevaluated candidate against an evaluated incumbent, missing-policy=block: the verdict still
+    # carries the candidate version so the UI can offer an override on the block (no null candidate).
+    client = FakeClient({
+        ("clf", "1"): FakeMV(_tags(_ev(0.90))),   # incumbent has a metric
+        ("clf", "2"): FakeMV({"task": "image-classification"}),  # candidate has none
+    })
+    monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
+    v = m.gate("clf", "2", client=client, missing_policy="block")
+    assert v["verdict"] == "blocked" and v["candidate"] == {"version": "2"}
+
+
 # --- live wiring leg: every promotion returns a verdict (no ungated path) -------------------------
 
 GW = f"http://localhost:{os.getenv('GATEWAY_PORT', '8080')}"

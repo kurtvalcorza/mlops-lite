@@ -28,8 +28,16 @@ def test_committed_metric_directions():
 
 def test_accuracy_and_task_accuracy():
     assert m.accuracy(["a", "b", "c"], ["a", "x", "c"]) == 2 / 3
-    # generative answers: exact (normalised) and reference-as-substring both count.
+    # generative answers: exact (normalised) and reference-as-token-run both count.
     assert m.task_accuracy(["Paris.", "the answer is 7", "blue"], ["paris", "7", "green"]) == 2 / 3
+
+
+def test_task_accuracy_is_token_level_not_raw_substring():
+    # token-level guards against inflated scores: "17" must NOT count as containing "7", nor "blue"
+    # as containing "lu" (raw substring would wrongly score both as hits).
+    assert m.task_accuracy(["the total is 17"], ["7"]) == 0.0
+    assert m.task_accuracy(["blue"], ["lu"]) == 0.0
+    assert m.task_accuracy(["it is 7 today"], ["7"]) == 1.0  # genuine token run still counts
 
 
 def test_wer_is_lower_better_and_correct():

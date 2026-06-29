@@ -74,16 +74,24 @@ def _norm(s: str) -> str:
     return " ".join(str(s).strip().lower().split()).strip(".,!?;:\"'`")
 
 
+def _contains_subsequence(haystack: list, needle: list) -> bool:
+    """True if `needle` appears as a contiguous run of tokens in `haystack`."""
+    n = len(needle)
+    return n > 0 and any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
+
 def task_accuracy(preds, refs) -> float:
     """LLM QA primary metric (higher-better): fraction of items whose generated text matches the
-    reference answer — exact (normalised) or reference-as-substring (a generative answer may wrap the
-    target in a sentence)."""
+    reference answer — exact (normalised) or the reference as a contiguous **token run** (a generative
+    answer may wrap the target in a sentence, e.g. "the answer is 7" ⊇ "7"). Token-level on purpose:
+    raw substring would count "17" as containing "7", or "blue" as containing "lu", inflating the
+    score — and an inflated metric is the one direction the gate can't catch."""
     if not refs:
         raise EvalError("empty benchmark — nothing to score")
     hits = 0
     for p, r in zip(preds, refs):
         np_, nr = _norm(p), _norm(r)
-        if nr and (np_ == nr or nr in np_):
+        if nr and (np_ == nr or _contains_subsequence(np_.split(), nr.split())):
             hits += 1
     return hits / len(refs)
 
@@ -403,8 +411,13 @@ def gate(name: str, candidate_version: str, *, override: bool = False, mode: str
         incumbent_version = None  # re-promoting the serving version: nothing to regress against
     candidate = read_eval(c, name, candidate_version)
     incumbent = read_eval(c, name, incumbent_version)
-    return compute_verdict(candidate, incumbent, mode=mode, tolerance=tolerance,
-                           missing_policy=missing_policy, override=override)
+    v = compute_verdict(candidate, incumbent, mode=mode, tolerance=tolerance,
+                        missing_policy=missing_policy, override=override)
+    # Always expose the candidate's version, even when it has no logged metric (its brief is None) —
+    # so the UI can offer an override on a missing-metric block (it needs a version to re-promote).
+    if v["candidate"] is None:
+        v["candidate"] = {"version": str(candidate_version)}
+    return v
 
 
 # --- US3: offline champion-challenger -------------------------------------------------------------
