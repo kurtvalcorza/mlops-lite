@@ -15,8 +15,10 @@ failure).
 Paths are env-overridable (mirroring `LLAMA_DIR`):
   WHISPER_CPP_DIR     whisper.cpp checkout (default ~/whisper.cpp)
   WHISPER_HF_CONVERT  the convert-h5-to-ggml.py script (default $WHISPER_CPP_DIR/models/convert-h5-to-ggml.py)
-  WHISPER_QUANTIZE    the quantize binary (default $WHISPER_CPP_DIR/build/bin/quantize)
-  WHISPER_ASSETS_DIR  the OpenAI-whisper package dir (mel filters / tokenizer); auto-located if openai-whisper is installed
+  WHISPER_QUANTIZE    the quantize binary (default: $WHISPER_CPP_DIR/build/bin/{whisper-quantize,quantize})
+  WHISPER_ASSETS_DIR  the **parent** dir containing `whisper/assets/mel_filters.npz` (i.e. the site-packages
+                      parent of an openai-whisper install, or a cloned openai/whisper repo root) — NOT the
+                      `whisper` package dir; auto-located via find_spec if openai-whisper is installed
 """
 import os
 import subprocess
