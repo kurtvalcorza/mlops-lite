@@ -62,4 +62,6 @@ async def get_batch(batch_id: str):
             raise HTTPException(status_code=503, detail=f"training daemon unreachable: {e}")
     if r.status_code == 404:
         raise HTTPException(status_code=404, detail=f"no batch {batch_id}")
+    if r.status_code not in (200, 202):
+        raise HTTPException(status_code=502, detail=f"trainer error {r.status_code}: {r.text[:200]}")
     return r.json()

@@ -289,6 +289,11 @@ class Handler(BaseHTTPRequestHandler):
         for f in ("dataset_name", "dataset_version", "model"):
             if not req.get(f):
                 return self._send(400, {"error": f"missing field: {f}"})
+        # Validate modality *before* taking the daemon slot (consistent with /train + /study) — else an
+        # unknown modality would reserve `_active`, spawn a thread, and fail in the worker, wasting a slot.
+        modality = (req.get("modality") or "llm").lower()
+        if modality not in ("llm", "text-generation", "vision", "image-classification", "tabular"):
+            return self._send(400, {"error": f"unknown batch modality {modality!r}"})
         with _lock:
             global _active
             if _active is not None:

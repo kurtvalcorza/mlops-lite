@@ -71,7 +71,9 @@ def write_result(job_name: str, batch: dict, *, manifest_extra=None, s3=None) ->
     `batch/<job>/<version>/{data,manifest.json}` — immutable + idempotent (identical results ⇒ same
     version). Returns the version + the result URI + the manifest."""
     s3 = s3 or _s3()
-    data = ("\n".join(json.dumps(r) for r in batch["results"]) + "\n").encode()
+    # sort_keys ⇒ canonical bytes: identical *logical* results hash the same even if a row dict was
+    # rebuilt with a different key insertion order (e.g. a replay deserialized from JSON).
+    data = ("\n".join(json.dumps(r, sort_keys=True) for r in batch["results"]) + "\n").encode()
     digest = hashlib.sha256(data).hexdigest()
     version = digest[:12]
     base = f"{BATCH_PREFIX}{job_name}/{version}"

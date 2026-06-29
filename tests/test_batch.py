@@ -101,6 +101,15 @@ def test_write_result_is_content_addressed_and_idempotent():
     assert man["n_in"] == 1 and man["n_out"] == 1 and man["sha256"]
 
 
+def test_write_result_version_is_key_order_independent():
+    # Canonical (sort_keys) hashing: two results that are logically identical but built with a different
+    # dict key insertion order must content-address to the SAME version (B2 — review round 1).
+    s3 = FakeS3()
+    b1 = {"results": [{"in": {"x": 1}, "out": "a", "ok": True}], "n_in": 1, "n_out": 1, "n_failed": 0}
+    b2 = {"results": [{"ok": True, "out": "a", "in": {"x": 1}}], "n_in": 1, "n_out": 1, "n_failed": 0}
+    assert b.write_result("job", b1, s3=s3)["version"] == b.write_result("job", b2, s3=s3)["version"]
+
+
 # --- score_dataset end-to-end (fake store + injected predictor) -----------------------------------
 
 def test_score_dataset_end_to_end():
