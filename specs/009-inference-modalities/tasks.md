@@ -20,7 +20,16 @@ IDs continue the shared space (T154+).
 
 ---
 
-> **Status (2026-06-28):** **DRAFT — GRILLED (2026-06-28), build-ready.**
+> **Status (2026-06-29):** **BUILT — offline-validated; on-hardware validation PENDING.**
+> All five phases are implemented (US1 enabler + embeddings + ASR + tabular + cross-cutting wiring).
+> Offline-validated: `py_compile` of every gateway/serving/script module, `tsc --noEmit` of the UI,
+> `pytest --collect-only` (all 27 modules import), the stdlib `test_gpu_lease` (13 checks) green in WSL,
+> and the 5 new modality tests skip cleanly when their daemons are down. **Pending on the GPU host**
+> (T154 deps-install + whisper.cpp CUDA build gate, T169 live transcribe, T176 lease-swap sweep, T178
+> keyed no-regression sweep) — run the bring-up (up_all) + seeds, then the keyed suite. The grilled
+> decisions below are unchanged.
+>
+> **Earlier status (2026-06-28):** DRAFT — GRILLED (2026-06-28), build-ready.
 > Scope: registry `task`/`serving_engine` metadata + gateway routing + dynamic Infer panel (enabler), then
 > **embeddings** (BentoML sentence-transformers, **CPU, off-lease, always-on**), **ASR** (whisper.cpp native
 > CUDA daemon under the supervisor, GPU-lease tenant), **tabular** (LightGBM CPU, off-lease, always-on).

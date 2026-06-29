@@ -10,8 +10,12 @@ export type AllowEntry = { method: string; pattern: string };
 export const ALLOWLIST: AllowEntry[] = [
   // Infer tab
   { method: 'GET', pattern: 'serving/state' }, // GPU/lease status line + classify gating (008 US3)
+  { method: 'GET', pattern: 'serving/tasks' }, // task discovery → one panel per task (009 US1)
   { method: 'POST', pattern: 'infer/stream' }, // streaming inference (SSE)
   { method: 'POST', pattern: 'vision/classify' }, // image classify
+  { method: 'POST', pattern: 'embed' }, // embeddings (CPU, off-lease — 009 US2)
+  { method: 'POST', pattern: 'transcribe' }, // ASR transcript (whisper.cpp lease tenant — 009 US3)
+  { method: 'POST', pattern: 'predict' }, // tabular predict (CPU, off-lease — 009 US4)
   // Models tab
   { method: 'GET', pattern: 'models' }, // list models + serving version
   { method: 'GET', pattern: 'models/:name' }, // versions

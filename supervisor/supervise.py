@@ -2,7 +2,7 @@
 
 The GPU/vision daemons run natively in WSL, outside the container engine. 001 started each by
 hand (`bash serving/llama/run.sh`, etc.) and they silently died on crash. This pure-stdlib
-supervisor starts all three, polls their health, and restarts them on exit with exponential
+supervisor starts each, polls their health, and restarts them on exit with exponential
 backoff — backing off to a `persistent-unhealthy` state after repeated failures rather than
 crash-loop hammering. Daemon states are surfaced over HTTP (`GET /status`) so they're observable.
 
@@ -51,6 +51,29 @@ _ALL = {
         "health_url": os.getenv("VISION_HEALTH", "http://localhost:8092/readyz"),
         "grace_s": float(os.getenv("VISION_GRACE", "60")),  # bentoml is slow to come up
     },
+    # 009 US2 — embeddings: a 5th native CPU daemon, OFF the GPU lease (always-on, no VRAM). BentoML
+    # is slow to come up (model download on first load), so the grace is generous like vision.
+    "embed": {
+        "cmd": ["bash", os.path.join(REPO, "serving", "bento", "embed_run.sh")],
+        "health_url": os.getenv("EMBED_HEALTH", "http://localhost:8093/readyz"),
+        "grace_s": float(os.getenv("EMBED_GRACE", "120")),
+    },
+    # 009 US3 — ASR: the whisper.cpp native CUDA supervisor, a GPU-lease tenant (load-on-demand,
+    # idle-release VRAM). **Opt-in** (NOT in the default set below): unlike embed/tabular — whose deps
+    # bootstrap.sh installs — whisper.cpp needs a manual CUDA build (serving/whispercpp/build.sh), so
+    # on a host that hasn't built it run.sh would exit and stall bring-up (Codex review). Enable once
+    # built:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,asr,ui
+    "asr": {
+        "cmd": ["bash", os.path.join(REPO, "serving", "whispercpp", "run.sh")],
+        "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
+        "grace_s": float(os.getenv("ASR_GRACE", "30")),
+    },
+    # 009 US4 — tabular: a BentoML CPU daemon, OFF the GPU lease (always-on, no VRAM), like embed.
+    "tabular": {
+        "cmd": ["bash", os.path.join(REPO, "serving", "bento", "tabular_run.sh")],
+        "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
+        "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
+    },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).
     # First launch installs deps + builds, so the grace is generous; warm launches `next start` fast.
     "ui": {
@@ -60,7 +83,8 @@ _ALL = {
     },
 }
 _SELECTED = [n.strip()
-             for n in os.getenv("SUPERVISE_DAEMONS", "serving,training,vision,ui").split(",")
+             for n in os.getenv("SUPERVISE_DAEMONS",
+                                "serving,training,vision,embed,tabular,ui").split(",")
              if n.strip() in _ALL]
 
 

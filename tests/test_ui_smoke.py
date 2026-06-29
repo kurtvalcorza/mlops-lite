@@ -102,15 +102,20 @@ def main() -> int:
     print(f"[{'OK' if ok else 'FAIL'}] BFF /api/gw/platform/health -> {s} (expect 200)")
     failures += 0 if ok else 1
 
-    # 2b. 008 US3 (FR-069/SC-046): the Infer tab dropped the inert model `<select>` for a read-only
-    #     "serving:" status line. Assert the SSR HTML has the status line and no model dropdown.
+    # 2b. 008 US3 (FR-069/SC-046) + 009 US1 (FR-077): the Infer tab dropped the inert model `<select>`,
+    #     and 009 made the panels task-driven — they render client-side from /serving/tasks, so the
+    #     "serving:" status line is no longer in the SSR HTML (it appears after task discovery). The
+    #     no-`<select>` invariant still holds in SSR, and the tab must render its discovery shell.
     s, body = _get(f"{UI}/infer")
     html = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body)
-    has_status = "serving:" in html
+    # Tight positive assertion (Claude review): the SSR shell emits the task-discovery placeholder
+    # from page.tsx ("discovering tasks…") before hydration — a broad "infer" substring would also
+    # pass on an error page that merely mentions infer.
+    renders = s == 200 and "discovering tasks" in html.lower()
     no_dropdown = "<select" not in html
-    print(f"[{'OK' if has_status else 'FAIL'}] Infer tab shows the read-only 'serving:' status line")
+    print(f"[{'OK' if renders else 'FAIL'}] Infer tab renders (200, task-driven discovery shell — 009 FR-077)")
     print(f"[{'OK' if no_dropdown else 'FAIL'}] Infer tab has NO model dropdown (<select removed, FR-069)")
-    failures += (0 if has_status else 1) + (0 if no_dropdown else 1)
+    failures += (0 if renders else 1) + (0 if no_dropdown else 1)
 
     # 2c. 008 US3 (FR-068): the BFF proxies the new GPU/lease state route (key injected server-side).
     s, _ = _get(f"{UI}/api/gw/serving/state")

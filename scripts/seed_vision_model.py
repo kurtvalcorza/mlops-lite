@@ -54,11 +54,19 @@ def main() -> int:
         c.create_registered_model(NAME)
     except MlflowException:
         pass
+    # 009 US1 (FR-074/086): tag the version with task + serving_engine so the gateway routes off
+    # registry metadata and the Infer tab renders the image-classification panel from it. `device` is
+    # kept as `cuda` of-record since 008 made vision a GPU lease tenant when CUDA is present.
     mv = c.create_model_version(
         name=NAME, source=source,
         tags={"kind": "vision-classifier", "arch": "mobilenet_v2",
-              "framework": "torchvision", "task": "image-classification", "device": "cpu"})
-    print(f"registered {NAME} v{mv.version} -> {source}")
+              "framework": "torchvision", "task": "image-classification",
+              "serving_engine": "bentoml", "device": "cuda"})
+    # Promote the fresh version to @serving so list_tasks()/resolve_serving_target() discover it
+    # (the Infer tab renders one panel per @serving task — FR-077).
+    c.set_registered_model_alias(NAME, "serving", mv.version)
+    print(f"registered {NAME} v{mv.version} -> {source}  (task=image-classification, "
+          f"serving_engine=bentoml, promoted @serving)")
     print("done. start the bento:  bash serving/bento/run.sh")
     return 0
 

@@ -117,6 +117,11 @@ services:
       TRAINER_URL: ${TRAINER_URL:-http://host.docker.internal:8091}
       # Native BentoML vision service (US1 vision/audio, CPU). serve_up.ps1 injects the Ubuntu IP.
       BENTO_URL: ${BENTO_URL:-http://host.docker.internal:8092}
+      # 009 native BentoML embeddings (US2, CPU/off-lease) + tabular (US4, CPU/off-lease) + the
+      # whisper.cpp ASR supervisor (US3, GPU-lease tenant). up_all.ps1 injects the Ubuntu IP.
+      EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8093}
+      TABULAR_URL: ${TABULAR_URL:-http://host.docker.internal:8094}
+      ASR_URL: ${ASR_URL:-http://host.docker.internal:8095}
       # MinIO/S3 for the dataset registry (US3).
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"

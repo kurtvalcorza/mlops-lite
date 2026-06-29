@@ -11,26 +11,43 @@ import httpx
 SERVING_URL = os.getenv("SERVING_URL", "http://host.docker.internal:8090")
 TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 BENTO_URL = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
+EMBED_URL = os.getenv("EMBED_URL", "http://host.docker.internal:8093")
+TABULAR_URL = os.getenv("TABULAR_URL", "http://host.docker.internal:8094")
+ASR_URL = os.getenv("ASR_URL", "http://host.docker.internal:8095")
 
-# name -> (health URL, whether 200 means ready). Bento exposes /readyz; the others /health.
+# name -> health URL. Bento services expose /readyz; the supervised GPU daemons expose /health.
+# 009: each new modality is a per-modality reachability target (FR-085) — embeddings + tabular (CPU,
+# off-lease, Bento /readyz) and ASR (whisper.cpp GPU-lease supervisor, /health).
 _TARGETS = {
     "serving": f"{SERVING_URL}/health",
     "training": f"{TRAINER_URL}/health",
     "vision": f"{BENTO_URL}/readyz",
+    "embed": f"{EMBED_URL}/readyz",
+    "tabular": f"{TABULAR_URL}/readyz",
+    "asr": f"{ASR_URL}/health",
 }
+# Optional daemons: probed + reported, but their absence does NOT fail `all_healthy` (Codex review).
+# ASR (whisper.cpp) needs a manual CUDA build and is opt-in in the supervisor's default set, so a host
+# that hasn't built it must still bring the platform up cleanly (up_all gates on all_healthy).
+_OPTIONAL = {"asr"}
 
 
 async def aggregate() -> dict:
-    """Best-effort probe of each daemon; returns per-daemon reachability + an overall flag."""
+    """Best-effort probe of each daemon; returns per-daemon reachability + an overall flag.
+
+    `all_healthy` reflects the REQUIRED daemons only — an opt-in daemon (ASR) that isn't built/running
+    is still reported under `daemons`, but does not hold back bring-up.
+    """
     daemons = {}
     async with httpx.AsyncClient(timeout=3) as client:
         for name, url in _TARGETS.items():
             try:
                 r = await client.get(url)
-                daemons[name] = {"reachable": r.status_code == 200, "url": url}
+                daemons[name] = {"reachable": r.status_code == 200, "url": url,
+                                 "optional": name in _OPTIONAL}
             except httpx.HTTPError:
-                daemons[name] = {"reachable": False, "url": url}
+                daemons[name] = {"reachable": False, "url": url, "optional": name in _OPTIONAL}
     return {
-        "all_healthy": all(d["reachable"] for d in daemons.values()),
+        "all_healthy": all(d["reachable"] for n, d in daemons.items() if n not in _OPTIONAL),
         "daemons": daemons,
     }

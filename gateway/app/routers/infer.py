@@ -27,8 +27,19 @@ class InferRequest(BaseModel):
 
 
 async def _resolve_serving_version() -> str | None:
-    """Registry version promoted to serving for SERVING_MODEL, or None (best-effort)."""
+    """Registry version currently serving the LLM, resolved off task metadata (009 FR-075).
+
+    Prefers the `text-generation` task target (the `@serving` alias + `task` tag, not a hard-coded
+    endpoint→model map); falls back to the SERVING_MODEL alias so a registry that predates 009's
+    task tags still resolves — i.e. existing /infer behavior is preserved exactly. Best-effort.
+    """
     try:
+        # prefer_name=SERVING_MODEL: /infer always proxies to the single llama supervisor, so report
+        # THAT model's version, never another promoted text-generation model (Codex review).
+        target = await run_in_threadpool(
+            registry.resolve_serving_target, "text-generation", SERVING_MODEL)
+        if target:
+            return target["version"]
         served = await run_in_threadpool(registry.get_serving, SERVING_MODEL)
         return served["version"] if served else None
     except Exception:
@@ -114,3 +125,18 @@ async def serving_state():
     state = await gpu_state()
     state["serving_version"] = await _resolve_serving_version()
     return state
+
+
+@router.get("/serving/tasks")
+async def serving_tasks():
+    """Tasks discovered from the registry, one per model's `@serving` version (009 US1, FR-077).
+
+    The Infer tab queries this to render one panel per `task` (dynamic) — adding a modality means
+    registering a model with a `task` tag + dropping in a small renderer, not re-plumbing the UI. A
+    serving version with no `task` tag is reported as task=None → the UI shows a read-only "no
+    renderer" placeholder. Best-effort: returns an empty list if the registry is unreachable, so the
+    tab still renders the always-on panels rather than erroring."""
+    try:
+        return {"tasks": await run_in_threadpool(registry.list_tasks)}
+    except Exception:
+        return {"tasks": []}

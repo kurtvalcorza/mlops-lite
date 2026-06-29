@@ -102,6 +102,24 @@ def require_trainer(require_gateway):
 
 
 @pytest.fixture
+def require_embed(require_gateway):
+    if not _daemon_reachable("embed"):
+        pytest.skip("embeddings (BentoML) daemon not reachable — bash serving/bento/embed_run.sh")
+
+
+@pytest.fixture
+def require_tabular(require_gateway):
+    if not _daemon_reachable("tabular"):
+        pytest.skip("tabular (BentoML) daemon not reachable — bash serving/bento/tabular_run.sh")
+
+
+@pytest.fixture
+def require_asr(require_gateway):
+    if not _daemon_reachable("asr"):
+        pytest.skip("ASR (whisper.cpp) daemon not reachable — start the supervisor / serving/whispercpp")
+
+
+@pytest.fixture
 def require_ui():
     if not _http_up(f"{UI}/healthz"):
         pytest.skip(f"operator console not reachable at {UI} — start it (ui/run.sh / up_all)")

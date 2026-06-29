@@ -39,9 +39,11 @@ echo "[2/2] registering + promoting the serving LLM ($NAME) ..."
 # Capture the register RESPONSE (body + status) so we promote the version we just created — not a
 # hard-coded v1. On a re-run the gateway assigns v2/v3/..., and promoting THAT version (vs always v1)
 # keeps the freshly-registered version as @serving instead of orphaning it behind a stale v1.
+# 009 US1 (FR-074/086): tag with task=text-generation + serving_engine=llama.cpp so the gateway
+# routes off registry metadata and the Infer tab renders the text-generation panel from it.
 reg_resp="$(curl -s -w '\n%{http_code}' -X POST "$GW/models" \
   -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d "{\"name\":\"$NAME\",\"source\":\"$SRC\",\"tags\":{\"kind\":\"llm\",\"format\":\"gguf\",\"runtime\":\"llama.cpp\"}}")"
+  -d "{\"name\":\"$NAME\",\"source\":\"$SRC\",\"tags\":{\"kind\":\"llm\",\"format\":\"gguf\",\"runtime\":\"llama.cpp\",\"task\":\"text-generation\",\"serving_engine\":\"llama.cpp\"}}")"
 reg_code="$(printf '%s' "$reg_resp" | tail -n1)"
 ver="$(printf '%s' "$reg_resp" | sed '$d' | grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+"' | grep -oE '[0-9]+' | head -1)"
 [ "$reg_code" = "201" ] && echo "  registered $NAME v${ver:-?}" || echo "  [warn] register -> HTTP $reg_code (already present?)"
