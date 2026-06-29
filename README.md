@@ -1,65 +1,104 @@
 # MLOps-Lite
 
 A lightweight, full-lifecycle MLOps platform that runs **locally on one machine** — data → train →
-register → serve → monitor → retrain — built around a single GPU that holds **at most one model at
-a time**. A spec-driven (GitHub Spec Kit) reimagining of a heavier reference platform, sized to a
-laptop.
+register → serve → monitor → retrain — built around a single GPU that holds **at most one tenant at
+a time under a race-free lease**. A spec-driven (GitHub Spec Kit) reimagining of a heavier reference
+platform, sized to a laptop.
 
-> Status: **feature-complete** (001: US1–US5) **+ hardened** (002: auth, secret hygiene, daemon
-> supervision, one-command up/down, portable bootstrap). Gateway `v1.2.0`. See
-> [`specs/001-mlops-platform/tasks.md`](specs/001-mlops-platform/tasks.md) and
-> [`specs/002-hardening/tasks.md`](specs/002-hardening/tasks.md) for per-task detail, and
-> [`specs/001-mlops-platform/quickstart.md`](specs/001-mlops-platform/quickstart.md) to run it.
+> Status: **merged through increment 012** (010 validated on hardware; 011/012 merged via the
+> dual-bot review loop). Five served modalities (LLM text-generation, vision image-classification,
+> embeddings, ASR, tabular), a multimodal trainer (LLM + vision + embeddings + ASR fine-tuning with
+> lineage/adapter-chaining), a **gated promotion** path (offline eval harness + champion-challenger),
+> and **Optuna hyperparameter optimization** — all over a single race-free GPU lease. Constitution
+> `v1.4.0`. Reference stack on MLflow `3.14.0`.
+>
+> Per-increment detail lives under [`specs/`](specs/) (each has `spec.md` / `plan.md` / `tasks.md`);
+> [`specs/001-mlops-platform/quickstart.md`](specs/001-mlops-platform/quickstart.md) is the run guide.
+> Next up: **013-quality-monitoring** and **014-batch-and-validation** — specced, not yet built.
 
 ## Architecture
 
-Infrastructure runs in Docker Compose. GPU-bound services (serving, training) run **natively in
-WSL** — the *hybrid GPU* model (constitution v1.2.0): the container engine has no NVIDIA runtime,
-but the GPU works natively in WSL, so the gateway proxies to native daemons over an injected IP.
+Infrastructure runs in Docker Compose. GPU- and CPU-bound model services run **natively in WSL** —
+the *hybrid GPU* model (constitution v1.2.0): the container engine has no NVIDIA runtime, but the
+GPU works natively in WSL, so the gateway proxies to native daemons over an injected IP.
 
 ```mermaid
 flowchart LR
   subgraph Compose["Docker Compose (infra)"]
-    GW["FastAPI gateway :8080<br/>infer · models · datasets · runs · monitor"]
-    MLF["MLflow :5500<br/>tracking + registry"]
+    GW["FastAPI gateway :8080<br/>infer · embed · transcribe · predict · vision<br/>models(evaluate·compare·gated-promote) · datasets · runs · studies · monitor"]
+    MLF["MLflow :5500<br/>tracking + registry + traces"]
     MIN["MinIO :9000<br/>datasets · models · results"]
     PG["Postgres"]
     PR["Prometheus :9090"]
     GR["Grafana :3001"]
   end
-  subgraph WSL["Native WSL"]
-    SUP["serving supervisor :8090<br/>llama-server (GPU, on-demand)"]
-    TR["training daemon :8091<br/>PEFT/LoRA fine-tune (GPU)"]
-    BN["BentoML vision :8092<br/>image classifier (CPU)"]
+  subgraph WSL["Native WSL daemons (supervised)"]
+    SUP["llama supervisor :8090<br/>llama-server — LLM (GPU, on-demand)"]
+    TR["training daemon :8091<br/>PEFT/LoRA + multimodal fine-tune (GPU)"]
+    BN["BentoML vision :8092<br/>image classifier (GPU lease tenant)"]
+    EM["BentoML embeddings :8093<br/>sentence-transformers (CPU, off-lease)"]
+    TB["BentoML tabular :8094<br/>LightGBM (CPU, off-lease)"]
+    AS["whisper.cpp supervisor :8095<br/>ASR (GPU, on-demand · opt-in)"]
+    UI["operator console (Next.js, 127.0.0.1)"]
   end
   GW -->|/infer| SUP
   GW -->|/runs| TR
   GW -->|/vision/classify| BN
+  GW -->|/embed| EM
+  GW -->|/predict| TB
+  GW -->|/transcribe| AS
   GW --> MLF
   GW --> MIN
   MLF --> PG
   MLF --> MIN
   TR --> MLF
   TR --> MIN
-  BN --> MIN
-  SUP <-.->|one-model-in-VRAM mutex| TR
+  SUP <-.->|single GPU lease| TR
+  TR <-.-> BN
+  BN <-.-> AS
   PR --> GW
   GR --> PR
 ```
 
-**One model in VRAM (Principle II, non-negotiable).** Serving and training mutually exclude on the
-GPU: the trainer won't start while a model is resident in serving, and serving won't cold-load
-while a training run is active. Serving releases VRAM after an idle timeout.
+**One GPU tenant under a single race-free lease (Principle II, non-negotiable; constitution v1.4.0).**
+At most one tenant holds the GPU at any instant — **LLM**, **vision**, **ASR**, *or* a **training
+run**. Generalized in increment 008 from the original "one LLM in VRAM" rule. The lease is an atomic
+PID-stamped lockfile on the WSL filesystem (`serving/gpu_lease.py`, stdlib-only): `O_CREAT|O_EXCL`
+create + `os.kill(pid,0)` stale-holder reclaim, with an `fcntl.flock` sidecar serializing the
+read-decide-claim window. It tracks the **VRAM-holding child** (e.g. `llama-server`), survives a
+gateway restart, and self-heals on a dead holder. Serving releases VRAM after an idle timeout.
+**CPU modalities (embeddings, tabular) are exempt** — they never touch the lease, so RAG embed→LLM
+never thrashes.
 
-## Lifecycle & user stories
+## Lifecycle, modalities & user stories
 
 | Phase | Story | What it does |
 |------|-------|--------------|
-| 3 | **US1** serve | `POST /infer` → on-demand GPU inference via `llama-server` (VRAM released when idle); `POST /vision/classify` → CPU image classification via BentoML (vision half of FR-002) |
-| 4 | **US2** register | `POST /models` + promote via MLflow aliases; `/infer` resolves the promoted version |
+| 3 | **US1** serve | `POST /infer` (+`/infer/stream`) → on-demand GPU LLM inference via `llama-server`; `POST /vision/classify` → image classification (BentoML, **GPU lease tenant** since 008) |
+| 4 | **US2** register | `POST /models` + promote via MLflow aliases; routing resolves the `@serving` version |
 | 5 | **US3** datasets | content-addressed, immutable dataset versions on MinIO |
 | 6 | **US4** fine-tune | pinned dataset → LoRA on the GPU (Prefect ephemeral) → adapter→GGUF → registered, servable |
 | 7 | **US5** monitor | PSI drift → on breach auto-launch a retrain run; Grafana dashboard |
+
+**Additive modality increments (009 serve · 010 train):**
+
+| Modality | Serve (009) | Fine-tune (010) | GPU lease? |
+|---|---|---|---|
+| text-generation (LLM) | `llama.cpp` (`/infer`) | PEFT/LoRA → GGUF (US4) | yes (on-demand) |
+| image-classification | BentoML (`/vision/classify`) | transfer-learning head | yes (on-demand) |
+| embedding | BentoML sentence-transformers (`/embed`) | sentence-transformers FT | **no** (CPU) |
+| asr | whisper.cpp daemon (`/transcribe`) | Whisper FT → HF→ggml convert | yes (on-demand, opt-in) |
+| tabular | BentoML LightGBM (`/predict`) | doc-only AutoGluon upgrade path | **no** (CPU) |
+
+Routing is **registry-metadata-driven** (009): every model version carries a `task` tag
+(text-generation / image-classification / embedding / asr / tabular) and a `serving_engine` tag
+(llama.cpp / bentoml / whisper.cpp). The gateway routes off these tags rather than hard-coded
+endpoint-to-model wiring, and the **Infer tab renders one panel per `task`** discovered from the
+registry — adding a future modality means registering a model with a `task` tag and dropping in a
+small renderer, not re-plumbing the gateway/UI. Fine-tuned versions (010) land with the same serving
+tags **plus lineage** (`base_model`, parent run) so adapters can be chained and 009's servers can
+load them directly. Promotion to `@serving` is **operator-driven** (alias-based) and, since **011**,
+runs through an **evaluation gate** (below).
 
 ## Run it
 
@@ -74,20 +113,26 @@ supervisor + gateway↔daemon IP wiring), and tear it down releasing the GPU:
 ./scripts/down_all.ps1        # stops daemons (no GPU orphans) + infra   (make up-all / down-all)
 ```
 
+`up_all` supervises the **default daemon set** — `serving` (LLM), `training`, `vision`, `embed`,
+`tabular`, and `ui` — and wires their dynamic WSL IPs into the gateway (`SERVING_URL`, `TRAINER_URL`,
+`BENTO_URL`, `EMBED_URL`, `TABULAR_URL`, `ASR_URL`). **ASR is opt-in**: whisper.cpp needs a manual
+CUDA build, so it is not in the default set — build it and enable it explicitly:
+
+```bash
+bash serving/whispercpp/build.sh                              # one-time: CUDA whisper.cpp build
+SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,asr,ui bash scripts/supervisor_up.sh
+```
+
 <details><summary>Manual, step-by-step (what up_all automates)</summary>
 
 ```bash
 ./scripts/gen_secrets.ps1                # 002/US1: generate .env (random creds + an API key)
 make up                                  # foundational stack
-bash serving/llama/run.sh                # WSL: LLM serving supervisor (GPU)
-bash training/run.sh                     # WSL: training daemon (GPU, for US4/US5)
+python3 supervisor/supervise.py          # WSL: supervises the native daemons (health + restart)
 ~/mlops-train/bin/python scripts/seed_vision_model.py   # one-time: seed the vision model
-bash serving/bento/run.sh                # WSL: BentoML vision service (CPU)
 ./scripts/serve_up.ps1                   # PowerShell: bring up the stack pointed at the daemons
 export GATEWAY_API_KEY=mll_...           # 002/US1: the key gen_secrets printed (protected routes)
-python tests/test_auth.py && python tests/test_serving.py && python tests/test_registry.py \
-  && python tests/test_datasets.py && python tests/test_finetune.py \
-  && python tests/test_drift_loop.py && python tests/test_bento.py   # validate each phase
+pytest                                   # validate every phase against the live, keyed stack
 ```
 
 </details>
@@ -97,31 +142,118 @@ python tests/test_auth.py && python tests/test_serving.py && python tests/test_r
 > **Fail-closed by default (005):** with no key configured the gateway still boots but protected
 > routes return `401` — set `GATEWAY_ALLOW_OPEN=1` for the documented dev escape hatch (runs open,
 > warns loudly). Tests pick up `GATEWAY_API_KEY` from the env. **Key rotation needs a gateway
-> restart** — the key set is read once at startup, so after editing `GATEWAY_API_KEYS` (or the keys
-> file) restart the gateway for it to take effect (FR-046).
+> restart** — the key set is read once at startup (FR-046).
 >
 > **Network exposure (005/US1).** Every published Compose port binds to **loopback (`127.0.0.1`)** by
 > default — nothing answers on the LAN. Set `BIND_ADDR=0.0.0.0` in `.env` only for intentional LAN
-> exposure (that re-exposes MinIO/MLflow/Grafana/Prometheus). The WSL native daemons reach
-> MinIO/MLflow over `localhost` unchanged.
+> exposure. The operator console binds `127.0.0.1` only and talks to the gateway through a
+> key-injecting BFF (keys never reach the browser).
 >
 > **Tests (005/US5).** `pytest` is the entry point — it runs the integration suite against a live,
 > keyed stack and **skips cleanly** when the stack/key/daemons/WSL are absent (no collect-nothing
-> exit-5). Each `tests/test_*.py` also still runs standalone (`python tests/test_auth.py`).
+> exit-5). Each `tests/test_*.py` also still runs standalone (`python tests/test_serving.py`). The
+> single-tenant lease serializes the GPU tests, so a few GPU-tenant tests pass **in isolation** but
+> show as "failures" under the full suite — that is the lease working, not a regression.
 >
-> **Supervisor (002/US2).** Instead of hand-starting the three native daemons, run one process
-> supervisor in WSL — it starts serving/training/vision, health-checks them, and restarts any that
-> die (exponential backoff). State is at `:8099/status`; the gateway aggregates daemon reachability
-> at `/platform/health`.
->
-> ```bash
-> python3 supervisor/supervise.py     # WSL: supervises the 3 native daemons (replaces the run.sh trio)
-> ```
+> **Supervisor (002/US2, extended through 009).** One process supervisor in WSL starts the native
+> daemons, health-checks them, and restarts any that die (exponential backoff). State is at
+> `:8099/status`; the gateway aggregates daemon reachability at `/platform/health` (ASR is marked
+> `optional` so `up_all` doesn't stall when it isn't built).
+
+## Operator console (003 + 004)
+
+A Next.js operator console (native WSL, `127.0.0.1`, terminal/man-page aesthetic, JetBrains Mono)
+sits over a key-injecting BFF and is itself a supervised daemon. Tabs cover infer / models /
+datasets / runs / monitor / platform, with live updates over gateway SSE (`/infer/stream`,
+`/platform/events`, `/runs/{id}/events`). 004 hardened the BFF (route-allowlist, same-origin/CSRF
+guard, CSP/security headers, scoped Grafana embed) and added a `/readyz` readiness probe.
+
+## GPU lease & vision-on-GPU (008)
+
+Increment 008 generalized Principle II from "one LLM in VRAM" to **one GPU tenant under a single
+race-free lease** and moved vision onto the GPU:
+
+- **Lease primitive** — `serving/gpu_lease.py` (stdlib): atomic PID-stamped lockfile with
+  `flock`-serialized claim + stale-holder reclaim. Acquired by the native WSL daemons that actually
+  hold the GPU; the gateway only *reads* the current holder for the UI status line, it never
+  arbitrates. **Live-VRAM admission** (`nvidia-smi` free) replaces a static budget, with a
+  static-budget fallback when the GPU is unreadable.
+- **Vision-on-GPU** — the BentoML classifier loads MobileNet to `cuda` as a lease tenant and holds
+  its lock across load+inference so the idle watcher can't release mid-flight; it refuses (and the
+  gateway returns `409`) while another tenant holds the lease.
+- **Lease tracks the VRAM-holding child** (008.1) — the lease records the `llama-server`/`whisper-server`
+  child PID, so an orphaned child keeps the lease held and a dead child frees it even if the
+  supervisor lives.
+- **Infer tab** shows a read-only `serving:` status line; `classify` is disabled-with-hint while the
+  GPU is held (swap-on-demand deferred).
+
+## Evaluation gates (011)
+
+Before 011, `promote(name, version)` moved the `@serving` alias on command with no check that the new
+version was actually better — the exact gap that let a prior project serve "whatever last registered."
+011 adds the connective tissue, all wired into the **single `registry.promote` choke-point** so there
+is no ungated back-door:
+
+- **Offline eval harness** (`gateway/app/evaluation.py`) scores a model version on a small **held-out
+  benchmark** under [`benchmarks/`](benchmarks/) and logs the primary metric to MLflow. Each metric
+  carries a **direction**: vision = top-1 accuracy (higher-better), LLM = task-accuracy on a QA set
+  (higher-better, perplexity fallback); ASR=WER / embeddings=recall@k / tabular=AUC are guidance stubs
+  until those serving paths mature. Metrics are **pure-Python** (no `numpy`/`scipy`/`jiwer` — Principle
+  III); every `EvalResult` records the benchmark's name + SHA-256 digest for provenance.
+- **Promotion gate** compares the candidate against the `@serving` incumbent honouring metric direction
+  and like-for-like (same modality + metric). **Default = BLOCK** a regression beyond a small tolerance;
+  an explicit operator **override** bypasses a block, and a config switches the whole gate to
+  **warn-on-regression**. No incumbent ⇒ pass.
+- **Offline champion-challenger** scores both on the same held-out set with **sequential VRAM loads**
+  (Principle II — no online A/B). Shadow-replay of logged requests is deferred to a 013-dependent
+  follow-on.
+
+```bash
+curl -X POST localhost:8080/models/<name>/evaluate -H "X-API-Key: $KEY"   # score a version → MLflow
+curl -X POST localhost:8080/models/<name>/compare  -H "X-API-Key: $KEY"   # champion vs challenger
+python scripts/eval_model.py <name> <version>                            # one-shot harness (no gateway)
+# POST /models/<name>/promote is now gated — pass the override flag to bypass a block.
+```
+
+## Hyperparameter optimization (012)
+
+012 wraps the existing trainer in an **Optuna** study (`training/flows/hpo.py`, search spaces in
+`training/search_spaces.py`) that optimizes toward **011's eval metric** as its objective. A study runs
+N trials, each a real `finetune_flow` invocation with one sampled hyperparameter set, recorded as an
+MLflow **child run** under the study's parent run; the best trial is registered as a version eligible
+for the 011 gate. Optuna is pure-Python and server-less — **one light dependency (`optuna==4.9.0`)**,
+no new runtime. Because each trial is a fine-tune and therefore a GPU-lease tenant, **trials run
+strictly sequentially** (`n_jobs=1`), each fully releasing VRAM before the next — total wall-clock =
+`n_trials × per-train-time`.
+
+```bash
+curl -X POST localhost:8080/studies -H "X-API-Key: $KEY" \
+  -d '{"name":"qa-demo","modality":"text-generation","dataset":"qa@<ver>","n_trials":3}'
+curl localhost:8080/studies/<study_id> -H "X-API-Key: $KEY"     # study status + best trial
+```
+
+## Inference traces (006, on MLflow 3.x since 007)
+
+Every `POST /infer` and `POST /infer/stream` emits one **MLflow trace** (prompt, params, output,
+`load_ms`/`infer_ms`, model, `usage`, promoted `registry_version`, status) into the
+**`mlops-lite-inference`** experiment — open MLflow at `http://127.0.0.1:5500`, pick that experiment,
+and use the **Traces** tab.
+
+- **Manual, not autolog.** The gateway proxies inference over `httpx`, so `mlflow.autolog()` captures
+  nothing — 006 instruments the proxy paths directly (reusing the MLflow already present; no new dep).
+  007 ported the implementation to MLflow 3.x spans.
+- **Never slows inference.** Traces are emitted *fire-and-forget* off the request path and tracing is
+  *fail-open* — if MLflow is down the inference still succeeds. The GPU lease is never held for tracing.
+- **Toggles** (`.env`): `MLFLOW_TRACING_ENABLED=0` disables it; `MLFLOW_TRACE_CAPTURE_IO=0` keeps
+  timing/metadata but omits prompt/output bodies.
+- **Retention.** No retention policy ships — prune traces or the experiment from the MLflow UI.
 
 ## Default stack (each stage swappable — Principle V)
 
-MinIO (storage) · MLflow (tracking + registry) · `llama.cpp` (LLM serving) · BentoML (vision
-serving) · PyTorch + PEFT/LoRA (training, Prefect-structured) · pure-Python PSI (drift) ·
+MinIO (storage) · MLflow `3.14.0` (tracking + registry + traces) · `llama.cpp` (LLM serving) ·
+BentoML (vision / embeddings / tabular serving) · whisper.cpp (ASR serving) · sentence-transformers
+(embeddings) · LightGBM (tabular) · PyTorch + PEFT/LoRA (training, Prefect-structured) · Optuna
+(hyperparameter search, server-less) · pure-Python PSI (drift) + pure-Python eval metrics (gates) ·
 Prometheus + Grafana (observability).
 
 Three components diverge from the plan's first-choice tools, each justified by **Lightweight
@@ -134,24 +266,11 @@ module so it can be swapped back:
 | Prefect *server* | Prefect *ephemeral* + native daemon | an always-on server is weight MLflow already covers for run tracking |
 | Evidently | pure-Python PSI | Evidently's pandas/scipy/plotly would bloat the gateway image on the constrained Windows C: drive |
 
-## Inference traces (006)
-
-Every `POST /infer` and `POST /infer/stream` emits one **MLflow trace** (prompt, params, output,
-`load_ms`/`infer_ms`, model, `usage`, promoted `registry_version`, status). Traces land in the
-**`mlops-lite-inference`** experiment on the existing MLflow server — open MLflow at
-`http://127.0.0.1:5500`, pick that experiment, and use the **Traces** tab to inspect any request.
-
-- **Manual, not autolog.** The gateway proxies inference over `httpx`, so `mlflow.autolog()` captures
-  nothing — 006 instruments the proxy paths directly (reusing the MLflow already present for the
-  registry; no new dependency).
-- **Never slows inference.** Traces are emitted *fire-and-forget* off the request path (MLflow export
-  is synchronous), and tracing is *fail-open* — if MLflow is down the inference still succeeds. The
-  single-GPU mutex is never held for tracing.
-- **Toggles** (`.env`): `MLFLOW_TRACING_ENABLED=0` disables it entirely; `MLFLOW_TRACE_CAPTURE_IO=0`
-  keeps timing/metadata but omits prompt/output bodies (for sensitive prompts).
-- **Retention.** 006 ships **no** retention policy — traces accumulate in `mlops-lite-inference`. To
-  prune, delete traces or the experiment from the MLflow UI (or
-  `MlflowClient().delete_experiment(<id>)`). Revisit if storage on the constrained C: drive bites.
+**Frozen GPU stack (NON-NEGOTIABLE).** The hard-won Blackwell sm_120 pins — `torch+cu128`,
+`torchvision+cu128`, and the fine-tune libraries (`transformers`/`peft`/`accelerate`/`datasets`) —
+are validated against the GPU and the LoRA→GGUF pipeline and are **not** churned by stack refreshes.
+007 modernized everything *around* them (MLflow 2.18→3.14, pinned infra images by digest, gateway on
+`python:3.12`, UI on Next 15.5.19 / React 19.2) while leaving the GPU stack untouched.
 
 ## Disk frugality (Principle III)
 
@@ -187,6 +306,7 @@ A clean machine of the same shape (Windows 11 + WSL2 + NVIDIA) reaches a passing
   cmake -S ~/llama.cpp -B ~/llama.cpp/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120
   cmake --build ~/llama.cpp/build --config Release -j --target llama-server llama-cli
   ```
+- *(Optional, for ASR)* a CUDA build of **whisper.cpp** — `bash serving/whispercpp/build.sh`.
 
 **Then** (idempotent — re-runs are a no-op):
 
@@ -200,12 +320,32 @@ python tests/test_portability.py # asserts the retarget contract + runs the smok
 ```
 
 `bootstrap.sh` automates the venv, the pinned native deps ([`scripts/native_env.lock`](scripts/native_env.lock):
-torch/torchvision cu128), the GPU gate-zero check, and the LLM weight download; it **verifies** the
-one-time `llama.cpp` CUDA build above (and prints the recipe if missing). See the
-[quickstart](specs/001-mlops-platform/quickstart.md) for the per-phase details.
+torch/torchvision cu128 + the modality deps), the GPU gate-zero check, and the LLM weight download;
+it **verifies** the one-time `llama.cpp` CUDA build above (and prints the recipe if missing). See the
+[quickstart](specs/001-mlops-platform/quickstart.md) for per-phase details.
 
 ## API
 
 OpenAPI is exported to
 [`specs/001-mlops-platform/contracts/openapi.json`](specs/001-mlops-platform/contracts/openapi.json)
 and served live at `http://localhost:8080/docs`.
+
+## Increment history
+
+| # | Increment | What it added |
+|---|---|---|
+| 001 | mlops-platform | Full lifecycle: serve · register · datasets · LoRA fine-tune · drift→retrain |
+| 002 | hardening | Auth + secret hygiene, native-daemon supervisor, one-command up/down, portable bootstrap |
+| 003 | frontend | Next.js operator console over a key-injecting BFF |
+| 004 | hardening | BFF allowlist + CSRF/CSP, `/readyz`, Node-gated bootstrap |
+| 005 | hardening | Loopback-bind all ports, fail-closed auth, CLI/BFF origin guards, pytest convert |
+| 006 | inference-tracing | Manual MLflow traces on `/infer` (fire-and-forget, fail-open) |
+| 007 | stack-refresh | MLflow 2.18→3.14, pinned infra images, gateway `python:3.12`, UI Next/React bumps (GPU stack frozen) |
+| 008 | gpu-lease | Race-free single GPU lease (atomic lockfile) + vision-on-GPU; constitution v1.4.0 |
+| 009 | inference-modalities | Registry task/engine routing + embeddings · ASR · tabular serving + task-driven Infer tab |
+| 010 | multimodal-finetune | Vision · embeddings · ASR fine-tuning + lineage/adapter-chaining |
+| 011 | evaluation-gates | Offline eval harness + gated promotion + offline champion-challenger |
+| 012 | hyperparameter-optimization | Optuna study over the fine-tune path, optimizing 011's eval metric |
+
+Roadmap specs **013-quality-monitoring** and **014-batch-and-validation** are drafted under
+[`specs/`](specs/) and not yet built.

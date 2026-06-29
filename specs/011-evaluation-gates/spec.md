@@ -4,7 +4,10 @@
 
 **Created**: 2026-06-28
 
-**Status**: **DRAFT — GRILLED (2026-06-28), build-ready**
+**Status**: **BUILT & MERGED (2026-06-29, PR #13)** — US1–US3 (T216 deferred → 013). Offline eval
+harness (`gateway/app/evaluation.py`) + held-out benchmarks + direction-aware promotion gate at the
+`registry.promote` choke-point + offline champion-challenger. See tasks.md status block for evidence.
+(Was DRAFT — GRILLED 2026-06-28, build-ready.)
 
 > **Grilled decisions (2026-06-28)** — resolves this spec's three open-for-the-grill items:
 > 1. **Per-modality metrics = sensible defaults + small bundled held-out fixtures, configurable** (mirrors
