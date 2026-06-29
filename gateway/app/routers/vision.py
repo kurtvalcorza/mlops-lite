@@ -4,17 +4,39 @@ The bento runs natively in WSL (CPU); the gateway forwards a base64 image as the
 BentoML expects. Same hybrid-split as LLM serving — `serve_up.ps1` injects the bento's IP.
 """
 import base64
+import hashlib
 import os
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
+
+from .. import quality, registry
 
 router = APIRouter()
 
 BENTO_URL = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
 VISION_REQUESTS = Counter("gateway_vision_total", "Vision classify requests", ["status"])
+
+
+async def _resolve_vision_version() -> tuple:
+    """Best-effort (model_name, version) currently serving image-classification, for prediction logging
+    — never raises, never blocks the response (None on any failure), mirroring /infer's resolve."""
+    try:
+        target = await run_in_threadpool(registry.resolve_serving_target, "image-classification")
+        return (target["name"], target["version"]) if target else (None, None)
+    except Exception:
+        return (None, None)
+
+
+def _top_label(data) -> object:
+    """Top-1 predicted label from the bento response (handles {predictions:[{label}]} / {labels:[…]})."""
+    preds = data.get("predictions") or data.get("labels") or []
+    if preds and isinstance(preds[0], dict):
+        return preds[0].get("label")
+    return preds[0] if preds else data.get("label")
 
 
 class ClassifyRequest(BaseModel):
@@ -49,6 +71,13 @@ async def classify(req: ClassifyRequest):
         raise HTTPException(status_code=409,
                             detail=data.get("detail", "GPU busy — free the GPU and retry"))
     VISION_REQUESTS.labels(status="ok").inc()
+    # 013/FR-119: log the served classification off the request path (fire-and-forget, fail-open). The
+    # input ref is the image's content hash (not the raw bytes) so capture-on logging stays light.
+    name, version = await _resolve_vision_version()
+    input_ref = "sha256:" + hashlib.sha256(raw).hexdigest()[:16]
+    pid = quality.log_prediction(name, version, "image-classification", input_ref, _top_label(data))
+    if isinstance(data, dict):
+        data = {**data, "prediction_id": pid}
     return data
 
 

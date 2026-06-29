@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import platform_health, serving, tracing
+from .. import platform_health, quality, registry, serving, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -128,6 +128,17 @@ async def infer_stream(req: StreamRequest):
                 end_ns=time.time_ns(),
                 status=trace_status,
             )
+            # 013/FR-119: log the served prediction off the request path (fire-and-forget, fail-open).
+            # The streamed tokens aren't buffered (the SSE bytes stay byte-identical), so the output is
+            # left uncaptured — the prediction id + prompt + version are still logged for later labeling.
+            if outcome == "completed":
+                try:
+                    served = registry.get_serving(serving.SERVING_MODEL)
+                    version = served["version"] if served else None
+                except Exception:
+                    version = None
+                quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
+                                       req.prompt, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 
