@@ -56,6 +56,15 @@ def test_no_incumbent_passes():
     assert m.compute_verdict(_ev(0.5), None)["verdict"] == "pass"          # edge: first promotion
 
 
+def test_compute_verdict_recovers_direction_from_metric_name():
+    # a dict handed straight to the pure function without a 'direction' key must still gate
+    # lower-better correctly (recovered from the metric registry) — no silent higher-better default.
+    worse = {"version": "2", "metric": "wer", "value": 0.30, "modality": "asr"}   # no 'direction'
+    better = {"version": "1", "metric": "wer", "value": 0.20, "modality": "asr"}
+    assert m.compute_verdict(worse, better)["verdict"] == "blocked"
+    assert m.compute_verdict(better, worse)["verdict"] == "pass"
+
+
 def test_missing_metric_policy_is_explicit_never_silent():
     inc = _ev(0.9, version="2")
     assert m.compute_verdict(None, inc, missing_policy="warn")["verdict"] == "warn"   # AS-4 (bootstrap)
@@ -82,7 +91,7 @@ def test_verdict_carries_candidate_incumbent_delta_tolerance_mode():
 # --- gate() over a fake client --------------------------------------------------------------------
 
 def _tags(ev):
-    return {m.TAG_METRIC: ev["metric"], m.TAG_VALUE: repr(ev["value"]), m.TAG_DIRECTION: ev["direction"],
+    return {m.TAG_METRIC: ev["metric"], m.TAG_VALUE: str(ev["value"]), m.TAG_DIRECTION: ev["direction"],
             m.TAG_MODALITY: ev["modality"], m.TAG_BENCHMARK: "b", m.TAG_BENCHMARK_HASH: "h"}
 
 

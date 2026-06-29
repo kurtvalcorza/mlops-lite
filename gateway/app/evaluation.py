@@ -404,7 +404,9 @@ def compute_verdict(candidate: Optional[dict], incumbent: Optional[dict], *, mod
                 if override
                 else verdict("blocked", "metric/modality mismatch — refusing to judge", flagged=True))
 
-    direction = candidate.get("direction", HIGHER)
+    # Recover direction the same way read_eval does — never a silent higher-better assumption — so a
+    # dict handed straight to this pure function (bypassing read_eval) still gates lower-better right.
+    direction = candidate.get("direction") or direction_for(candidate.get("metric")) or HIGHER
     cand, inc = candidate["value"], incumbent["value"]
     delta = round(cand - inc, 6)  # signed: candidate minus incumbent
     margin = tolerance * abs(inc)
