@@ -22,6 +22,9 @@ const TERMINAL = new Set(['completed', 'failed']);
 // rest fall back to the flow's conservative VRAM-fitting defaults — FR-098).
 const MODALITIES = ['llm', 'vision', 'embeddings', 'asr'] as const;
 type Modality = (typeof MODALITIES)[number];
+// Only these modalities can resume from a prior registered version (their artifact reloads as a
+// trainable warm start); LLM/ASR register a serving GGUF/ggml, not a trainable checkpoint.
+const CHAINABLE = new Set<Modality>(['vision', 'embeddings']);
 
 export default function RunsPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -95,9 +98,10 @@ export default function RunsPage() {
       seed,
     };
     if (baseModel.trim()) body.base_model = baseModel.trim();
-    // Chaining isn't supported for the LLM flow (the registered artifact is a serving GGUF, not a
-    // trainable adapter), so never forward parent_version for llm — the field is hidden there too.
-    if (parentVersion.trim() && modality !== 'llm') body.parent_version = parentVersion.trim();
+    // Chaining is only supported for vision + embeddings (their registered artifact reloads as a
+    // trainable warm start); LLM serves a GGUF and ASR a ggml binary — neither is a trainable
+    // checkpoint. Never forward parent_version outside the resumable modalities (field hidden too).
+    if (parentVersion.trim() && CHAINABLE.has(modality)) body.parent_version = parentVersion.trim();
     if (modality === 'llm') {
       body.steps = steps;
       body.lora_r = loraR;
@@ -210,9 +214,9 @@ export default function RunsPage() {
               <NumberInput value={seed} onChange={setSeed} min={0} />
             </Field>
           </div>
-          {/* Chaining is supported for vision/embeddings/asr; the LLM flow can't resume from a
-              registered version, so the field is hidden for llm. */}
-          {modality !== 'llm' && (
+          {/* Chaining is supported only for the resumable modalities (vision/embeddings); hidden for
+              llm/asr, which register a serving GGUF/ggml rather than a trainable checkpoint. */}
+          {CHAINABLE.has(modality) && (
             <Field label="parent version (optional — chain from a prior version)">
               <input
                 value={parentVersion}

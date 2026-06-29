@@ -214,17 +214,19 @@ def vision_finetune_flow(dataset_name: str, dataset_version: str, output_name: s
 
         rows = fetch_jsonl(dataset_name, dataset_version)
         images, labels, categories = _parse_rows(rows)
-        state_dict, metrics, device = _train(
-            images, labels, categories, backbone=backbone, epochs=epochs, lr=lr,
-            batch_size=batch_size, unfreeze_epochs=unfreeze_epochs, seed=seed,
-            parent_source=parent["source"] if parent else None)
-        mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
-        mlflow.set_tag("device", device)
-
-        mv = _register(output_name, state_dict, categories, run_id, backbone=backbone,
-                       dataset_name=dataset_name, dataset_version=dataset_version,
-                       base_model=backbone, parent_version=parent_version,
-                       parent_run_id=parent["run_id"] if parent else None, device=device)
+        try:
+            state_dict, metrics, device = _train(
+                images, labels, categories, backbone=backbone, epochs=epochs, lr=lr,
+                batch_size=batch_size, unfreeze_epochs=unfreeze_epochs, seed=seed,
+                parent_source=parent["source"] if parent else None)
+            mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
+            mlflow.set_tag("device", device)
+            mv = _register(output_name, state_dict, categories, run_id, backbone=backbone,
+                           dataset_name=dataset_name, dataset_version=dataset_version,
+                           base_model=backbone, parent_version=parent_version,
+                           parent_run_id=parent["run_id"] if parent else None, device=device)
+        finally:
+            free_cuda()  # release VRAM whether training/registration succeeded or raised (Principle II)
         mlflow.set_tag("registered_version", mv["version"])
         return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params}
 

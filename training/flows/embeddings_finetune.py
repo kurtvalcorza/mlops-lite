@@ -77,8 +77,8 @@ def _train(anchors, positives, negatives, mode, *, base_model, parent_model_uri,
         model = st_flavor.load_model(parent_model_uri)
         try:
             model = model.to(device)
-        except Exception:
-            pass
+        except Exception as e:  # surface the fallback in the run log instead of swallowing (Claude review F4)
+            _log(f"warm-start .to({device}) failed, continuing on the loaded device: {e}")
         _log(f"warm-started embeddings from {parent_model_uri}")
     else:
         model = SentenceTransformer(base_model, device=device)
@@ -112,13 +112,17 @@ def _register(model, output_name, run_id, *, base_model, dataset_name, dataset_v
 
     info = st_flavor.log_model(model, name="model", registered_model_name=output_name)
     c = MlflowClient(tracking_uri=MLFLOW_URI)
-    # The flavor registers the newest version under output_name; tag *that* version. Single-quote-escape
-    # the name in the filter (as registry.resolve_serving_target does) so a name with a `'` can't break
-    # out of the search string (local Claude review).
-    safe_name = str(output_name).replace("'", "''")
-    versions = sorted(c.search_model_versions(f"name='{safe_name}'"),
-                      key=lambda mv: int(mv.version), reverse=True)
-    version = str(versions[0].version)
+    # The flavor populates `registered_model_version` when registered_model_name is given (MLflow ≥2.x;
+    # we're on 3.14) — use it directly (Claude review F3): no search/sort, and no race on a newer version
+    # landing between log_model and the lookup. Fall back to the newest version by a single-quote-escaped
+    # name filter only if it's ever unset.
+    version = getattr(info, "registered_model_version", None)
+    if version is None:
+        safe_name = str(output_name).replace("'", "''")
+        versions = sorted(c.search_model_versions(f"name='{safe_name}'"),
+                          key=lambda mv: int(mv.version), reverse=True)
+        version = versions[0].version
+    version = str(version)
     tags = {"kind": "embedding", "framework": "sentence-transformers", "task": TASK,
             "serving_engine": "bentoml", "model_id": base_model, "device": device,
             **lineage_tags(base_model, dataset_name, dataset_version, parent_version, parent_run_id)}

@@ -22,7 +22,7 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # _common/lineage import as module or script
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 from _common import MLFLOW_URI, MODELS_BUCKET, _log, fetch_jsonl, flow, free_cuda, s3_client  # noqa: E402
-from lineage import lineage_tags, link_parent_run, resolve_parent  # noqa: E402
+from lineage import lineage_tags  # noqa: E402  (ASR records lineage; it can't chain — see the flow)
 from convert_whisper_to_ggml import convert_whisper_to_ggml  # noqa: E402  (the new HF→ggml tool)
 
 TASK = "asr"
@@ -79,12 +79,12 @@ def _parse_rows(rows: list):
     return audios, texts
 
 
-def _train_and_merge(audios, texts, out_dir, *, base_model, parent_source, lr, epochs,
+def _train_and_merge(audios, texts, out_dir, *, base_model, lr, epochs,
                      grad_accum, warmup_ratio, lora_r, seed):
     """Whisper-small + LoRA fine-tune; returns (merged_hf_dir, metrics). Merges the adapter into the
     base before returning so the converter sees a plain HF model (FR-093)."""
     import torch
-    from peft import LoraConfig, PeftModel, get_peft_model
+    from peft import LoraConfig, get_peft_model
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
     torch.manual_seed(seed)
@@ -97,13 +97,9 @@ def _train_and_merge(audios, texts, out_dir, *, base_model, parent_source, lr, e
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
 
-    if parent_source:  # chaining (US4): resume a prior LoRA adapter as a trainable start (FR-096)
-        model = PeftModel.from_pretrained(model, parent_source, is_trainable=True)
-        _log(f"warm-started ASR from adapter {parent_source}")
-    else:
-        model = get_peft_model(model, LoraConfig(
-            r=lora_r, lora_alpha=lora_r * 2, lora_dropout=0.05, bias="none",
-            target_modules=["q_proj", "v_proj"]))  # attention projections (HF Whisper-PEFT recipe)
+    model = get_peft_model(model, LoraConfig(
+        r=lora_r, lora_alpha=lora_r * 2, lora_dropout=0.05, bias="none",
+        target_modules=["q_proj", "v_proj"]))  # attention projections (HF Whisper-PEFT recipe)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     model = model.to(device)
     _log(f"LoRA trainable params={trainable:,}")
@@ -199,17 +195,15 @@ def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
     import mlflow
 
     base = base_model or DEFAULT_BASE
-    parent = resolve_parent(output_name, parent_version, TASK) if parent_version else None
-    # Chaining loads the parent adapter; its S3 source (s3://bucket/key) is fetched by PEFT only if it
-    # is a local/HF path — for the demo the adapter merge path is the common case. A remote adapter
-    # source would need a local download step (deferred; documented), so guard it.
-    parent_source = None
-    if parent:
-        if str(parent["source"]).startswith("s3://"):
-            raise NotImplementedError(
-                "chaining from a remote (s3://) ASR adapter needs a local download step — not in 010; "
-                "chain from a locally-resolvable adapter path instead")
-        parent_source = parent["source"]
+    # ASR records lineage but **cannot chain from a registered version**: the stored artifact is the
+    # quantized ggml binary, not a trainable PEFT adapter, so there is no reloadable checkpoint to
+    # resume from (vision/embeddings are the resumable modalities — FR-096). Reject upfront with an
+    # accurate message (Claude review F2 — the old s3:// guard always fired and implied a non-existent
+    # local-path workaround).
+    if parent_version:
+        raise NotImplementedError(
+            "ASR chaining is not supported: the registered artifact is the ggml binary, not a "
+            "trainable PEFT adapter. Chaining is available for vision and embeddings.")
 
     mlflow.set_tracking_uri(MLFLOW_URI)
     mlflow.set_experiment("asr-finetune")
@@ -218,27 +212,29 @@ def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
         params = dict(modality="asr", base_model=base, dataset_name=dataset_name,
                       dataset_version=dataset_version, output_name=output_name, epochs=epochs,
                       lr=lr, grad_accum=grad_accum, warmup_ratio=warmup_ratio, lora_r=lora_r,
-                      seed=seed, quant=quant, parent_version=parent_version)
+                      seed=seed, quant=quant, parent_version=None)
         mlflow.log_params(params)
-        link_parent_run(parent["run_id"] if parent else None)
 
         rows = fetch_jsonl(dataset_name, dataset_version)
         audios, texts = _parse_rows(rows)
-        with tempfile.TemporaryDirectory(prefix="asr-") as tmp:
-            merged_dir = os.path.join(tmp, "hf")
-            merged_dir, metrics, device = _train_and_merge(
-                audios, texts, merged_dir, base_model=base, parent_source=parent_source, lr=lr,
-                epochs=epochs, grad_accum=grad_accum, warmup_ratio=warmup_ratio, lora_r=lora_r,
-                seed=seed)
-            mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
-            mlflow.set_tag("device", device)
-            # Convert AFTER metrics are logged but BEFORE registering — a converter failure raises and
-            # registers no version (FR-093), while the run still carries the recorded loss/WER.
-            ggml = os.path.join(tmp, f"ggml-{output_name}-{quant}.bin")
-            convert_whisper_to_ggml(merged_dir, ggml, quant=quant)
-            mv = _register(output_name, ggml, run_id, base_model=base, dataset_name=dataset_name,
-                           dataset_version=dataset_version, parent_version=parent_version,
-                           parent_run_id=parent["run_id"] if parent else None, device=device)
+        try:
+            with tempfile.TemporaryDirectory(prefix="asr-") as tmp:
+                merged_dir = os.path.join(tmp, "hf")
+                merged_dir, metrics, device = _train_and_merge(
+                    audios, texts, merged_dir, base_model=base, parent_source=None, lr=lr,
+                    epochs=epochs, grad_accum=grad_accum, warmup_ratio=warmup_ratio, lora_r=lora_r,
+                    seed=seed)
+                mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
+                mlflow.set_tag("device", device)
+                # Convert AFTER metrics are logged but BEFORE registering — a converter failure raises
+                # and registers no version (FR-093), while the run still carries the recorded loss/WER.
+                ggml = os.path.join(tmp, f"ggml-{output_name}-{quant}.bin")
+                convert_whisper_to_ggml(merged_dir, ggml, quant=quant)
+                mv = _register(output_name, ggml, run_id, base_model=base, dataset_name=dataset_name,
+                               dataset_version=dataset_version, parent_version=None,
+                               parent_run_id=None, device=device)
+        finally:
+            free_cuda()  # release VRAM whether training/convert/register succeeded or raised (Principle II)
         mlflow.set_tag("registered_version", mv["version"])
         return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params}
 
