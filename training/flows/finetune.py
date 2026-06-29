@@ -89,7 +89,7 @@ def fetch_dataset(name: str, version: str) -> list:
 
 @task
 def train_lora(base_model: str, rows: list, out_dir: str, steps: int, lora_r: int, seed: int,
-               lora_alpha: "int | None" = None, lr: float = 2e-4) -> dict:
+               lora_alpha: int | None = None, lr: float = 2e-4) -> dict:
     """PEFT/LoRA fine-tune on the single GPU (or CPU fallback). Returns metrics + the adapter dir.
 
     `lora_alpha` (defaults to the previous tied `2*lora_r`) and `lr` (defaults to the previous fixed
