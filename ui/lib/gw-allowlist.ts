@@ -29,6 +29,8 @@ export const ALLOWLIST: AllowEntry[] = [
   // Runs tab
   { method: 'POST', pattern: 'runs' }, // launch
   { method: 'GET', pattern: 'runs/:id/events' }, // live run (SSE)
+  { method: 'POST', pattern: 'studies' }, // 012: launch an HPO study
+  { method: 'GET', pattern: 'studies/:id' }, // 012: poll study status + best trial
   // Monitor tab
   { method: 'POST', pattern: 'monitor/check' }, // drift check
   // Health tab (+ smoke probe)

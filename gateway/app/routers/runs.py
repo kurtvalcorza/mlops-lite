@@ -84,6 +84,58 @@ async def get_run(run_id: str):
     return r.json()
 
 
+class StudyRequest(BaseModel):
+    """An HPO study launch (012). A study runs `n_trials` sequential fine-tune trials (each a real
+    training run = a GPU-lease tenant), optimizing toward 011's eval metric; the best trial is
+    registered. Per-modality search spaces are sampled trainer-side; `overrides` narrows/replaces a
+    knob's range, `n_trials`/`timeout` bound the (sequential) budget. Unset knobs use the defaults."""
+    dataset_name: str
+    dataset_version: str
+    output_name: str
+    modality: str = "llm"
+    base_model: Optional[str] = None
+    seed: int = 0
+    n_trials: Optional[int] = None              # default (~15) applied trainer-side when unset
+    timeout: Optional[float] = None             # optional wall-clock cap (seconds)
+    overrides: Optional[dict] = None            # per-study search-space overrides
+
+
+@router.post("/studies", status_code=202)
+async def launch_study(req: StudyRequest):
+    """Launch an HPO study (async; poll GET /studies/{id}). Mirrors POST /runs: trials run strictly
+    sequentially on the single GPU, so total wall-clock ≈ n_trials × per-train-time."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.post(f"{TRAINER_URL}/study", json=req.model_dump(exclude_none=True))
+        except httpx.HTTPError as e:
+            RUN_OPS.labels(op="study", status="unavailable").inc()
+            raise HTTPException(status_code=503, detail=f"training daemon unreachable at {TRAINER_URL}: {e}")
+    if r.status_code == 409:
+        RUN_OPS.labels(op="study", status="busy").inc()
+        raise HTTPException(status_code=409, detail=r.json().get("error", "trainer busy"))
+    if r.status_code == 507:
+        RUN_OPS.labels(op="study", status="rejected").inc()
+        raise HTTPException(status_code=507, detail=r.json().get("error", "exceeds VRAM budget"))
+    if r.status_code not in (200, 202):
+        RUN_OPS.labels(op="study", status="error").inc()
+        raise HTTPException(status_code=502, detail=f"trainer error {r.status_code}: {r.text[:200]}")
+    RUN_OPS.labels(op="study", status="ok").inc()
+    return r.json()
+
+
+@router.get("/studies/{study_id}")
+async def get_study(study_id: str):
+    """Status + best-trial for an HPO study (trials, per-trial objective, the registered winner)."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.get(f"{TRAINER_URL}/study/{study_id}")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=503, detail=f"training daemon unreachable: {e}")
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"no study {study_id}")
+    return r.json()
+
+
 @router.get("/training/health")
 async def training_health():
     async with httpx.AsyncClient(timeout=5) as client:

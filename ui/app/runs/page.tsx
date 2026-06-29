@@ -18,6 +18,21 @@ type RunRec = {
 
 const TERMINAL = new Set(['completed', 'failed']);
 
+// 012 — an HPO study: a best trial (winning params + eval metric → a registered, promotable version).
+type StudyBest = {
+  version: string;
+  value: number;
+  metric: string | null;
+  params: Record<string, unknown>;
+} | null;
+type StudyRec = {
+  study_id?: string;
+  status?: string;
+  best?: StudyBest;
+  summary?: { completed?: number; n_trials?: number } | null;
+  error?: string | null;
+};
+
 // 010 — the trainer dispatches one flow per modality; the form surfaces each modality's knobs (the
 // rest fall back to the flow's conservative VRAM-fitting defaults — FR-098).
 const MODALITIES = ['llm', 'vision', 'embeddings', 'asr'] as const;
@@ -38,12 +53,18 @@ export default function RunsPage() {
   const [epochs, setEpochs] = useState(3);
   const [seed, setSeed] = useState(0);
 
+  // 012 — HPO: an "optimize" toggle turns the launch into a study of N sequential trials.
+  const [optimize, setOptimize] = useState(false);
+  const [nTrials, setNTrials] = useState(15);
+  const [study, setStudy] = useState<StudyRec | null>(null);
+
   const [launching, setLaunching] = useState(false);
   const [refusal, setRefusal] = useState('');
   const [err, setErr] = useState('');
   const [rec, setRec] = useState<RunRec | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const esRef = useRef<EventSource | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -54,7 +75,10 @@ export default function RunsPage() {
         if (first?.versions?.[0]) setDsKey(`${first.name}@${first.versions[0].version}`);
       })
       .catch(() => setDatasets([]));
-    return () => esRef.current?.close();
+    return () => {
+      esRef.current?.close();
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -80,6 +104,25 @@ export default function RunsPage() {
     es.onerror = () => es.close();
   }, []);
 
+  // 012 — poll an HPO study's status (studies/{id} is a plain GET, not SSE) until it finishes.
+  const watchStudy = useCallback((studyId: string) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    const tick = async () => {
+      try {
+        const s = await gwGet<StudyRec>(`studies/${encodeURIComponent(studyId)}`);
+        setStudy(s);
+        if (s.status && TERMINAL.has(s.status) && pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    };
+    tick();
+    pollRef.current = setInterval(tick, 4000);
+  }, []);
+
   const launch = async () => {
     if (!dsKey || !outputName.trim()) return;
     const [dataset_name, dataset_version] = dsKey.split('@');
@@ -87,7 +130,43 @@ export default function RunsPage() {
     setErr('');
     setRefusal('');
     setRec(null);
+    setStudy(null);
     setLog([]);
+
+    // 012 — optimize mode: launch an HPO study (N sequential trials) instead of a single run.
+    if (optimize) {
+      const sbody: Record<string, unknown> = {
+        dataset_name,
+        dataset_version,
+        output_name: outputName,
+        modality,
+        seed,
+        n_trials: nTrials,
+      };
+      if (baseModel.trim()) sbody.base_model = baseModel.trim();
+      try {
+        const res = await gwPost<{ study_id: string; status: string }>('studies', sbody);
+        setStudy({ study_id: res.study_id, status: res.status });
+        setLog([
+          `[${new Date().toLocaleTimeString()}] launched study ${res.study_id} ` +
+            `(${nTrials} trials, sequential on the one GPU)`,
+        ]);
+        watchStudy(res.study_id);
+      } catch (e) {
+        const msg = String(e);
+        if (msg.includes('-> 409')) {
+          setRefusal(
+            'Refused: one model in VRAM at a time (Principle II). A model is resident in serving, ' +
+              'or another run/study is active. Let it release and retry.',
+          );
+        } else {
+          setErr(msg);
+        }
+      } finally {
+        setLaunching(false);
+      }
+      return;
+    }
     // Only send the knobs the chosen modality uses; the trainer fills the rest from each flow's
     // defaults. Blank base_model / parent_version are omitted so the flow's own defaults apply.
     const body: Record<string, unknown> = {
@@ -134,6 +213,7 @@ export default function RunsPage() {
     d.versions.map((v) => ({ key: `${d.name}@${v.version}`, label: `${d.name} @ ${v.version}` })),
   );
   const running = rec?.status && !TERMINAL.has(rec.status);
+  const studyRunning = study?.status && !TERMINAL.has(study.status);
 
   return (
     <>
@@ -214,9 +294,32 @@ export default function RunsPage() {
               <NumberInput value={seed} onChange={setSeed} min={0} />
             </Field>
           </div>
+          {/* 012 — HPO: optimize mode searches a per-modality space across N sequential trials,
+              optimizing 011's eval metric, and registers the best trial as a promotable version. */}
+          <div className="mt-1 mb-3 hairline rounded-sm p-2">
+            <label className="flex items-center gap-2 text-caption-md text-ink">
+              <input
+                type="checkbox"
+                checked={optimize}
+                onChange={(e) => setOptimize(e.target.checked)}
+              />
+              optimize hyperparameters (HPO study)
+            </label>
+            {optimize && (
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <Field label="trials (sequential)">
+                  <NumberInput value={nTrials} onChange={setNTrials} min={1} />
+                </Field>
+                <p className="self-end text-caption-md text-ash">
+                  ~{nTrials}× one train each — runs on the single GPU
+                </p>
+              </div>
+            )}
+          </div>
           {/* Chaining is supported only for the resumable modalities (vision/embeddings); hidden for
-              llm/asr, which register a serving GGUF/ggml rather than a trainable checkpoint. */}
-          {CHAINABLE.has(modality) && (
+              llm/asr, which register a serving GGUF/ggml rather than a trainable checkpoint. Parent
+              chaining doesn't apply to an HPO study (it trains from base each trial). */}
+          {!optimize && CHAINABLE.has(modality) && (
             <Field label="parent version (optional — chain from a prior version)">
               <input
                 value={parentVersion}
@@ -228,10 +331,10 @@ export default function RunsPage() {
           )}
           <button
             onClick={launch}
-            disabled={launching || !dsKey || !outputName.trim() || !!running}
+            disabled={launching || !dsKey || !outputName.trim() || !!running || !!studyRunning}
             className="mt-2 rounded-sm bg-ink px-4 py-1 text-button-md text-canvas disabled:opacity-40"
           >
-            {launching ? '[~] launching…' : '[+] launch run'}
+            {launching ? '[~] launching…' : optimize ? '[+] launch study' : '[+] launch run'}
           </button>
           {refusal && (
             <p className="mt-3 text-caption-md st-warning">[!] {refusal}</p>
@@ -239,9 +342,10 @@ export default function RunsPage() {
           {err && <p className="mt-3 text-caption-md st-danger">[x] {err}</p>}
         </Panel>
 
-        <Panel title="live run" hint="GET /runs/{id}/events (SSE)">
-          {!rec && <p className="text-body-md text-mute">[ ] no active run.</p>}
-          {rec && (
+        <Panel title={study ? 'hpo study' : 'live run'} hint={study ? 'GET /studies/{id}' : 'GET /runs/{id}/events (SSE)'}>
+          {study && <StudyView study={study} />}
+          {!study && !rec && <p className="text-body-md text-mute">[ ] no active run.</p>}
+          {!study && rec && (
             <>
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-body-strong text-ink">{rec.run_id}</span>
@@ -287,6 +391,52 @@ export default function RunsPage() {
           )}
         </Panel>
       </div>
+    </>
+  );
+}
+
+// 012 US3 — the minimal HPO surface: study status + best-trial (winning params + winning metric).
+// Full live per-trial visualization is a documented fast-follow.
+function StudyView({ study }: { study: StudyRec }) {
+  const done = TERMINAL.has(study.status || '');
+  const best = study.best;
+  return (
+    <>
+      <div className="mb-3 flex items-center justify-between">
+        <span className="text-body-strong text-ink">{study.study_id}</span>
+        <Badge
+          tone={study.status === 'completed' ? 'success' : study.status === 'failed' ? 'danger' : 'accent'}
+        >
+          {study.status}
+        </Badge>
+      </div>
+      {study.summary?.n_trials != null && (
+        <p className="mb-2 text-caption-md text-mute">
+          {study.summary.completed ?? 0}/{study.summary.n_trials} trials completed · sequential on the
+          one GPU
+        </p>
+      )}
+      {!done && <p className="text-caption-md text-ash">[~] optimizing… (each trial is a full train)</p>}
+      {study.error && <p className="text-caption-md st-danger">[x] {study.error}</p>}
+      {best ? (
+        <div className="hairline rounded-sm p-3 text-caption-md">
+          <p className="st-success">
+            [✓] best trial → registered v{best.version}
+            {best.metric ? ` · ${best.metric}=${best.value}` : ` · objective=${best.value}`}
+          </p>
+          <p className="mt-1 text-ash">
+            winning params:{' '}
+            {Object.entries(best.params)
+              .map(([k, v]) => `${k}=${String(v)}`)
+              .join(' · ')}
+          </p>
+          <Link href="/models" className="st-accent underline">
+            [→] promote it in models
+          </Link>
+        </div>
+      ) : (
+        done && <p className="text-caption-md text-ash">[ ] no best trial (all trials failed).</p>
+      )}
     </>
   );
 }

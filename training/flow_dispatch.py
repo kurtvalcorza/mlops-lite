@@ -26,9 +26,14 @@ def dispatch(modality: str, req: dict) -> dict:
     base = req.get("base_model") or None
     if modality == "llm":
         from flows.finetune import finetune_flow
+        # 012: lora_alpha + lr are optional HPO-searched knobs; omitting them reproduces the prior
+        # tied-alpha / fixed-lr behavior (the single-value /runs path leaves them unset).
+        lora_alpha = req.get("lora_alpha")
         return finetune_flow(
             base_model=base or os.getenv("BASE_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"),
-            steps=int(req.get("steps", 10)), lora_r=int(req.get("lora_r", 8)), **common)
+            steps=int(req.get("steps", 10)), lora_r=int(req.get("lora_r", 8)),
+            lora_alpha=int(lora_alpha) if lora_alpha is not None else None,
+            lr=float(req.get("lr", 2e-4)), **common)
     if modality == "vision":
         from flows.vision_finetune import vision_finetune_flow
         return vision_finetune_flow(

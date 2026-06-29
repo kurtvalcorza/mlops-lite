@@ -88,8 +88,12 @@ def fetch_dataset(name: str, version: str) -> list:
 
 
 @task
-def train_lora(base_model: str, rows: list, out_dir: str, steps: int, lora_r: int, seed: int) -> dict:
-    """PEFT/LoRA fine-tune on the single GPU (or CPU fallback). Returns metrics + the adapter dir."""
+def train_lora(base_model: str, rows: list, out_dir: str, steps: int, lora_r: int, seed: int,
+               lora_alpha: "int | None" = None, lr: float = 2e-4) -> dict:
+    """PEFT/LoRA fine-tune on the single GPU (or CPU fallback). Returns metrics + the adapter dir.
+
+    `lora_alpha` (defaults to the previous tied `2*lora_r`) and `lr` (defaults to the previous fixed
+    `2e-4`) are surfaced so 012's HPO can search them; omitting them reproduces the prior behavior."""
     import torch
     from datasets import Dataset
     from peft import LoraConfig, get_peft_model
@@ -106,7 +110,8 @@ def train_lora(base_model: str, rows: list, out_dir: str, steps: int, lora_r: in
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=dtype).to(device)
     model = get_peft_model(model, LoraConfig(
-        r=lora_r, lora_alpha=lora_r * 2, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
+        r=lora_r, lora_alpha=(lora_alpha if lora_alpha is not None else lora_r * 2),
+        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     ))
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -122,7 +127,7 @@ def train_lora(base_model: str, rows: list, out_dir: str, steps: int, lora_r: in
     ds = Dataset.from_list(rows).map(_fmt, remove_columns=["instruction", "response"])
     args = TrainingArguments(
         output_dir=out_dir, max_steps=steps, per_device_train_batch_size=1,
-        gradient_accumulation_steps=1, learning_rate=2e-4, logging_steps=1,
+        gradient_accumulation_steps=1, learning_rate=lr, logging_steps=1,
         save_strategy="no", report_to=[], seed=seed, fp16=False, bf16=(device == "cuda"),
     )
     trainer = Trainer(
@@ -201,7 +206,8 @@ def register_version(output_name: str, gguf_path: str, run_id: str,
 @flow(name="lora-finetune")
 def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                   base_model: str = DEFAULT_BASE, steps: int = 10, lora_r: int = 8,
-                  seed: int = 0, parent_version: str | None = None) -> dict:
+                  seed: int = 0, parent_version: str | None = None,
+                  lora_alpha: int | None = None, lr: float = 2e-4) -> dict:
     """End-to-end fine-tune: dataset version -> tracked LoRA run -> registered, servable version.
 
     `parent_version` is accepted for a uniform trainer dispatch contract but **not supported** for the
@@ -221,12 +227,14 @@ def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
         run_id = run.info.run_id
         params = dict(base_model=base_model, dataset_name=dataset_name,
                       dataset_version=dataset_version, output_name=output_name,
-                      steps=steps, lora_r=lora_r, seed=seed)
+                      steps=steps, lora_r=lora_r, seed=seed,
+                      lora_alpha=(lora_alpha if lora_alpha is not None else lora_r * 2), lr=lr)
         mlflow.log_params(params)  # full config recorded → reproducible (FR-012)
 
         rows = fetch_dataset(dataset_name, dataset_version)
         with tempfile.TemporaryDirectory(prefix="lora-") as tmp:
-            trained = train_lora(base_model, rows, tmp, steps, lora_r, seed)
+            trained = train_lora(base_model, rows, tmp, steps, lora_r, seed,
+                                 lora_alpha=lora_alpha, lr=lr)
             # log_metrics takes numbers only; device is a label → record it as a tag.
             mlflow.log_metrics({k: v for k, v in trained["metrics"].items()
                                 if isinstance(v, (int, float))})
