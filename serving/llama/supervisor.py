@@ -97,6 +97,15 @@ def _ensure_loaded() -> float:
             [LLAMA_BIN, "-m", MODEL, "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
              "-ngl", NGL, "--ctx-size", CTX, "--alias", MODEL_ALIAS],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Record the child (the actual VRAM holder) on the lease IMMEDIATELY — its PID is valid as
+        # soon as Popen returns, even before the server is ready. The lease's liveness then tracks
+        # the llama-server child, not this supervisor, for the whole ~60s load: if the supervisor
+        # crashes mid-load, the still-loading (orphaned) child keeps the lease held — no second
+        # tenant can co-reside (Codex P1 #1). Registering here (not after the ready-wait) shrinks the
+        # vram_pid-unset window to just the Popen call. (PR_SET_PDEATHSIG was rejected: the cold-load
+        # Popen runs in an ephemeral HTTP worker thread, so the parent-death signal would SIGKILL
+        # llama-server when that request thread ends — killing the model after one request.)
+        gpu_lease.set_vram_owner(LEASE_TENANT, _proc.pid)
         for _ in range(120):  # up to ~60s
             if _server_ready():
                 break
@@ -105,13 +114,6 @@ def _ensure_loaded() -> float:
             time.sleep(0.5)
         else:
             raise RuntimeError("llama-server did not become ready in time")
-        # Record the child (the actual VRAM holder) on the lease. The lease's liveness then tracks
-        # the llama-server child, not this supervisor — so if the supervisor crashes but the child
-        # orphans, the lease stays held (its VRAM is still allocated) and no second tenant can
-        # co-reside (Codex P1 #1). (PR_SET_PDEATHSIG was rejected: the cold-load Popen runs in an
-        # ephemeral HTTP worker thread, so the parent-death signal would SIGKILL llama-server when
-        # that request thread ends — killing the model after one request.)
-        gpu_lease.set_vram_owner(LEASE_TENANT, _proc.pid)
         _last_load_ms = round((time.perf_counter() - t0) * 1000, 1)
         return _last_load_ms
     except BaseException:

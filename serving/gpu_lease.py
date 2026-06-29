@@ -113,7 +113,8 @@ def _alive(pid, start=None) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        pass  # exists but owned by another user — still live; can't read its stat to compare start
+        pass  # exists but owned by another user — can't signal it, but /proc/<pid>/stat is
+        # world-readable so the start-time check below still runs (PID-reuse stays detectable)
     except OSError:
         return False
     if start is not None:
@@ -172,8 +173,9 @@ def _coord():
             os.close(fd)
 
 
-def _write_claim(tenant: str) -> None:
-    """Atomically stamp the lockfile with our claim (O_CREAT|O_EXCL — the slot is free here).
+def _write_claim(tenant: str) -> dict:
+    """Atomically stamp the lockfile with our claim (O_CREAT|O_EXCL — the slot is free here) and
+    return the written record.
 
     Records the owner PID **and its start-time** so a recycled PID can't be mistaken for us (#7).
     """
@@ -182,6 +184,7 @@ def _write_claim(tenant: str) -> None:
     fd = os.open(LEASE_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(rec, f)
+    return rec
 
 
 def _unlink_quiet() -> None:
@@ -201,11 +204,11 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
         if holder is not None:
             if holder.get("pid") == os.getpid():
                 if holder.get("tenant") == tenant:
-                    # Already ours — idempotent re-acquire. Return WITHOUT deleting the claim or
-                    # re-running admission (Codex #3): re-running VRAM admission while our own model
-                    # is resident (free VRAM low) could raise and leave us with no lease file even
-                    # though the model is still resident.
-                    return {"tenant": tenant, "pid": os.getpid()}
+                    # Already ours — idempotent re-acquire. Return the on-disk record (incl. vram_pid
+                    # / acquired_at) WITHOUT deleting the claim or re-running admission (Codex #3):
+                    # re-running VRAM admission while our own model is resident (free VRAM low) could
+                    # raise and leave us with no lease file even though the model is still resident.
+                    return holder
                 _unlink_quiet()  # same process, different tenant (shouldn't happen) — replace
             elif _holder_live(holder):
                 raise LeaseHeld(holder)
@@ -232,8 +235,7 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
                     f"model needs ~{est_gb:.1f} GB but the VRAM budget is {vram_budget_gb:.0f} GB "
                     f"(constitution Principle II / FR-004)")
 
-        _write_claim(tenant)
-        return {"tenant": tenant, "pid": os.getpid()}
+        return _write_claim(tenant)  # full record (tenant, pid, pid_start, acquired_at)
 
 
 def set_vram_owner(tenant: str, vram_pid: int) -> None:
