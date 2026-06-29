@@ -68,6 +68,16 @@ def test_try_reserve_retrain_is_atomic_one_winner():
     q.reset_cooldown()
 
 
+def test_release_retrain_frees_a_reservation_for_retry():
+    # if a launch fails, releasing the reservation must let the NEXT genuine breach retry (a trainer-down
+    # shouldn't consume the cooldown) — symmetric with the PSI path's note-after-success.
+    q.reset_cooldown()
+    assert q.try_reserve_retrain(now=1000.0, cooldown_sec=3600) is True   # reserve
+    q.release_retrain()                                                   # launch failed → release
+    assert q.try_reserve_retrain(now=1001.0, cooldown_sec=3600) is True   # free again, retry allowed
+    q.reset_cooldown()
+
+
 def test_window_n_must_be_positive():
     # window_n<=0 would make pairs[-0:] the WHOLE history — reject it rather than score everything.
     pairs = [{"prediction": "x", "label": "y"} for _ in range(30)]

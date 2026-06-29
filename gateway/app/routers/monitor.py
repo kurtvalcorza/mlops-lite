@@ -131,7 +131,9 @@ async def quality_check(body: QualityCheck):
         report = await run_in_threadpool(
             quality.compute_quality, body.model_name, body.model_version, body.modality,
             baseline=body.baseline, window_n=body.window_n, drop_pct=body.drop_pct)
-    except quality.QualityError as e:
+    except quality.QualityStoreError as e:  # results-bucket outage → 502 (subclass caught first)
+        raise HTTPException(status_code=502, detail=str(e))
+    except quality.QualityError as e:        # bad input (unknown modality / window_n) → 400
         raise HTTPException(status_code=400, detail=str(e))
 
     retrain = None
@@ -148,6 +150,9 @@ async def quality_check(body: QualityCheck):
                 RETRAINS.labels(result="launched").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="launched").inc()
             except Exception as e:  # fail-soft — the quality report still stands (FR-125)
+                # release the reservation: a trainer-down must NOT consume the cooldown (so the next
+                # genuine breach can retry) — symmetric with the PSI path's note-after-success.
+                quality.release_retrain()
                 RETRAINS.labels(result="failed").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="failed").inc()
                 retrain = {"error": str(e)}

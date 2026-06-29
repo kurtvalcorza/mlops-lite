@@ -158,8 +158,8 @@ def test_load_pairs_excludes_uncaptured_predictions():
     assert len(pairs) == 1 and pairs[0]["prediction"] == "answer"  # the None-prediction row excluded
 
 
-def test_attach_label_transient_error_raises_not_unknown(monkeypatch):
-    # a non-404 store error must surface as QualityError (retryable), not be misreported as "unknown".
+def test_attach_label_transient_error_raises_store_error_not_unknown(monkeypatch):
+    # a non-404 store error must surface as QualityStoreError (→502, retryable), not "unknown".
     fake = install_fakes(q)
 
     def boom(Bucket, Key):
@@ -167,10 +167,28 @@ def test_attach_label_transient_error_raises_not_unknown(monkeypatch):
     monkeypatch.setattr(fake, "head_object", boom)
     try:
         q.attach_label("p1", "cat")
-    except q.QualityError:
+    except q.QualityStoreError:         # subclass of QualityError → the router maps it to 502
         pass
     else:
-        raise AssertionError("expected QualityError on a transient store error")
+        raise AssertionError("expected QualityStoreError on a transient store error")
+
+
+def test_store_outage_is_store_error_bad_input_is_plain_error():
+    # compute_quality over an unreachable store → QualityStoreError (→502); an unknown modality is a
+    # plain QualityError (→400). The router keys the status code off this distinction.
+    install_fakes(q)
+
+    class DeadS3:
+        def list_objects_v2(self, *a, **k):
+            raise FakeClientError("500")
+    q._s3 = lambda: DeadS3()
+    try:
+        q.compute_quality("m", "3", "image-classification", store=False)
+    except q.QualityStoreError:
+        pass
+    else:
+        raise AssertionError("expected QualityStoreError on a store outage")
+    assert issubclass(q.QualityStoreError, q.QualityError)  # 502-mapped is still a QualityError
 
 
 def test_list_keys_paginates_past_one_page():

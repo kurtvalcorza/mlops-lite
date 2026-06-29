@@ -64,7 +64,12 @@ _label_write_lock = threading.Lock()
 
 
 class QualityError(Exception):
-    """A quality-monitoring operation failed (store unreachable or bad data)."""
+    """A quality-monitoring operation failed (bad caller input, e.g. unknown modality / window_n<=0)."""
+
+
+class QualityStoreError(QualityError):
+    """A quality **store** I/O op failed (the results bucket is unreachable) — a subclass so the API can
+    map an upstream outage to 502, distinct from a 400 bad-input QualityError."""
 
 
 def _eval():
@@ -196,7 +201,7 @@ def attach_label(prediction_id: str, label) -> dict:
         if _missing(e):  # a real 404 → genuinely no such prediction
             return {"prediction_id": prediction_id, "status": "unknown",
                     "detail": "no logged prediction with this id"}
-        raise QualityError(f"cannot check prediction {prediction_id}: {e}") from e  # transient → surface
+        raise QualityStoreError(f"cannot check prediction {prediction_id}: {e}") from e  # transient → surface
     # Serialize the duplicate-check + write so two concurrent submissions for the same id can't both
     # see "no label" and the second overwrite the first (write-once, Codex P2).
     with _label_write_lock:
@@ -206,11 +211,11 @@ def attach_label(prediction_id: str, label) -> dict:
                     "detail": "this prediction already has a label"}
         except Exception as e:
             if not _missing(e):  # only a confirmed 404 means "no existing label" — never overwrite on a blip
-                raise QualityError(f"cannot check existing label for {prediction_id}: {e}") from e
+                raise QualityStoreError(f"cannot check existing label for {prediction_id}: {e}") from e
         try:
             _put_json(label_key, {"prediction_id": prediction_id, "label": label, "ts": time.time()})
         except Exception as e:
-            raise QualityError(f"cannot store label for {prediction_id}: {e}") from e
+            raise QualityStoreError(f"cannot store label for {prediction_id}: {e}") from e
     return {"prediction_id": prediction_id, "status": "attached"}
 
 
@@ -290,7 +295,7 @@ def _load_pairs(model_version: str, modality: str, model_name=None) -> list:
     try:
         keys = _list_keys(s3, PRED_PREFIX)  # paginated — never truncates past 1000 (review §1)
     except Exception as e:
-        raise QualityError(f"cannot list predictions: {e}") from e
+        raise QualityStoreError(f"cannot list predictions: {e}") from e
     pairs = []
     for key in keys:
         try:
@@ -365,7 +370,7 @@ def compute_quality(model_name, model_version, modality, *, baseline=None, windo
         try:
             _put_json(f"{QUALITY_PREFIX}{report_id}.json", report)
         except Exception as e:
-            raise QualityError(f"cannot store quality report: {e}") from e
+            raise QualityStoreError(f"cannot store quality report: {e}") from e
     return report
 
 
@@ -375,7 +380,7 @@ def latest_quality_reports(limit: int = 20) -> list:
     try:
         keys = _list_keys(s3, QUALITY_PREFIX)  # paginated (review §1)
     except Exception as e:
-        raise QualityError(f"cannot list quality reports: {e}") from e
+        raise QualityStoreError(f"cannot list quality reports: {e}") from e
     reports = []
     for key in keys:
         try:
@@ -420,6 +425,15 @@ def try_reserve_retrain(now: float = None, cooldown_sec: float = None) -> bool:
             return False
         _last_retrain_monotonic = t
         return True
+
+
+def release_retrain() -> None:
+    """Undo a reservation when the launch it guarded FAILED — so a trainer-down doesn't consume the
+    cooldown (the next genuine breach can retry). Symmetric with the PSI path, which only starts the
+    cooldown on a successful launch. Safe because the window was free when we reserved."""
+    global _last_retrain_monotonic
+    with _cooldown_lock:
+        _last_retrain_monotonic = 0.0
 
 
 def reset_cooldown() -> None:
