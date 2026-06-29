@@ -67,7 +67,8 @@ def _server_ready() -> bool:
 
 
 def _resident() -> bool:
-    return _proc is not None and _proc.poll() is None
+    p = _proc  # snapshot — /health reads this without _lock, so don't re-read the global mid-check
+    return p is not None and p.poll() is None
 
 
 def _ensure_loaded() -> float:
@@ -136,6 +137,11 @@ def _unload() -> None:
                 _proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+    # Only release the lease once the child is actually gone. If a SIGKILLed child is somehow still
+    # alive (e.g. uninterruptible D-state), KEEP the lease — its vram_pid keeps it live so no tenant
+    # co-resides — and leave _proc set so a later idle/unload pass retries the reap (Codex PR#5 P2).
+    if _proc is not None and _proc.poll() is None:
+        return
     _proc = None
     gpu_lease.release(LEASE_TENANT)  # free the GPU slot for the next tenant (idle-release / failure)
 

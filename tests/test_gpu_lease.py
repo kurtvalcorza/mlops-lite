@@ -219,6 +219,25 @@ def main() -> int:
         else:
             print("[FAIL] lease pinned by a live owner after its VRAM child died (#1)")
             failures += 1
+
+        # 9. Same-OWNER re-acquire with a dead VRAM child strips the stale vram_pid, so the lease
+        #    reverts to owner-PID liveness during the cold reload — otherwise another tenant would see
+        #    it as dead (vram-priority) and acquire mid-reload → co-residency (Codex PR#5 P1).
+        _cleanup()
+        with open(_LEASE, "w", encoding="utf-8") as f:
+            json.dump({"tenant": "llm-serving", "pid": os.getpid(),
+                       "pid_start": gpu_lease._proc_start(os.getpid()),
+                       "vram_pid": 2147480000, "vram_start": 1, "acquired_at": 0}, f)
+        pre_reclaimable = gpu_lease.current_holder() is None  # dead vram → looks free to others
+        gpu_lease.acquire("llm-serving")  # same owner re-acquires → strips the dead vram_pid
+        rec = gpu_lease._read_holder()
+        stripped = rec is not None and "vram_pid" not in rec
+        held_after = gpu_lease.current_holder() is not None  # now owner-live → held during reload
+        ok = pre_reclaimable and stripped and held_after
+        print(f"[{'OK' if ok else 'FAIL'}] same-owner re-acquire strips dead vram_pid → lease held by "
+              f"owner during reload (PR#5 P1)")
+        failures += 0 if ok else 1
+        gpu_lease.release("llm-serving")
     finally:
         _cleanup()
 

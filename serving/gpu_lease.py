@@ -192,6 +192,14 @@ def _unlink_quiet() -> None:
         os.unlink(LEASE_PATH)
 
 
+def _replace_holder(rec: dict) -> None:
+    """Atomically overwrite the lockfile with `rec` (write-temp + os.replace). Caller holds _coord()."""
+    tmp = f"{LEASE_PATH}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rec, f)
+    os.replace(tmp, LEASE_PATH)
+
+
 def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = None) -> dict:
     """Claim the single GPU slot for `tenant`. Atomic — no two callers both proceed (FR-062).
 
@@ -204,10 +212,19 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
         if holder is not None:
             if holder.get("pid") == os.getpid():
                 if holder.get("tenant") == tenant:
-                    # Already ours — idempotent re-acquire. Return the on-disk record (incl. vram_pid
-                    # / acquired_at) WITHOUT deleting the claim or re-running admission (Codex #3):
-                    # re-running VRAM admission while our own model is resident (free VRAM low) could
-                    # raise and leave us with no lease file even though the model is still resident.
+                    # Already ours — idempotent re-acquire. Return the on-disk record WITHOUT deleting
+                    # the claim or re-running admission (Codex #3): re-running VRAM admission while our
+                    # own model is resident (free VRAM low) could raise and leave us with no lease.
+                    vram_pid = holder.get("vram_pid")
+                    if vram_pid is not None and not _alive(vram_pid, holder.get("vram_start")):
+                        # Our previous VRAM child died and we're cold-restarting. Strip the stale
+                        # vram_pid so liveness reverts to our (live) owner PID during the reload —
+                        # otherwise _holder_live (which keys on vram_pid when present) would treat the
+                        # lease as dead and another tenant could acquire mid-reload → co-residency
+                        # (Codex PR#5 P1). set_vram_owner() re-stamps the new child once it's up.
+                        holder.pop("vram_pid", None)
+                        holder.pop("vram_start", None)
+                        _replace_holder(holder)
                     return holder
                 _unlink_quiet()  # same process, different tenant (shouldn't happen) — replace
             elif _holder_live(holder):
@@ -250,10 +267,7 @@ def set_vram_owner(tenant: str, vram_pid: int) -> None:
         if holder and holder.get("pid") == os.getpid() and holder.get("tenant") == tenant:
             holder["vram_pid"] = vram_pid
             holder["vram_start"] = _proc_start(vram_pid)
-            tmp = f"{LEASE_PATH}.tmp.{os.getpid()}"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(holder, f)
-            os.replace(tmp, LEASE_PATH)
+            _replace_holder(holder)
 
 
 def release(tenant: str) -> None:
