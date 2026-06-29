@@ -154,7 +154,8 @@ def _resolve_engine(c: MlflowClient, mv) -> Optional[str]:
     except MlflowException:
         pass
     try:  # (2) base is a registered model without an alias → its newest version's engine
-        for bmv in sorted(c.search_model_versions(f"name='{base}'"),
+        safe_base = str(base).replace("'", "''")  # escape like resolve_serving_target (Claude review)
+        for bmv in sorted(c.search_model_versions(f"name='{safe_base}'"),
                           key=lambda m: int(m.version), reverse=True):
             eng = dict(bmv.tags or {}).get(ENGINE_TAG)
             if eng:
