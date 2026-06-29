@@ -12,15 +12,19 @@ SERVING_URL = os.getenv("SERVING_URL", "http://host.docker.internal:8090")
 TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 BENTO_URL = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
 EMBED_URL = os.getenv("EMBED_URL", "http://host.docker.internal:8093")
+TABULAR_URL = os.getenv("TABULAR_URL", "http://host.docker.internal:8094")
+ASR_URL = os.getenv("ASR_URL", "http://host.docker.internal:8095")
 
-# name -> (health URL, whether 200 means ready). Bento services expose /readyz; the others /health.
-# 009: embeddings (CPU, off-lease) is a per-modality reachability target (FR-085); ASR/tabular join in
-# their phases.
+# name -> health URL. Bento services expose /readyz; the supervised GPU daemons expose /health.
+# 009: each new modality is a per-modality reachability target (FR-085) — embeddings + tabular (CPU,
+# off-lease, Bento /readyz) and ASR (whisper.cpp GPU-lease supervisor, /health).
 _TARGETS = {
     "serving": f"{SERVING_URL}/health",
     "training": f"{TRAINER_URL}/health",
     "vision": f"{BENTO_URL}/readyz",
     "embed": f"{EMBED_URL}/readyz",
+    "tabular": f"{TABULAR_URL}/readyz",
+    "asr": f"{ASR_URL}/health",
 }
 
 

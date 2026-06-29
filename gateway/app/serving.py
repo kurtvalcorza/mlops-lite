@@ -21,7 +21,7 @@ SERVING_MODEL = os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 # Shared-lockfile tenant id -> the label the UI status line shows (008 FR-068). The supervisor reads
 # the single GPU lease (serving/gpu_lease.py) and reports its current holder in /health, so this one
 # read covers every tenant (LLM, vision, training) — they all share the same lockfile.
-_HOLDER_LABEL = {"llm-serving": "llm", "vision": "vision", "training": "training"}
+_HOLDER_LABEL = {"llm-serving": "llm", "vision": "vision", "training": "training", "asr": "asr"}
 
 _gpu_lock = asyncio.Lock()  # gateway-side concurrency limiter only; Principle II is the lease's job
 

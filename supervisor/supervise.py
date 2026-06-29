@@ -58,6 +58,14 @@ _ALL = {
         "health_url": os.getenv("EMBED_HEALTH", "http://localhost:8093/readyz"),
         "grace_s": float(os.getenv("EMBED_GRACE", "120")),
     },
+    # 009 US3 — ASR: the whisper.cpp native CUDA supervisor, a GPU-lease tenant (load-on-demand,
+    # idle-release VRAM). Like the llama supervisor it loads nothing until the first /transcribe, so a
+    # short grace suffices — the supervisor process is up fast even though the model loads lazily.
+    "asr": {
+        "cmd": ["bash", os.path.join(REPO, "serving", "whispercpp", "run.sh")],
+        "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
+        "grace_s": float(os.getenv("ASR_GRACE", "30")),
+    },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).
     # First launch installs deps + builds, so the grace is generous; warm launches `next start` fast.
     "ui": {
@@ -67,7 +75,7 @@ _ALL = {
     },
 }
 _SELECTED = [n.strip()
-             for n in os.getenv("SUPERVISE_DAEMONS", "serving,training,vision,embed,ui").split(",")
+             for n in os.getenv("SUPERVISE_DAEMONS", "serving,training,vision,embed,asr,ui").split(",")
              if n.strip() in _ALL]
 
 

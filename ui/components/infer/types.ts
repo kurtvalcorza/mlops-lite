@@ -2,9 +2,10 @@
 // distinct serving `task`s and renders one panel per task via a renderer map keyed by task. Adding a
 // modality = register a model with a `task` tag + drop a renderer into the map (components/infer).
 
-// 008 US3 (FR-068): the gateway's lease/GPU state. `holder` ∈ {llm, vision, training, null}.
+// 008 US3 (FR-068) + 009 US3: the gateway's lease/GPU state. `holder` ∈ {llm, vision, training, asr,
+// null} — ASR (whisper.cpp) joined the single lease as a tenant in 009.
 export type ServingState = {
-  holder: 'llm' | 'vision' | 'training' | null;
+  holder: 'llm' | 'vision' | 'training' | 'asr' | null;
   resident: boolean;
   serving_model: string;
   serving_version: string | null;
