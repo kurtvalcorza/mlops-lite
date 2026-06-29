@@ -221,7 +221,7 @@ def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
             with tempfile.TemporaryDirectory(prefix="asr-") as tmp:
                 merged_dir = os.path.join(tmp, "hf")
                 merged_dir, metrics, device = _train_and_merge(
-                    audios, texts, merged_dir, base_model=base, parent_source=None, lr=lr,
+                    audios, texts, merged_dir, base_model=base, lr=lr,
                     epochs=epochs, grad_accum=grad_accum, warmup_ratio=warmup_ratio, lora_r=lora_r,
                     seed=seed)
                 mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
