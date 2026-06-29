@@ -163,6 +163,15 @@ def _idle_watcher() -> None:
                 _unload()
 
 
+def _hdr_safe(s) -> str:
+    """Strip characters that could break out of a multipart header / inject a part — CR, LF, and the
+    double-quote that delimits header params (Claude review). `filename` and `language` are
+    user-controlled, so a value like `x"\r\n--boundary` must not be able to forge a header or part.
+    whisper-server is loopback-only, but a filename with an embedded quote is also a plain correctness
+    bug, so every field value + the filename is sanitized here (defense at the point of assembly)."""
+    return str(s).replace("\r", "").replace("\n", "").replace('"', "")
+
+
 def _multipart(fields: dict, file_field: str, filename: str, data: bytes) -> tuple[bytes, str]:
     """Build a minimal multipart/form-data body (stdlib only) for the whisper-server upload."""
     boundary = f"----mlopslite{uuid.uuid4().hex}"
@@ -170,12 +179,12 @@ def _multipart(fields: dict, file_field: str, filename: str, data: bytes) -> tup
     parts = []
     for k, v in fields.items():
         parts.append(b"--" + boundary.encode() + crlf)
-        parts.append(f'Content-Disposition: form-data; name="{k}"'.encode() + crlf + crlf)
-        parts.append(str(v).encode() + crlf)
+        parts.append(f'Content-Disposition: form-data; name="{_hdr_safe(k)}"'.encode() + crlf + crlf)
+        parts.append(_hdr_safe(v).encode() + crlf)
     parts.append(b"--" + boundary.encode() + crlf)
     parts.append(
-        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"'.encode()
-        + crlf)
+        f'Content-Disposition: form-data; name="{_hdr_safe(file_field)}"; '
+        f'filename="{_hdr_safe(filename)}"'.encode() + crlf)
     parts.append(b"Content-Type: application/octet-stream" + crlf + crlf)
     parts.append(data + crlf)
     parts.append(b"--" + boundary.encode() + b"--" + crlf)

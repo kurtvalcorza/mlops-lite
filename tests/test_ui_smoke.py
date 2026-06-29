@@ -108,9 +108,12 @@ def main() -> int:
     #     no-`<select>` invariant still holds in SSR, and the tab must render its discovery shell.
     s, body = _get(f"{UI}/infer")
     html = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body)
-    renders = s == 200 and "infer" in html.lower()
+    # Tight positive assertion (Claude review): the SSR shell emits the task-discovery placeholder
+    # from page.tsx ("discovering tasks…") before hydration — a broad "infer" substring would also
+    # pass on an error page that merely mentions infer.
+    renders = s == 200 and "discovering tasks" in html.lower()
     no_dropdown = "<select" not in html
-    print(f"[{'OK' if renders else 'FAIL'}] Infer tab renders (200, task-driven shell — 009 FR-077)")
+    print(f"[{'OK' if renders else 'FAIL'}] Infer tab renders (200, task-driven discovery shell — 009 FR-077)")
     print(f"[{'OK' if no_dropdown else 'FAIL'}] Infer tab has NO model dropdown (<select removed, FR-069)")
     failures += (0 if renders else 1) + (0 if no_dropdown else 1)
 
