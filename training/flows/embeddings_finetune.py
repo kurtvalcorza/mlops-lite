@@ -112,8 +112,11 @@ def _register(model, output_name, run_id, *, base_model, dataset_name, dataset_v
 
     info = st_flavor.log_model(model, name="model", registered_model_name=output_name)
     c = MlflowClient(tracking_uri=MLFLOW_URI)
-    # The flavor registers the newest version under output_name; tag *that* version.
-    versions = sorted(c.search_model_versions(f"name='{output_name}'"),
+    # The flavor registers the newest version under output_name; tag *that* version. Single-quote-escape
+    # the name in the filter (as registry.resolve_serving_target does) so a name with a `'` can't break
+    # out of the search string (local Claude review).
+    safe_name = str(output_name).replace("'", "''")
+    versions = sorted(c.search_model_versions(f"name='{safe_name}'"),
                       key=lambda mv: int(mv.version), reverse=True)
     version = str(versions[0].version)
     tags = {"kind": "embedding", "framework": "sentence-transformers", "task": TASK,

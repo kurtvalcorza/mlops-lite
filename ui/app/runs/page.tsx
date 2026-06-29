@@ -95,7 +95,9 @@ export default function RunsPage() {
       seed,
     };
     if (baseModel.trim()) body.base_model = baseModel.trim();
-    if (parentVersion.trim()) body.parent_version = parentVersion.trim();
+    // Chaining isn't supported for the LLM flow (the registered artifact is a serving GGUF, not a
+    // trainable adapter), so never forward parent_version for llm — the field is hidden there too.
+    if (parentVersion.trim() && modality !== 'llm') body.parent_version = parentVersion.trim();
     if (modality === 'llm') {
       body.steps = steps;
       body.lora_r = loraR;
@@ -208,14 +210,18 @@ export default function RunsPage() {
               <NumberInput value={seed} onChange={setSeed} min={0} />
             </Field>
           </div>
-          <Field label="parent version (optional — chain from a prior version)">
-            <input
-              value={parentVersion}
-              onChange={(e) => setParentVersion(e.target.value)}
-              placeholder="(none — train from base)"
-              className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
-            />
-          </Field>
+          {/* Chaining is supported for vision/embeddings/asr; the LLM flow can't resume from a
+              registered version, so the field is hidden for llm. */}
+          {modality !== 'llm' && (
+            <Field label="parent version (optional — chain from a prior version)">
+              <input
+                value={parentVersion}
+                onChange={(e) => setParentVersion(e.target.value)}
+                placeholder="(none — train from base)"
+                className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
+              />
+            </Field>
+          )}
           <button
             onClick={launch}
             disabled={launching || !dsKey || !outputName.trim() || !!running}
