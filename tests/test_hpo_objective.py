@@ -118,6 +118,24 @@ def test_optimize_direction_resolves_from_011_registry():
     assert m.optimize_direction("asr") == "minimize"
 
 
+def test_optimize_direction_runs_the_011_path_not_the_fallback(caplog):
+    # pin that the value came from 011's registry, NOT the (value-identical) fallback: the fallback
+    # always warns, so a clean integration resolution must emit no warning.
+    import logging
+    with caplog.at_level(logging.WARNING):
+        assert m.optimize_direction("asr") == "minimize"
+    assert not any("falling back" in r.getMessage() for r in caplog.records)
+
+
+def test_optimize_direction_warns_loudly_when_it_must_fall_back(caplog):
+    # an unknown modality can't resolve via 011 (KeyError on MODALITY_TASK) → the fallback path must
+    # WARN so a possibly-wrong direction is never silent.
+    import logging
+    with caplog.at_level(logging.WARNING):
+        m.optimize_direction("totally-unknown-modality")
+    assert any("falling back" in r.getMessage() for r in caplog.records)
+
+
 def test_eval_failure_makes_the_trial_fail_not_worst_valid():
     # if 011's eval errors for a candidate, that trial is FAILED (not scored worst-valid, FR-115).
     def train(req):
