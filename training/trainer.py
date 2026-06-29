@@ -1,4 +1,5 @@
-"""Native training daemon (T031/T032, US4) — runs the LoRA flow on the WSL GPU host.
+"""Native training daemon (T031/T032, US4; 010 — multimodal dispatch) — runs the fine-tune flows on
+the WSL GPU host.
 
 Mirrors the serving supervisor: a pure-stdlib HTTP server the gateway proxies to. It owns one
 training run at a time and enforces the platform's one-GPU-tenant rule (Principle II, v1.4.0) by
@@ -8,9 +9,13 @@ completion/failure. This *subsumes* the old refuse-while-serving-resident HTTP p
 409 "GPU busy" semantics, but without its time-of-check/time-of-use race. The heavy ML stack is
 imported lazily inside the worker thread, keeping the daemon light and holding no VRAM while idle.
 
+010: `/train` carries a **`modality` selector** (`llm` | `vision` | `embeddings` | `asr`, default
+`llm` for backward compatibility) and one daemon dispatches all four flows behind the **same** single
+`_lock` + GPU lease (a fine-tune is the heaviest single tenant — FR-097). No new lock, no new daemon.
+
 Endpoints:
   GET  /health            -> {ok, busy, active, gpu_free_mib}
-  POST /train             -> {run_id, status}     start a run (background)
+  POST /train             -> {run_id, status}     start a run (background); body carries `modality`
   GET  /train/{run_id}    -> {run_id, status, mlflow_run_id, model, metrics, error}
 
 Env: TRAINER_PORT (8091), SUPERVISOR_URL (http://localhost:8090), VRAM_GB (12),
@@ -41,6 +46,46 @@ _lock = threading.Lock()           # one run at a time
 _runs: dict = {}                   # run_id -> job record
 _active: str | None = None
 
+VALID_MODALITIES = ("llm", "vision", "embeddings", "asr")  # 010 — one daemon dispatches all four
+
+
+def _dispatch(modality: str, req: dict) -> dict:
+    """Run the fine-tune flow for `modality` (heavy ML imports happen lazily, per flow). All four share
+    the dataset/output/seed/parent_version contract; per-modality knobs default to each flow's
+    conservative VRAM-fitting defaults when the Runs form omits them (FR-098)."""
+    common = dict(
+        dataset_name=req["dataset_name"],
+        dataset_version=req["dataset_version"],
+        output_name=req["output_name"],
+        seed=int(req.get("seed", 0)),
+        parent_version=req.get("parent_version") or None,
+    )
+    base = req.get("base_model") or None
+    if modality == "llm":
+        from flows.finetune import finetune_flow
+        return finetune_flow(
+            base_model=base or os.getenv("BASE_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"),
+            steps=int(req.get("steps", 10)), lora_r=int(req.get("lora_r", 8)), **common)
+    if modality == "vision":
+        from flows.vision_finetune import vision_finetune_flow
+        return vision_finetune_flow(
+            base_model=base, epochs=int(req.get("epochs", 3)), lr=float(req.get("lr", 1e-3)),
+            batch_size=int(req.get("batch_size", 8)),
+            unfreeze_epochs=int(req.get("unfreeze_epochs", 0)), **common)
+    if modality == "embeddings":
+        from flows.embeddings_finetune import embeddings_finetune_flow
+        return embeddings_finetune_flow(
+            base_model=base, epochs=int(req.get("epochs", 1)),
+            batch_size=int(req.get("batch_size", 16)),
+            warmup_ratio=float(req.get("warmup_ratio", 0.1)), **common)
+    if modality == "asr":
+        from flows.asr_finetune import asr_finetune_flow
+        return asr_finetune_flow(
+            base_model=base, epochs=int(req.get("epochs", 3)), lr=float(req.get("lr", 1e-4)),
+            grad_accum=int(req.get("grad_accum", 4)), warmup_ratio=float(req.get("warmup_ratio", 0.1)),
+            lora_r=int(req.get("lora_r", 8)), quant=req.get("quant", "q8_0"), **common)
+    raise ValueError(f"unknown modality {modality!r} (expected {'|'.join(VALID_MODALITIES)})")
+
 
 def _gpu_free_mib():
     try:
@@ -57,17 +102,8 @@ def _worker(run_id: str, req: dict):
     global _active
     rec = _runs[run_id]
     try:
-        from flows.finetune import finetune_flow  # heavy imports happen here, not at startup
         rec["status"] = "running"
-        out = finetune_flow(
-            dataset_name=req["dataset_name"],
-            dataset_version=req["dataset_version"],
-            output_name=req["output_name"],
-            base_model=req.get("base_model") or os.getenv("BASE_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"),
-            steps=int(req.get("steps", 10)),
-            lora_r=int(req.get("lora_r", 8)),
-            seed=int(req.get("seed", 0)),
-        )
+        out = _dispatch(req.get("modality", "llm"), req)  # heavy imports happen lazily per flow
         rec.update(status="completed", mlflow_run_id=out["run_id"],
                    model=out["model"], metrics=out["metrics"], params=out["params"])
     except Exception as e:  # failed run frees the GPU and registers NO partial version (T032)
@@ -139,6 +175,13 @@ class Handler(BaseHTTPRequestHandler):
         for f in ("dataset_name", "dataset_version", "output_name"):
             if not req.get(f):
                 return self._send(400, {"error": f"missing field: {f}"})
+        # Normalize + validate the modality BEFORE acquiring the lease (010) — an unknown modality is a
+        # 400, not a held GPU slot that fails later in the worker.
+        modality = (req.get("modality") or "llm").lower()
+        if modality not in VALID_MODALITIES:
+            return self._send(400, {"error": f"unknown modality {modality!r} "
+                                             f"(expected {'|'.join(VALID_MODALITIES)})"})
+        req["modality"] = modality
 
         with _lock:
             global _active

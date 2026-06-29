@@ -19,21 +19,40 @@ RUN_OPS = Counter("gateway_run_ops_total", "Training run operations", ["op", "st
 
 
 class RunRequest(BaseModel):
+    """A fine-tune launch (010 — multimodal). `modality` selects the flow the trainer dispatches
+    (`llm` default for backward compatibility | `vision` | `embeddings` | `asr`); per-modality knobs
+    are optional and default to each flow's conservative VRAM-fitting defaults when omitted (FR-098).
+    `parent_version` chains a run from a prior registered version of `output_name` (US4, FR-096).
+    Unknown extra fields are forwarded as-is via `model_dump()` — the trainer reads what it needs."""
     dataset_name: str
     dataset_version: str
     output_name: str
+    modality: str = "llm"
     base_model: Optional[str] = None
+    seed: int = 0
+    parent_version: Optional[str] = None
+    # LLM knobs (preserved defaults)
     steps: int = 10
     lora_r: int = 8
-    seed: int = 0
+    # vision / embeddings / asr knobs (None → the flow's own default applies)
+    epochs: Optional[int] = None
+    lr: Optional[float] = None
+    batch_size: Optional[int] = None
+    unfreeze_epochs: Optional[int] = None
+    warmup_ratio: Optional[float] = None
+    grad_accum: Optional[int] = None
+    quant: Optional[str] = None
 
 
 @router.post("/runs", status_code=202)
 async def launch_run(req: RunRequest):
-    """Launch a LoRA fine-tune run on a pinned dataset version (async; poll GET /runs/{id})."""
+    """Launch a fine-tune run on a pinned dataset version (async; poll GET /runs/{id}).
+
+    Forwards only the set fields (`exclude_none`) so the trainer applies each flow's own per-modality
+    defaults for anything the operator left blank, rather than overriding them with nulls."""
     async with httpx.AsyncClient(timeout=15) as client:
         try:
-            r = await client.post(f"{TRAINER_URL}/train", json=req.model_dump())
+            r = await client.post(f"{TRAINER_URL}/train", json=req.model_dump(exclude_none=True))
         except httpx.HTTPError as e:
             RUN_OPS.labels(op="launch", status="unavailable").inc()
             raise HTTPException(status_code=503, detail=f"training daemon unreachable at {TRAINER_URL}: {e}")

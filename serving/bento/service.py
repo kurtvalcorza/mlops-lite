@@ -99,7 +99,13 @@ class VisionClassifier:
             try:
                 blob = _s3().get_object(Bucket=BUCKET, Key=KEY)["Body"].read()
                 ckpt = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=False)
-                model = mobilenet_v2()
+                # Size the classifier head from the checkpoint's `categories` so a 010 head-swapped
+                # fine-tune (K≠1000 classes) loads, not just the 1000-class ImageNet seed. Backward
+                # compatible: the seed carries 1000 categories → mobilenet_v2(num_classes=1000), which
+                # is the default arch. The single server-side touch 010 needs (the flow fine-tunes into
+                # this exact {state_dict, categories} shape).
+                cats = ckpt["categories"]
+                model = mobilenet_v2(num_classes=len(cats))
                 model.load_state_dict(ckpt["state_dict"])
                 model.eval()
                 if DEVICE == "cuda":

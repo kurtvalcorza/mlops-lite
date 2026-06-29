@@ -18,12 +18,21 @@ type RunRec = {
 
 const TERMINAL = new Set(['completed', 'failed']);
 
+// 010 — the trainer dispatches one flow per modality; the form surfaces each modality's knobs (the
+// rest fall back to the flow's conservative VRAM-fitting defaults — FR-098).
+const MODALITIES = ['llm', 'vision', 'embeddings', 'asr'] as const;
+type Modality = (typeof MODALITIES)[number];
+
 export default function RunsPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [dsKey, setDsKey] = useState(''); // "name@version"
   const [outputName, setOutputName] = useState('');
+  const [modality, setModality] = useState<Modality>('llm');
+  const [baseModel, setBaseModel] = useState('');
+  const [parentVersion, setParentVersion] = useState('');
   const [steps, setSteps] = useState(10);
   const [loraR, setLoraR] = useState(8);
+  const [epochs, setEpochs] = useState(3);
   const [seed, setSeed] = useState(0);
 
   const [launching, setLaunching] = useState(false);
@@ -76,15 +85,26 @@ export default function RunsPage() {
     setRefusal('');
     setRec(null);
     setLog([]);
+    // Only send the knobs the chosen modality uses; the trainer fills the rest from each flow's
+    // defaults. Blank base_model / parent_version are omitted so the flow's own defaults apply.
+    const body: Record<string, unknown> = {
+      dataset_name,
+      dataset_version,
+      output_name: outputName,
+      modality,
+      seed,
+    };
+    if (baseModel.trim()) body.base_model = baseModel.trim();
+    if (parentVersion.trim()) body.parent_version = parentVersion.trim();
+    if (modality === 'llm') {
+      body.steps = steps;
+      body.lora_r = loraR;
+    } else {
+      body.epochs = epochs;
+      if (modality === 'asr') body.lora_r = loraR;
+    }
     try {
-      const res = await gwPost<{ run_id: string; status: string }>('runs', {
-        dataset_name,
-        dataset_version,
-        output_name: outputName,
-        steps,
-        lora_r: loraR,
-        seed,
-      });
+      const res = await gwPost<{ run_id: string; status: string }>('runs', body);
       setRec({ run_id: res.run_id, status: res.status });
       setLog([`[${new Date().toLocaleTimeString()}] launched ${res.run_id} (${res.status})`]);
       watch(res.run_id);
@@ -111,7 +131,7 @@ export default function RunsPage() {
 
   return (
     <>
-      <PageTitle sub="Launch a LoRA fine-tune on a pinned dataset version and watch it live.">
+      <PageTitle sub="Launch a fine-tune (LLM · vision · embeddings · ASR) on a pinned dataset version and watch it live.">
         runs
       </PageTitle>
 
@@ -139,17 +159,63 @@ export default function RunsPage() {
               className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
             />
           </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="modality">
+              <select
+                value={modality}
+                onChange={(e) => setModality(e.target.value as Modality)}
+                className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink"
+              >
+                {MODALITIES.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="base model (optional)">
+              <input
+                value={baseModel}
+                onChange={(e) => setBaseModel(e.target.value)}
+                placeholder="(flow default)"
+                className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
+              />
+            </Field>
+          </div>
           <div className="grid grid-cols-3 gap-2">
-            <Field label="steps">
-              <NumberInput value={steps} onChange={setSteps} min={1} />
-            </Field>
-            <Field label="lora_r">
-              <NumberInput value={loraR} onChange={setLoraR} min={1} />
-            </Field>
+            {modality === 'llm' ? (
+              <>
+                <Field label="steps">
+                  <NumberInput value={steps} onChange={setSteps} min={1} />
+                </Field>
+                <Field label="lora_r">
+                  <NumberInput value={loraR} onChange={setLoraR} min={1} />
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field label="epochs">
+                  <NumberInput value={epochs} onChange={setEpochs} min={1} />
+                </Field>
+                {modality === 'asr' && (
+                  <Field label="lora_r">
+                    <NumberInput value={loraR} onChange={setLoraR} min={1} />
+                  </Field>
+                )}
+              </>
+            )}
             <Field label="seed">
               <NumberInput value={seed} onChange={setSeed} min={0} />
             </Field>
           </div>
+          <Field label="parent version (optional — chain from a prior version)">
+            <input
+              value={parentVersion}
+              onChange={(e) => setParentVersion(e.target.value)}
+              placeholder="(none — train from base)"
+              className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
+            />
+          </Field>
           <button
             onClick={launch}
             disabled={launching || !dsKey || !outputName.trim() || !!running}

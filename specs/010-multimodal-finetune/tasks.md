@@ -22,12 +22,40 @@ shared space (T180+).
 
 ---
 
-> **Status (2026-06-28):** **DRAFT — GRILLED (2026-06-28), build-ready.**
+> **Status (2026-06-29):** **BUILT — offline-validated; on-hardware validation PENDING.**
+> All code paths implemented + offline-validated (py_compile across the 6 flow modules + trainer + converter
+> + gateway router; `from flows.* import` resolves under the trainer sys.path on WSL; trainer unknown-modality
+> guard returns 400; new tests `pytest --collect-only` clean + skip-clean offline; UI `tsc --noEmit` + prod
+> `next build` green with the modality Runs form; gateway `RunRequest.model_dump(exclude_none=True)` verified;
+> frozen-stack diff clean — only `sentence-transformers==3.3.1` added (already in-venv from 009), NO
+> torch/torchvision/transformers/peft/accelerate/datasets movement). **ON-HARDWARE SWEEP STILL PENDING**:
+> live vision/embeddings/asr fine-tunes on the GPU, the merge+HF→ggml(q8_0) converter against a built
+> whisper.cpp `quantize`, promote→serve each modality, the lease-409/free-on-failure re-check, and the
+> 001–009 no-regression sweep (T199–T201). The running trainer daemon predates this code → restart it before
+> the sweep; whisper.cpp needs its `convert-h5-to-ggml` + `quantize` toolchain on the host.
+>
 > Scope: **extend the LLM-only trainer to fine-tune vision + embeddings + ASR**, each registering a servable
 > MLflow version with serving tags + lineage; each fine-tune is the **heaviest single GPU lease tenant**
 > (Principle II / constitution v1.4.0). GPU/FT stack **FROZEN** (code paths only, no version bumps). No
 > constitution amendment (training-as-a-lease-tenant already covered by v1.4.0; existing native Python runtime;
 > deps mostly present). Tasks T180–T201.
+>
+> **Implementation notes (2026-06-29):**
+> - **Shared infra** `flows/_common.py` (MinIO client, config, the ephemeral-Prefect shim, `fetch_jsonl`) +
+>   `flows/lineage.py` (lineage tags, `resolve_parent` cross-modality reject, parent-run link). The existing
+>   LLM `finetune.py` adopts `lineage.py` only (kept otherwise verbatim — it's the hardware-validated path).
+> - **Dataset shapes** (single object `{name}/{version}/data`, JSONL): vision `{image_b64,label}`, embeddings
+>   `{anchor,positive[,negative]}`, ASR `{audio_b64,text}` (16 kHz mono PCM WAV).
+> - **Embeddings task tag = `embedding`** (singular) to match 009's seed/registry vocabulary; logged via the
+>   MLflow `sentence_transformers` flavor so the 009 service loads `models:/{name}@serving`.
+> - **Chaining (FR-096)** is supported for **vision + embeddings** (their registered artifact reloads as a
+>   trainable warm start); LLM + ASR record lineage but chaining-from-a-registered-version is N/A (the stored
+>   artifact is the serving GGUF/ggml, not a trainable checkpoint) — guarded with a clear error.
+> - **One server-side touch**: the 009 vision service now sizes its head from the checkpoint's `categories`
+>   (`mobilenet_v2(num_classes=len(cats))`) so a head-swapped fine-tune loads; backward-compatible with the
+>   1000-class seed. Everything else is trainer-only.
+> - **Lease**: modalities reuse the **exact** 008/008.1 trainer `_lock` + GPU lease (no new lock — FR-097);
+>   the unknown-modality 400 check happens BEFORE lease acquire.
 >
 > **Firm decisions:**
 > 1. **Phase by difficulty**: US1 vision (easiest, torchvision transfer-learning) → US2 embeddings (medium,
@@ -73,68 +101,68 @@ shared space (T180+).
 
 ## Phase 1 — Vision transfer-learning (US1, P1) → SC-057 + lease half of SC-061
 
-- [ ] **T183** [US1] `training/flows/vision_finetune.py`: pull a pinned image-classification dataset version
+- [x] **T183** [US1] `training/flows/vision_finetune.py`: pull a pinned image-classification dataset version
   from MinIO; load a torchvision backbone; **default** = **freeze the backbone**, **swap the classifier head**
   to the dataset's class count, small LR, few epochs (optional low-LR unfreeze pass); surface these as
   **Runs-form params** (configurable, HPO-tunable by 012), not hard-pinned; free the GPU promptly. (FR-088,
   FR-098)
-- [ ] **T184** [US1] Write the output `model.pt` carrying `{state_dict, categories}` (the 009 BentoML load
+- [x] **T184** [US1] Write the output `model.pt` carrying `{state_dict, categories}` (the 009 BentoML load
   shape); upload to MinIO `models` bucket (content-addressed); register an MLflow version tagged
   `task=image-classification`, `serving_engine=bentoml`, `framework=torchvision`, `arch=<backbone>` + dataset
   tags (mirrors `scripts/seed_vision_model.py`). (FR-089)
-- [ ] **T185** [US1] `training/trainer.py`: add a **`modality` selector** to `/train` and dispatch to the right
+- [x] **T185** [US1] `training/trainer.py`: add a **`modality` selector** to `/train` and dispatch to the right
   flow (vision now; embeddings/asr later); keep the one-run `_lock` + `_serving_resident()` mutex + free-on-
   failure + no-partial-version path **unchanged**. (FR-097, FR-098)
-- [ ] **T186** [P] [US1] `tests/test_vision_finetune`: with the GPU free, a vision fine-tune completes, logs
+- [x] **T186** [P] [US1] `tests/test_vision_finetune`: with the GPU free, a vision fine-tune completes, logs
   metrics, registers the tagged version; promoting to `@serving` makes 009's vision service classify the
   **new** labels; a fine-tune requested while a model is serving-resident returns **409**. (SC-057, SC-061)
 
 ## Phase 2 — Embeddings fine-tune (US2, P2) → SC-058
 
-- [ ] **T187** [US2] `training/flows/embeddings_finetune.py`: pull a pinned **pairs/triplets** dataset; load a
+- [x] **T187** [US2] `training/flows/embeddings_finetune.py`: pull a pinned **pairs/triplets** dataset; load a
   base sentence-transformers model; **default** = contrastive **MultipleNegativesRankingLoss** (in-batch
   negatives), few epochs (ST `fit`/loss or HF `Trainer` path) as a full GPU lease tenant; surface loss/epochs/
   batch as **Runs-form params** (configurable, HPO-tunable by 012), not hard-pinned; free the GPU promptly.
   (FR-090, FR-098)
-- [ ] **T188** [US2] Save the fine-tuned **ST model directory**; upload to MinIO `models`; register an MLflow
+- [x] **T188** [US2] Save the fine-tuned **ST model directory**; upload to MinIO `models`; register an MLflow
   version tagged `task=embeddings`, `framework=sentence-transformers`, `serving_engine=<009 embeddings engine>`
   + dataset tags. (FR-091)
-- [ ] **T189** [US2] Wire the `embeddings` modality into the `trainer.py` dispatch (no new lock). (FR-097)
-- [ ] **T190** [P] [US2] `tests/test_embeddings_finetune`: a contrastive/triplet fine-tune completes, logs loss
+- [x] **T189** [US2] Wire the `embeddings` modality into the `trainer.py` dispatch (no new lock). (FR-097)
+- [x] **T190** [P] [US2] `tests/test_embeddings_finetune`: a contrastive/triplet fine-tune completes, logs loss
   + an eval metric (cosine spread / small retrieval score), registers the tagged version; promoting it lets
   009's embeddings service return fine-tuned vectors with the same contract. (SC-058)
 
 ## Phase 3 — ASR (Whisper) fine-tune + HF→ggml (US3, P3) → SC-059
 
-- [ ] **T191** [US3] `training/flows/asr_finetune.py`: pull a pinned **audio+transcript** dataset; HF
+- [x] **T191** [US3] `training/flows/asr_finetune.py`: pull a pinned **audio+transcript** dataset; HF
   `transformers` **Whisper-small + LoRA (PEFT)** seq2seq fine-tune (feature extractor + tokenizer + seq2seq
   loss) within `VRAM_GB` — **default** low LR + warmup + grad-accum, **exposed on the Runs form** (configurable,
   HPO-tunable by 012), not hard-pinned; log loss + a **WER-style** eval metric; free the GPU promptly. (FR-092,
   FR-098)
-- [ ] **T192** [US3] `training/tools/convert_whisper_to_ggml.py` (**the new tool**): **merge the LoRA adapter
+- [x] **T192** [US3] `training/tools/convert_whisper_to_ggml.py` (**the new tool**): **merge the LoRA adapter
   into the base HF model**, then convert via whisper.cpp's **`convert-h5-to-ggml`** (HF route, **q8_0**) →
   `ggml-*.bin`; **fail the run** with a captured stderr tail (and register **no** version) on non-zero exit or
   missing output (mirrors `convert_to_gguf`). (FR-093)
-- [ ] **T193** [US3] Upload `ggml-*.bin` to MinIO `models`; register an MLflow version tagged `task=asr`,
+- [x] **T193** [US3] Upload `ggml-*.bin` to MinIO `models`; register an MLflow version tagged `task=asr`,
   `serving_engine=whisper.cpp`, `format=ggml` + dataset tags; wire the `asr` modality into the `trainer.py`
   dispatch. (FR-094, FR-097)
-- [ ] **T194** [P] [US3] `tests/test_asr_finetune`: a Whisper-small+LoRA fine-tune completes within `VRAM_GB`,
+- [x] **T194** [P] [US3] `tests/test_asr_finetune`: a Whisper-small+LoRA fine-tune completes within `VRAM_GB`,
   logs loss + WER-style metric, **merges the adapter + converts** HF→ggml (`convert-h5-to-ggml`, q8_0),
   registers the tagged version; promoting it lets 009's whisper.cpp service transcribe with the fine-tuned
   model; converter non-zero exit registers **no** version. (SC-059, SC-061)
 
 ## Phase 4 — Lineage & adapter-chaining (US4, P2) → SC-060
 
-- [ ] **T195** [US4] `training/flows/lineage.py`: shared helper to stamp lineage tags on every fine-tune
+- [x] **T195** [US4] `training/flows/lineage.py`: shared helper to stamp lineage tags on every fine-tune
   (`base_model`/base version, `dataset_name`/`dataset_version`, `lineage=base|chained`) and, for chained runs,
   `parent_version` + a link to the parent MLflow run. (FR-095)
-- [ ] **T196** [US4] Resume-from-prior-version (**chaining**): load the parent artifact as a **trainable**
+- [x] **T196** [US4] Resume-from-prior-version (**chaining**): load the parent artifact as a **trainable**
   start — `PeftModel.from_pretrained(…, is_trainable=True)` for adapter modalities, prior `state_dict`/
   checkpoint for full-weight modalities — instead of the stock base; **reject** a parent whose `task` differs
   from the requested modality (no cross-modality chaining). (FR-096)
-- [ ] **T197** [US4] Adopt `lineage.py` in all four flows (vision/embeddings/asr **and** the existing LLM
+- [x] **T197** [US4] Adopt `lineage.py` in all four flows (vision/embeddings/asr **and** the existing LLM
   `finetune.py` — minimal change: route its existing tags through the helper). (FR-095)
-- [ ] **T198** [P] [US4] `tests/test_lineage_chaining`: a base fine-tune records `lineage=base`; a fine-tune
+- [x] **T198** [P] [US4] `tests/test_lineage_chaining`: a base fine-tune records `lineage=base`; a fine-tune
   resuming from a prior version records `parent_version` + `lineage=chained`, links to the parent run, and
   trains from the prior weights (initial loss reflects the warm start); a wrong-modality parent is rejected.
   (SC-060)
@@ -144,7 +172,7 @@ shared space (T180+).
 - [ ] **T199** Confirm each modality's **default config fits `VRAM_GB`** on the target machine (small base,
   batch, optional grad-accum / grad-checkpointing) and surfaces the chosen hyperparameters as **MLflow params**
   (reproducible from the recorded config). (SC-062, FR-098)
-- [ ] **T200** **Frozen-stack check**: verify no movement in torch/torchvision/transformers/peft/accelerate/
+- [x] **T200** **Frozen-stack check**: verify no movement in torch/torchvision/transformers/peft/accelerate/
   datasets (`pip freeze` diff vs the validated lock); `scripts/native_env.lock` updated only for the
   newly-added native dep(s). (SC-063, FR-099)
 - [ ] **T201** Full no-regression sweep: the existing LLM LoRA flow + the 009 serving paths + the prior suite

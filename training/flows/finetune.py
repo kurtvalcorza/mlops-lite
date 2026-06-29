@@ -22,6 +22,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # so the shared lineage helper imports
+from lineage import lineage_tags  # noqa: E402  (010 US4 — shared lineage tags across all flows)
+
 # --- Prefect (optional, ephemeral) ------------------------------------------------------------
 try:
     from prefect import flow, task
@@ -182,13 +185,14 @@ def register_version(output_name: str, gguf_path: str, run_id: str,
         c.create_registered_model(output_name)
     except MlflowException:
         pass
+    # 010 US4: route base/dataset/lineage tags through the shared helper so every modality (incl. this
+    # LLM flow) records genealogy identically (FR-095). `lineage=base` — LLM chaining from a *registered*
+    # version isn't supported (the stored artifact is the serving GGUF, not a trainable PEFT adapter), so
+    # there is no `parent_version` here; the resumable modalities are vision + embeddings.
     mv = c.create_model_version(
         name=output_name, source=source, run_id=run_id,
-        tags={
-            "kind": "lora-adapter", "base_model": base_model,
-            "dataset_name": dataset_name, "dataset_version": dataset_version,
-            "format": "gguf",
-        },
+        tags={"kind": "lora-adapter", "format": "gguf",
+              **lineage_tags(base_model, dataset_name, dataset_version)},
     )
     _log(f"registered {output_name} v{mv.version} <- run {run_id} on {dataset_name}@{dataset_version}")
     return {"name": output_name, "version": str(mv.version), "source": source}
@@ -197,9 +201,19 @@ def register_version(output_name: str, gguf_path: str, run_id: str,
 @flow(name="lora-finetune")
 def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                   base_model: str = DEFAULT_BASE, steps: int = 10, lora_r: int = 8,
-                  seed: int = 0) -> dict:
-    """End-to-end fine-tune: dataset version -> tracked LoRA run -> registered, servable version."""
+                  seed: int = 0, parent_version: str | None = None) -> dict:
+    """End-to-end fine-tune: dataset version -> tracked LoRA run -> registered, servable version.
+
+    `parent_version` is accepted for a uniform trainer dispatch contract but **not supported** for the
+    LLM flow: the registered artifact is the serving GGUF, not a trainable PEFT adapter, so there is no
+    reloadable checkpoint to chain from (vision/embeddings are the resumable modalities — FR-096).
+    """
     import mlflow
+
+    if parent_version:
+        raise NotImplementedError(
+            "LLM-flow chaining (parent_version) isn't supported — the registered artifact is the serving "
+            "GGUF, not a trainable adapter; chain a vision/embeddings fine-tune instead")
 
     mlflow.set_tracking_uri(MLFLOW_URI)
     mlflow.set_experiment("lora-finetune")
