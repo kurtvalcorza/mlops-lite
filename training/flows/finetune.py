@@ -239,6 +239,19 @@ def register_version(output_name: str, gguf_path: str, run_id: str,
     return {"name": output_name, "version": str(mv.version), "source": source}
 
 
+def _score_at_registration(mv: dict, adapter_gguf: str, base_model: str):
+    """015 (FR-137/139): score the just-registered LLM version on the held-out QA benchmark by loading
+    the served base GGUF + this run's LoRA-GGUF adapter in a transient llama-server (D5), and log the
+    metric on the version. Scoring failure warns + registers without a metric (does not fail the run)."""
+    training_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if training_root not in sys.path:
+        sys.path.insert(0, training_root)
+    from scoring import llm, score_at_registration
+    return score_at_registration(
+        mv["name"], mv["version"], "text-generation",
+        llm.make_predict_fn(adapter_gguf, base_model), log_fn=_log)
+
+
 @flow(name="lora-finetune")
 def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                   base_model: str = DEFAULT_BASE, steps: int = 10, lora_r: int = 8,
@@ -276,6 +289,7 @@ def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
             mlflow.set_tag("validation_warnings", ",".join(validation_report["warnings"]))
 
         rows = fetch_dataset(dataset_name, dataset_version)
+        eval_result = None  # 015: bound before any score-at-registration (warn path leaves it None)
         with tempfile.TemporaryDirectory(prefix="lora-") as tmp:
             trained = train_lora(base_model, rows, tmp, steps, lora_r, seed,
                                  lora_alpha=lora_alpha, lr=lr)
@@ -287,8 +301,15 @@ def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
             convert_to_gguf(trained["adapter_dir"], base_model, gguf)
             mv = register_version(output_name, gguf, run_id, base_model,
                                   dataset_name, dataset_version)
+            # 015 (FR-137): score the SERVED GGUF in-process and log the metric on the new version,
+            # inside this fine-tune's existing lease hold. train_lora already freed the HF training
+            # model, so the transient llama-server scorer loads with one model in VRAM (Principle II).
+            eval_result = _score_at_registration(mv, gguf, base_model)
+            if eval_result:
+                mlflow.set_tag("eval_metric", f"{eval_result['metric']}={eval_result['value']}")
         mlflow.set_tag("registered_version", mv["version"])
-        return {"run_id": run_id, "model": mv, "metrics": trained["metrics"], "params": params}
+        return {"run_id": run_id, "model": mv, "metrics": trained["metrics"], "params": params,
+                "eval": eval_result}
 
 
 if __name__ == "__main__":

@@ -182,6 +182,19 @@ def _register(output_name, ggml_path, run_id, *, base_model, dataset_name, datas
     return {"name": output_name, "version": str(mv.version), "source": source}
 
 
+def _score_at_registration(mv, ggml_path):
+    """015 (FR-137/139): score the just-registered ASR version on the served ggml. ASR is the LLM's twin
+    — score the quantized ggml artifact via a transient whisper-cli (D6), with the HF training model
+    already freed by _train_and_merge (one model in VRAM, Principle II) — and log WER on the version.
+    Scoring failure warns + registers without a metric (does not fail the run)."""
+    training_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if training_root not in sys.path:
+        sys.path.insert(0, training_root)
+    from scoring import asr, score_at_registration
+    return score_at_registration(
+        mv["name"], mv["version"], "asr", asr.make_predict_fn(ggml_path), log_fn=_log)
+
+
 @flow(name="asr-finetune")
 def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                       base_model: str | None = DEFAULT_BASE, epochs: int = 3, lr: float = 1e-4,
@@ -217,6 +230,7 @@ def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
 
         rows = fetch_jsonl(dataset_name, dataset_version)
         audios, texts = _parse_rows(rows)
+        eval_result = None  # 015: bound before any score-at-registration (warn path leaves it None)
         try:
             with tempfile.TemporaryDirectory(prefix="asr-") as tmp:
                 merged_dir = os.path.join(tmp, "hf")
@@ -233,10 +247,14 @@ def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                 mv = _register(output_name, ggml, run_id, base_model=base, dataset_name=dataset_name,
                                dataset_version=dataset_version, parent_version=None,
                                parent_run_id=None, device=device)
+                eval_result = _score_at_registration(mv, ggml)
+                if eval_result:
+                    mlflow.set_tag("eval_metric", f"{eval_result['metric']}={eval_result['value']}")
         finally:
             free_cuda()  # release VRAM whether training/convert/register succeeded or raised (Principle II)
         mlflow.set_tag("registered_version", mv["version"])
-        return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params}
+        return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params,
+                "eval": eval_result}
 
 
 if __name__ == "__main__":

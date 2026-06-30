@@ -136,6 +136,43 @@ def test_optimize_direction_warns_loudly_when_it_must_fall_back(caplog):
     assert any("falling back" in r.getMessage() for r in caplog.records)
 
 
+# --- 015: the default objective reads the trial's logged metric, no serving-daemon call --------------
+
+class _FakeEval:
+    """Stands in for 011's eval harness as the HPO default objective sees it (015): a registry client
+    + read_eval. No `evaluate()`, no `_live_predictor`, no HTTP — so no host.docker.internal call."""
+
+    def __init__(self, logged):
+        self._logged = logged  # (name, version) -> EvalResult dict (or None)
+
+    def _client(self):
+        return "fake-client"
+
+    def read_eval(self, c, name, version):
+        return self._logged.get((name, str(version)))
+
+
+def test_default_eval_reads_the_trials_logged_metric(monkeypatch):
+    # 015 FR-141/SC-089: the objective is the trial's OWN registered version's logged metric — a pure
+    # read_eval lookup, never a serving-daemon score (finding #4 closed).
+    fake = _FakeEval({("toy", "3"): {"metric": "task_accuracy", "value": 0.75, "direction": "higher"}})
+    monkeypatch.setattr(m, "_load_evaluation", lambda: fake)
+    res = m._default_eval("toy", "3", "llm")
+    assert res["value"] == 0.75 and res["metric"] == "task_accuracy"
+
+
+def test_default_eval_unscored_version_is_a_failed_trial(monkeypatch):
+    # a trial that trained + registered but logged no metric (score-at-registration warned) has no
+    # objective → HpoError (a failed trial, not a worst-valid score).
+    monkeypatch.setattr(m, "_load_evaluation", lambda: _FakeEval({}))
+    try:
+        m._default_eval("toy", "9", "llm")
+    except m.HpoError:
+        pass
+    else:
+        raise AssertionError("expected HpoError when the trial version carries no logged metric")
+
+
 def test_eval_failure_makes_the_trial_fail_not_worst_valid():
     # if 011's eval errors for a candidate, that trial is FAILED (not scored worst-valid, FR-115).
     def train(req):

@@ -219,9 +219,8 @@ applies to every operator/production promotion. (The `scripts/seed_*` bootstrap 
   and like-for-like (same modality + metric). **Default = BLOCK** a regression beyond a small tolerance;
   an explicit operator **override** bypasses a block, and a config switches the whole gate to
   **warn-on-regression**. No incumbent ⇒ pass.
-- **Offline champion-challenger** scores both on the same held-out set with **sequential VRAM loads**
-  (Principle II — no online A/B). Shadow-replay of logged requests is deferred to a 013-dependent
-  follow-on.
+- **Offline champion-challenger** declares a winner from both versions' **logged metrics** (since 015 —
+  see below; no model reload). Shadow-replay of logged requests is deferred to a 013-dependent follow-on.
 
 ```bash
 curl -X POST localhost:8080/models/<name>/evaluate -H "X-API-Key: $KEY" \
@@ -232,13 +231,30 @@ python scripts/eval_model.py evaluate <name> <version>                   # one-s
 # POST /models/<name>/promote is now gated — body {"version":"N","override":true} bypasses a block.
 ```
 
-> **Live-path scoring (until SC-068).** The per-modality predictors behind `evaluate`/`compare` score
-> whichever version the serving daemon **currently holds** — they don't yet load the requested version
-> on demand — and `evaluate` then logs that score against the supplied `name@version`. So today a live
-> `compare` of a not-yet-resident challenger is degenerate (both legs hit the resident `@serving`
-> model). For version-specific scoring drive the harness with seeded per-version metrics (or the
-> injected predictor in tests); on-demand version loading is the SC-068 on-hardware step. The
-> sequential-load VRAM invariant (Principle II) holds regardless.
+## Score-at-registration (015 — closes SC-068)
+
+Before 015, the per-modality predictors behind `evaluate`/`compare` scored whichever version the serving
+daemon **currently held**, not the requested registered version — so a live `compare` of a non-resident
+challenger was degenerate, the 012 HPO objective was meaningless (every trial scored the same resident
+model), and the native trainer couldn't even reach the Docker-only serving hostnames (`Name or service
+not known`). 015 closes this by making every fine-tuned version **born with its eval metric**:
+
+- **Every fine-tune scores its own model in-process at registration**, inside its existing GPU-lease hold,
+  and logs the primary metric on the new version (`training/scoring/`). LLM/ASR score the **served
+  artifact** (the GGUF via a transient `llama-server`; the ggml via a transient `whisper-cli`) after the
+  HF training model is freed; vision/embeddings score the **in-memory** trained model that *is* what's
+  served. **One model in VRAM at any instant** (Principle II) — sequential within the single hold.
+- **The gate, `compare`, quality, and the HPO objective read those logged metrics** — no serving-daemon
+  reload, no per-version loading machinery. The HPO objective is now each trial's own registered metric,
+  so the study optimizes toward the genuinely best candidate, with no `host.docker.internal` call.
+- **All four trainable modalities** (LLM, vision, ASR, embeddings) ship a content-hashed held-out fixture
+  under [`benchmarks/`](benchmarks/) (`asr/wer_smoke.jsonl`, `embedding/recall_smoke.jsonl` are new).
+- **Gateway `/evaluate` is guarded** (FR-143): the `@serving` version is scored as before, a
+  registration-scored version returns its logged metric, and a non-`@serving` version with **no** logged
+  metric is **refused with a clear `409`** — never a silent score of the wrong (resident) model.
+
+No new dependency, no new service, no change to the frozen GPU stack, and batch (014) still scores the
+`@serving` model. The metric/direction math (011) is unchanged.
 
 ## Hyperparameter optimization (012)
 
@@ -416,3 +432,4 @@ and served live at `http://localhost:8080/docs`.
 | 012 | hyperparameter-optimization | Optuna study over the fine-tune path, optimizing 011's eval metric |
 | 013 | quality-monitoring | Prediction + ground-truth logging → windowed quality → breach-retrain |
 | 014 | batch-and-validation | Offline batch inference + pre-training data-validation gates |
+| 015 | on-demand-version-loading | Score-at-registration: every fine-tune logs its eval metric in-process; gate/compare/HPO read logged metrics; `/evaluate` guard (closes SC-068) |

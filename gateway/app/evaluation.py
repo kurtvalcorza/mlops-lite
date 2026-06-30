@@ -73,6 +73,13 @@ class EvalError(Exception):
     """An evaluation/gate operation failed (no benchmark, no such version, serving unreachable)."""
 
 
+class EvalGuardError(EvalError):
+    """The gateway `/evaluate` guard refused (FR-143): the requested version is not the `@serving` model
+    and carries no logged eval metric, so the gateway cannot evaluate it without silently scoring the
+    wrong (resident) model. A subclass of EvalError so existing handlers still catch it, but distinct so
+    the router can map it to a 409 (a refusal, not an internal eval failure)."""
+
+
 # --- primary metrics: pure-Python scorers, each tagged with its direction -------------------------
 
 def _norm(s: str) -> str:
@@ -183,14 +190,14 @@ class Metric:
 
 
 # Per-modality default primary metric + direction (the grilled defaults; all operator-configurable).
-# Keyed by the registry `task` tag (009 FR-074). LLM + vision are COMMITTED (served today); ASR /
-# embeddings / tabular are guidance stubs until their serving paths exist (009).
+# Keyed by the registry `task` tag (009 FR-074). LLM + vision + ASR + embeddings all score at
+# registration as of 015 (each ships a held-out fixture); tabular has no fine-tune flow → still a stub.
 METRICS = {
     "text-generation": Metric("task_accuracy", HIGHER, task_accuracy),  # LLM (committed)
     "image-classification": Metric("accuracy", HIGHER, accuracy),       # vision (committed)
-    "asr": Metric("wer", LOWER, wer),                                   # stub
-    "embedding": Metric("recall_at_k", HIGHER, recall_at_k),            # stub
-    "tabular": Metric("auc", HIGHER, auc),                              # stub
+    "asr": Metric("wer", LOWER, wer),                                   # 015 — WER fixture shipped
+    "embedding": Metric("recall_at_k", HIGHER, recall_at_k),            # 015 — recall@k fixture shipped
+    "tabular": Metric("auc", HIGHER, auc),                              # stub (no fine-tune flow)
 }
 # Universal LLM fallback (used when a QA answer key is absent) — kept out of METRICS so it is opt-in.
 PERPLEXITY = Metric("perplexity", LOWER, perplexity)
@@ -231,6 +238,8 @@ BENCHMARKS_DIR = os.getenv(
 DEFAULT_BENCHMARKS = {
     "text-generation": "llm/qa_smoke.jsonl",
     "image-classification": "vision/shapes_smoke.jsonl",
+    "embedding": "embedding/recall_smoke.jsonl",  # 015 — recall@k held-out fixture (score-at-registration)
+    "asr": "asr/wer_smoke.jsonl",                  # 015 — WER held-out fixture (score-at-registration)
 }
 
 
@@ -475,22 +484,33 @@ def gate(name: str, candidate_version: str, *, override: bool = False, mode: str
 def compare(name: str, challenger_version: str, benchmark: Optional[str] = None, *,
             metric_name: Optional[str] = None, predict_fn: Optional[Callable] = None,
             client=None) -> dict:
-    """Score the `@serving` champion and a challenger on the same held-out benchmark and declare a
-    winner (FR-106). Models are scored **sequentially** — `evaluate()` loads one at a time, so the
-    VRAM mutex (Principle II) holds with no concurrent residency. Held-out only; shadow-replay is
-    deferred to a 013-dependent follow-on. Re-uses the gate's metric, so the read and the gate agree.
+    """Declare a winner between the `@serving` champion and a challenger by reading their **logged eval
+    metrics** — no model reload (015 FR-142, SC-090). After 015 every fine-tuned version is scored at
+    registration, so both versions already carry a comparable metric; `compare` is a pure metric lookup
+    (exactly like the gate), so the read and the gate agree by construction. Loading no model trivially
+    preserves the VRAM mutex (Principle II) — there is no longer a degenerate "both legs hit the resident
+    model" path (the SC-068 mislabel this closes).
+
+    `benchmark`/`metric_name`/`predict_fn` are accepted for signature compatibility but unused: the
+    comparison reads each version's logged metric + benchmark provenance, not a re-score.
     """
     c = client or _client()
     champion_version = _serving_version(c, name)
     if champion_version is None:
         raise EvalError(f"{name} has no @serving champion to compare against")
 
-    # Sequential by construction: champion fully scored (and its model released) before the challenger
-    # is loaded — never two models resident (SC-068).
-    champ = evaluate(name, champion_version, benchmark, metric_name=metric_name,
-                     predict_fn=predict_fn, client=c, log=False)
-    chall = evaluate(name, challenger_version, benchmark, metric_name=metric_name,
-                     predict_fn=predict_fn, client=c, log=False)
+    champ = read_eval(c, name, champion_version)
+    chall = read_eval(c, name, str(challenger_version))
+    if champ is None or champ.get("value") is None:
+        raise EvalError(f"champion {name}@{champion_version} has no logged eval metric — it is scored at "
+                        f"registration (015); evaluate/serve it before comparing")
+    if chall is None or chall.get("value") is None:
+        raise EvalError(f"challenger {name}@{challenger_version} has no logged eval metric — it is scored "
+                        f"at registration (015); evaluate/serve it before comparing")
+    # like-for-like — comparing a vision metric against an LLM one is meaningless (mirrors the gate).
+    if champ["metric"] != chall["metric"] or champ.get("modality") != chall.get("modality"):
+        raise EvalError(f"cannot compare {name}@{champion_version} ({champ['metric']}) vs "
+                        f"@{challenger_version} ({chall['metric']}) — metric/modality mismatch")
 
     direction = champ["direction"]
     if champ["value"] == chall["value"]:
@@ -499,13 +519,51 @@ def compare(name: str, challenger_version: str, benchmark: Optional[str] = None,
         winner = "challenger"
     else:
         winner = "champion"
+    # Surface a provenance flag if the two were scored on different benchmark bytes — the values are
+    # still both logged, but the operator should know they aren't strictly the same held-out set.
+    benchmark_mismatch = (champ.get("benchmark_hash") != chall.get("benchmark_hash"))
     return {
         "name": name, "metric": champ["metric"], "direction": direction,
-        "benchmark": champ["benchmark"], "benchmark_hash": champ["benchmark_hash"],
-        "champion": {"version": champion_version, "value": champ["value"]},
+        "benchmark": champ.get("benchmark"), "benchmark_hash": champ.get("benchmark_hash"),
+        "champion": {"version": str(champion_version), "value": champ["value"]},
         "challenger": {"version": str(challenger_version), "value": chall["value"]},
         "winner": winner, "delta": round(chall["value"] - champ["value"], 6),
+        "benchmark_mismatch": benchmark_mismatch,
     }
+
+
+# --- US3 (015): the gateway /evaluate guard (FR-143) ----------------------------------------------
+
+def evaluate_guarded(name: str, version: str, benchmark: Optional[str] = None, *,
+                     metric_name: Optional[str] = None, predict_fn: Optional[Callable] = None,
+                     client=None) -> dict:
+    """Gateway `/evaluate` with the 015 guard (FR-143, contracts/evaluate-guard.md): never silently
+    score the resident model for a *different* requested version (the SC-068 mislabel). Three cases:
+
+      - requested version **is** `@serving` → the resident model IS the requested one → score it via the
+        serving path (unchanged `evaluate()`), `200` with a freshly-computed EvalResult.
+      - requested version **has a logged metric** (scored at registration, 015) → return that logged
+        metric, no model reload, `200`.
+      - requested version is **not `@serving`** AND has **no logged metric** → raise `EvalGuardError`
+        (the router maps it to a clear `409`) — never a wrong-model score.
+    """
+    c = client or _client()
+    serving = _serving_version(c, name)
+    if serving is not None and str(version) == str(serving):
+        # The resident model is exactly the requested version — scoring it is correct (and re-logs it).
+        return evaluate(name, version, benchmark, metric_name=metric_name, predict_fn=predict_fn,
+                        client=c)
+    logged = read_eval(c, name, str(version))
+    if logged is not None and logged.get("value") is not None:
+        return {
+            "name": name, "version": str(version), "modality": logged.get("modality"),
+            "metric": logged["metric"], "value": logged["value"], "direction": logged["direction"],
+            "benchmark": logged.get("benchmark"), "benchmark_hash": logged.get("benchmark_hash"),
+            "source": "logged",  # read from the registration-time metric (015), not re-scored
+        }
+    raise EvalGuardError(
+        f"{name}@{version} is not the @serving model and has no logged eval metric — promote/serve it "
+        f"to evaluate, or it is scored at registration (015)")
 
 
 # --- live per-modality predictors (the serving path; injected as predict_fn for tests) ------------
