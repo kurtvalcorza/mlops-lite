@@ -4,7 +4,10 @@
 
 **Created**: 2026-06-28
 
-**Status**: **DRAFT — GRILLED (2026-06-28), build-ready**
+**Status**: **BUILT & MERGED (2026-06-29, PR #14)** — US1–US3. Optuna study runner
+(`training/flows/hpo.py`) + per-modality search spaces, optimizing 011's eval metric; sequential
+trials on the single GPU lease (`n_jobs=1`); best trial registered for 011's gate. New dep
+`optuna==4.9.0`. See tasks.md status block for evidence. (Was DRAFT — GRILLED 2026-06-28, build-ready.)
 
 **Input**: Roadmap follow-on to 011 (the evaluation harness). The fine-tune path (`POST /runs` →
 native trainer → `finetune_flow`) currently takes hyperparameters (`lora_r`, `steps`, `seed`, …) as
