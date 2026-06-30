@@ -15,10 +15,15 @@ per-modality quality), so shadow-replay is unblocked. The value over the held-ou
 challenger on the **real traffic distribution** the model actually sees, not a curated smoke set.
 
 > **Grilled decisions (2026-06-30):**
-> 1. **Scope = all trainable modalities, but extend 013 input capture first.** Today 013 logs the **full
->    prompt** for LLM (replayable) but only a **SHA hash** for vision (not replayable) and nothing
->    replayable for ASR. 016 first **extends 013's input capture** so vision (images) + ASR (audio) inputs
->    are recoverable, then shadow-replays all modalities.
+> 1. **Scope = the labeled-prediction modalities (LLM / vision / ASR), and extend 013 input capture
+>    first.** Shadow-replay needs a clean per-prediction `(input, label)` pair, so it applies to
+>    text-generation, image-classification, and ASR — the modalities 013 logs a single prediction +
+>    ground-truth label for. **Embeddings and tabular are OUT of scope**: embeddings serving is recall over
+>    a retrieval *set* (no single per-request label) and tabular has no 013 prediction logging — neither
+>    fits the per-prediction replay shape (a different formulation would be its own increment). Today 013
+>    logs the **full prompt** for LLM (replayable) but only a **SHA hash** for vision (not replayable) and
+>    nothing replayable for ASR — so 016 first **extends 013's input capture** so vision (images) + ASR
+>    (audio) inputs are recoverable, then shadow-replays those three modalities.
 > 2. **Capture policy = sampled + capped + TTL, configurable, behind the existing `QUALITY_CAPTURE_IO`
 >    opt-in.** Capture inputs for a bounded sample (a sampling rate and/or a ring-buffer cap of the last N
 >    per modality) with a retention TTL — NOT every request — so image/audio storage stays bounded on the
@@ -208,4 +213,7 @@ an explicit "insufficient data" result, not a verdict.
 - **No champion re-run** (uses logged predictions).
 - **No scheduler / automatic periodic replay** (on-demand only).
 - **No unbounded input capture** (sampled + capped + TTL, opt-in).
+- **No embeddings / tabular shadow-replay** — they lack a clean per-prediction `(input, label)` pair
+  (embeddings = recall over a set; tabular has no 013 prediction logging). A separate formulation would be
+  its own increment.
 - **No change to the held-out compare (011) or score-at-registration (015)** — 016 complements them.
