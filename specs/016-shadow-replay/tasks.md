@@ -3,10 +3,11 @@
 **Input**: Design documents from `specs/016-shadow-replay/` (spec.md, plan.md, research.md, data-model.md,
 contracts/shadow-replay-endpoint.md, contracts/capture-extension.md, quickstart.md).
 
-> **Status (2026-06-30):** **PLANNED — not started.** Grilled spec + plan complete. IDs continue the
-> shared space (T303+). **Build sequenced AFTER 015** (US2 reuses `training/scoring/`); the US1 capture
-> extension can proceed in parallel. Tests included (project pattern: importlib-load + injected scorer/
-> store fakes, plus on-hardware SCs).
+> **Status (2026-06-30):** **BUILT (offline) — on-hardware SCs pending Kurt's GPU box.** Built on master
+> after 015 merged (reuses `training/scoring/`). All code + offline unit tests landed and green (162
+> passed / 31 skipped, no regression). On-hardware SCs (SC-094/095/096/098 — real per-modality capture +
+> the challenger load under the lease + `nvidia-smi` one-model) run on the RTX 5070 Ti box; they skip
+> cleanly offline. IDs continue the shared space (T303+).
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -16,7 +17,7 @@ contracts/shadow-replay-endpoint.md, contracts/capture-extension.md, quickstart.
 
 ## Phase 1: Setup — config knobs (D2)
 
-- [ ] **T303** Add the capture-policy config to `.env.example` + `gateway/app/quality.py` reads:
+- [x] **T303** Add the capture-policy config to `.env.example` + `gateway/app/quality.py` reads:
   `SHADOW_CAPTURE_SAMPLE` (rate), `SHADOW_CAPTURE_CAP_N` (per-modality ring-buffer cap),
   `SHADOW_CAPTURE_TTL_S` (retention), all behind the existing `QUALITY_CAPTURE_IO` opt-in. Document the
   privacy + Principle-III rationale.
@@ -25,9 +26,9 @@ contracts/shadow-replay-endpoint.md, contracts/capture-extension.md, quickstart.
 
 ## Phase 2: Foundational — capture storage primitives (BLOCKS US1)
 
-- [ ] **T304** Pure policy functions in `gateway/app/quality.py`: `should_capture(modality)` (sampling +
+- [x] **T304** Pure policy functions in `gateway/app/quality.py`: `should_capture(modality)` (sampling +
   cap admission) and a TTL/cap **prune** helper — unit-testable without I/O.
-- [ ] **T305** Capture storage: write a **recoverable input** record under a new `inputs/` prefix keyed by
+- [x] **T305** Capture storage: write a **recoverable input** record under a new `inputs/` prefix keyed by
   `prediction_id` (alongside `predictions/`/`labels/`), reusing 013's fire-and-forget + fail-open path
   (FR-146) and the `_log_sem` backpressure. Lazy prune (cap/TTL) on write.
 
@@ -42,13 +43,13 @@ contracts/shadow-replay-endpoint.md, contracts/capture-extension.md, quickstart.
 **Independent Test**: with capture on, serve per-modality requests → bounded recoverable inputs stored;
 capture off → none; serving latency unaffected.
 
-- [ ] **T306** [P] [US1] `tests/test_capture_policy.py` — sampling/cap admission + TTL prune (pure fns);
+- [x] **T306** [P] [US1] `tests/test_capture_policy.py` — sampling/cap admission + TTL prune (pure fns);
   opt-in off ⇒ nothing stored; bound respected.
-- [ ] **T307** [US1] Wire the **recoverable input** into `gateway/app/routers/infer.py` + `stream.py`
+- [x] **T307** [US1] Wire the **recoverable input** into `gateway/app/routers/infer.py` + `stream.py`
   (prompt — already passed; ensure it routes to the new capture under the policy).
-- [ ] **T308** [P] [US1] Wire `gateway/app/routers/vision.py` to capture the **image** (b64/bytes) — was a
+- [x] **T308** [P] [US1] Wire `gateway/app/routers/vision.py` to capture the **image** (b64/bytes) — was a
   SHA hash only — under the policy.
-- [ ] **T309** [P] [US1] Wire `gateway/app/routers/transcribe.py` to capture the **audio** under the policy.
+- [x] **T309** [P] [US1] Wire `gateway/app/routers/transcribe.py` to capture the **audio** under the policy.
 - [ ] **T310** [US1] On-hardware: capture on → bounded recoverable inputs per modality (cap/TTL enforced);
   capture off → none; serving latency unchanged (**SC-094**).
 
@@ -66,17 +67,17 @@ champion-logged on the same window; one model in VRAM; gate unchanged.
 
 > **Depends on 015** (`training/scoring/` per-modality scorers).
 
-- [ ] **T311** [P] [US2] `tests/test_shadow_window.py` — `captured ∩ labeled` window resolution +
+- [x] **T311** [P] [US2] `tests/test_shadow_window.py` — `captured ∩ labeled` window resolution +
   newest-`WINDOW_N` selection (injected store).
-- [ ] **T312** [P] [US2] `tests/test_shadow_verdict.py` — advisory verdict math: challenger-replay vs
+- [x] **T312** [P] [US2] `tests/test_shadow_verdict.py` — advisory verdict math: challenger-replay vs
   champion-logged, like-for-like metric/direction, `advisory:true`, never gates.
-- [ ] **T313** [US2] `gateway/app/shadow.py` (NEW): resolve the replay window (captured∩labeled), read the
+- [x] **T313** [US2] `gateway/app/shadow.py` (NEW): resolve the replay window (captured∩labeled), read the
   **champion's logged quality** on it (013, no re-run — FR-149), dispatch the trainer job, persist/read the
   verdict (`results` `shadow/` prefix and/or MLflow).
-- [ ] **T314** [US2] `training/flows/shadow_replay.py` (NEW): trainer-side job — **acquire the lease**, load
+- [x] **T314** [US2] `training/flows/shadow_replay.py` (NEW): trainer-side job — **acquire the lease**, load
   the challenger's served artifact, score over the replay corpus via **015's scorer** (replay rows as the
   source), release; return per-metric value. **One model in VRAM** (FR-148).
-- [ ] **T315** [US2] `gateway/app/routers/models.py`: `POST /models/{name}/shadow-replay` (dispatch, `202`)
+- [x] **T315** [US2] `gateway/app/routers/models.py`: `POST /models/{name}/shadow-replay` (dispatch, `202`)
   + `GET /models/{name}/shadow-replay/{id}` (verdict) per contracts/shadow-replay-endpoint.md; BFF
   allowlist if surfaced in the UI.
 - [ ] **T316** [US2] On-hardware: replay a challenger → advisory verdict vs champion-logged on the same
@@ -92,9 +93,9 @@ champion-logged on the same window; one model in VRAM; gate unchanged.
 
 **Independent Test**: `< MIN_PAIRS` captured∩labeled → `insufficient_data`; capture off → `no_corpus`.
 
-- [ ] **T317** [P] [US3] `tests/test_shadow_insufficient.py` — `< MIN_PAIRS` ⇒ insufficient_data; capture
+- [x] **T317** [P] [US3] `tests/test_shadow_insufficient.py` — `< MIN_PAIRS` ⇒ insufficient_data; capture
   disabled ⇒ no_corpus; modality with no captured inputs ⇒ clear refusal.
-- [ ] **T318** [US3] Implement the guards in `gateway/app/shadow.py` + the endpoint (FR-152) per the
+- [x] **T318** [US3] Implement the guards in `gateway/app/shadow.py` + the endpoint (FR-152) per the
   contract's response table.
 - [ ] **T319** [US3] On-hardware: insufficient + no-corpus paths return explicit statuses, never a verdict
   (**SC-098**).
@@ -105,10 +106,10 @@ champion-logged on the same window; one model in VRAM; gate unchanged.
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] **T320** [P] Docs: README (shadow-replay + the capture toggles), `monitoring/README.md` (the
+- [x] **T320** [P] Docs: README (shadow-replay + the capture toggles), `monitoring/README.md` (the
   production-traffic comparison alongside 013 quality); flip spec/plan/tasks Status → BUILT.
-- [ ] **T321** No-regression: full **001–015** suite green (GPU-tenant tests in isolation) (**SC-099**).
-- [ ] **T322** [P] Confirm **no new dependency** (reuses 013 logging + 015 scorers + 011 metrics); update
+- [x] **T321** No-regression: full **001–015** suite green (GPU-tenant tests in isolation) (**SC-099**).
+- [x] **T322** [P] Confirm **no new dependency** (reuses 013 logging + 015 scorers + 011 metrics); update
   the deps note. Verify the gate (011) is byte-for-byte unchanged.
 - [ ] **T323** PR + **dual-bot review loop** (`@claude` + `@codex`) → fix → merge when clean.
 

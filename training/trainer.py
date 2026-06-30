@@ -58,7 +58,8 @@ _lock = threading.Lock()           # one run OR study OR batch at a time (shared
 _runs: dict = {}                   # run_id -> job record
 _studies: dict = {}                # study_id -> study record (012 HPO)
 _batches: dict = {}                # batch_id -> batch record (014 batch inference)
-_active: str | None = None         # the run_id / study_id / batch_id currently holding the daemon slot
+_shadows: dict = {}                # shadow_id -> shadow-replay record (016)
+_active: str | None = None         # the run/study/batch/shadow id currently holding the daemon slot
 
 
 def _gpu_free_mib():
@@ -185,6 +186,27 @@ def _batch_worker(batch_id: str, req: dict):
             _active = None  # release the daemon slot (no GPU lease was held — serving owns VRAM)
 
 
+def _shadow_worker(shadow_id: str, req: dict):
+    """Run one shadow-replay (016 US2): load the challenger's served artifact under the **GPU lease**
+    (one model in VRAM, Principle II — like /train, this IS a GPU tenant), score it over the captured∩
+    labeled replay window via 015's scorer, and persist the advisory verdict. The champion is not re-run
+    (its predictions are logged — FR-149). Releases the lease + the daemon slot on completion/failure."""
+    global _active
+    rec = _shadows[shadow_id]
+    try:
+        rec["status"] = "running"
+        from flows.shadow_replay import replay_job
+        out = replay_job(req["name"], req["champion_version"], req["challenger"], req["modality"],
+                         shadow_id=shadow_id, window_n=req.get("window_n"))
+        rec.update(status="succeeded", result=out)
+    except Exception as e:
+        rec.update(status="failed", error=f"{type(e).__name__}: {e}")
+    finally:
+        with _lock:
+            gpu_lease.release(LEASE_TENANT)  # free the single GPU slot (the challenger artifact is gone)
+            _active = None
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body):
         data = json.dumps(body).encode()
@@ -231,6 +253,10 @@ class Handler(BaseHTTPRequestHandler):
             bid = self.path.split("/batch/", 1)[1]
             rec = _batches.get(bid)
             return self._send(200 if rec else 404, rec or {"error": f"no batch {bid}"})
+        if self.path.startswith("/shadow-replay/"):
+            sid = self.path.split("/shadow-replay/", 1)[1]
+            rec = _shadows.get(sid)
+            return self._send(200 if rec else 404, rec or {"error": f"no shadow-replay {sid}"})
         return self._send(404, {"error": "not found"})
 
     def _post_study(self):
@@ -311,11 +337,51 @@ class Handler(BaseHTTPRequestHandler):
             raise
         return self._send(202, {"batch_id": batch_id, "status": "queued"})
 
+    def _post_shadow(self):
+        """Dispatch a shadow-replay (016 US2). The gateway has already resolved the champion + guarded the
+        window; this loads the challenger under the GPU lease (a one-model-in-VRAM tenant, like /train),
+        scores it, and persists the advisory verdict. Acquire the lease BEFORE taking the slot so a busy
+        GPU refuses (409) rather than the worker hitting OOM mid-load."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "invalid JSON"})
+        for f in ("name", "challenger", "champion_version", "modality", "shadow_id"):
+            if not req.get(f):
+                return self._send(400, {"error": f"missing field: {f}"})
+        with _lock:
+            global _active
+            if _active is not None:
+                return self._send(409, {"error": f"trainer busy with {_active}"})
+            try:
+                gpu_lease.acquire(LEASE_TENANT, est_gb=TRAIN_EST_GB, vram_budget_gb=VRAM_GB)
+            except gpu_lease.LeaseHeld as e:
+                holder = (e.holder or {}).get("tenant", "another GPU tenant")
+                return self._send(409, {"error": f"GPU busy: {holder} holds the GPU "
+                                                 "(one-model-in-VRAM). Let it idle out, then retry."})
+            except gpu_lease.VramExceeded as e:
+                return self._send(507, {"error": str(e)})
+            shadow_id = req["shadow_id"]
+            _shadows[shadow_id] = {"shadow_id": shadow_id, "status": "queued", "request": req,
+                                   "result": None, "error": None}
+            _active = shadow_id
+        try:
+            threading.Thread(target=_shadow_worker, args=(shadow_id, req), daemon=True).start()
+        except BaseException:
+            with _lock:
+                gpu_lease.release(LEASE_TENANT)
+                _active = None
+            raise
+        return self._send(202, {"shadow_id": shadow_id, "status": "queued"})
+
     def do_POST(self):
         if self.path == "/study":
             return self._post_study()
         if self.path == "/batch":
             return self._post_batch()
+        if self.path == "/shadow-replay":
+            return self._post_shadow()
         if self.path != "/train":
             return self._send(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length", 0))

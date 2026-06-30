@@ -142,8 +142,12 @@ async def infer_stream(req: StreamRequest):
                         version = served["version"] if served else None
                     except Exception:
                         version = None
-                    quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
-                                           req.prompt, None)
+                    pid = quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
+                                                 req.prompt, None)
+                    # 016 (FR-146): capture the prompt under the bounded opt-in policy. Streamed output
+                    # isn't logged (prediction=None), so the shadow-replay window resolver excludes these
+                    # from the champion-scorable corpus — but the prompt is captured for completeness.
+                    quality.capture_input(pid, "text-generation", req.prompt)
 
                 try:
                     asyncio.ensure_future(_log())

@@ -3,16 +3,21 @@
 Handlers are sync `def` on purpose — the MLflow client is blocking, so FastAPI runs each
 in its threadpool rather than stalling the event loop.
 """
+import os
+import uuid
 from typing import Dict, Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import evaluation, registry
+from .. import evaluation, quality, registry, shadow
 
 router = APIRouter()
+
+TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 
 REGISTRY_OPS = Counter("gateway_registry_ops_total", "Model registry operations", ["op", "status"])
 
@@ -132,3 +137,99 @@ async def compare(name: str, req: CompareRequest):
         raise HTTPException(status_code=400, detail=f"compare error: {e}")
     REGISTRY_OPS.labels(op="compare", status="ok").inc()
     return res
+
+
+class ShadowReplayRequest(BaseModel):
+    challenger: str                       # version to replay against the champion's logged traffic
+    window_n: Optional[int] = None        # newest-N captured∩labeled pairs (default QUALITY_WINDOW_N)
+    modality: Optional[str] = None        # auto-resolved from the @serving version's task tag if omitted
+
+
+def _serving_modality(name: str, version: str) -> Optional[str]:
+    """The registry `task` tag of `name@version` (the modality), best-effort."""
+    try:
+        for v in registry.list_versions(name):
+            if str(v.get("version")) == str(version):
+                return (v.get("tags") or {}).get("task")
+    except Exception:
+        return None
+    return None
+
+
+def _prepare_shadow(name: str, modality_hint: Optional[str], window_n: Optional[int]) -> dict:
+    """Resolve the champion (@serving) + modality and run the 016 guards (blocking registry + store I/O,
+    so call off the event loop). Returns the prepare() result augmented with the champion version,
+    normalized modality, and a fresh shadow id."""
+    served = registry.get_serving(name)
+    if not served or not served.get("version"):
+        raise shadow.ShadowError(f"{name} has no @serving champion to replay against")
+    champion_version = served["version"]
+    modality = modality_hint or _serving_modality(name, champion_version)
+    if not modality:
+        raise shadow.ShadowError(
+            f"cannot determine the modality of {name}@{champion_version} — pass `modality` explicitly")
+    prep = shadow.prepare(name, champion_version, modality, window_n=window_n)
+    prep["champion_version"] = str(champion_version)
+    prep["modality"] = quality.normalize_modality(modality)
+    prep["shadow_id"] = uuid.uuid4().hex[:12]
+    return prep
+
+
+@router.post("/models/{name}/shadow-replay", status_code=202)
+async def shadow_replay(name: str, req: ShadowReplayRequest):
+    """016 US2: replay a challenger against the champion's logged production traffic (advisory only —
+    never touches the promotion gate, SC-097). The gateway resolves the champion + guards the captured∩
+    labeled window, then dispatches a trainer-side job that loads the challenger under the GPU lease (one
+    model in VRAM) and scores it; the champion is read from logged predictions (no re-run). Poll
+    `GET .../shadow-replay/{id}` for the verdict."""
+    try:
+        prep = await run_in_threadpool(_prepare_shadow, name, req.modality, req.window_n)
+    except shadow.ShadowError as e:
+        REGISTRY_OPS.labels(op="shadow", status="refused").inc()
+        raise HTTPException(status_code=409, detail=str(e))
+    except registry.RegistryError as e:
+        raise HTTPException(status_code=502, detail=f"registry error: {e}")
+
+    if prep["status"] != "ready":
+        # no_corpus / inputs_not_captured / insufficient_data → a structured 409 (no job dispatched, FR-152).
+        REGISTRY_OPS.labels(op="shadow", status=prep["status"]).inc()
+        raise HTTPException(status_code=409, detail={k: v for k, v in prep.items() if k != "pairs"})
+
+    payload = {"shadow_id": prep["shadow_id"], "name": name, "challenger": req.challenger,
+               "champion_version": prep["champion_version"], "modality": prep["modality"],
+               "window_n": prep["n_pairs"]}
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.post(f"{TRAINER_URL}/shadow-replay", json=payload)
+        except httpx.HTTPError as e:
+            REGISTRY_OPS.labels(op="shadow", status="unavailable").inc()
+            raise HTTPException(status_code=503, detail=f"training daemon unreachable at {TRAINER_URL}: {e}")
+    if r.status_code == 409:
+        REGISTRY_OPS.labels(op="shadow", status="busy").inc()
+        raise HTTPException(status_code=409, detail=r.json().get("error", "trainer busy"))
+    if r.status_code not in (200, 202):
+        REGISTRY_OPS.labels(op="shadow", status="error").inc()
+        raise HTTPException(status_code=502, detail=f"trainer error {r.status_code}: {r.text[:200]}")
+    REGISTRY_OPS.labels(op="shadow", status="queued").inc()
+    return {"shadow_id": prep["shadow_id"], "status": "queued",
+            "window_n": prep["n_pairs"], "champion_version": prep["champion_version"],
+            "challenger": req.challenger, "modality": prep["modality"]}
+
+
+@router.get("/models/{name}/shadow-replay/{shadow_id}")
+async def get_shadow_replay(name: str, shadow_id: str):
+    """The advisory verdict for a dispatched shadow-replay (016). Prefers the durable verdict persisted in
+    the `results` bucket; falls back to the trainer's live job status while it is still running."""
+    verdict = await run_in_threadpool(shadow.read_verdict, shadow_id)
+    if verdict is not None:
+        return verdict
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.get(f"{TRAINER_URL}/shadow-replay/{shadow_id}")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=503, detail=f"training daemon unreachable: {e}")
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"no shadow-replay {shadow_id}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"trainer error {r.status_code}: {r.text[:200]}")
+    return r.json()

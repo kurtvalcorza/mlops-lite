@@ -295,6 +295,33 @@ complementing (not replacing) the PSI signal.
 - **Dependency-light.** Pure-Python + the 011 metric libs; `monitoring.py` (PSI) is untouched, and
   quality is CPU-side aggregation off the request path — never a second resident model (Principle II).
 
+## Shadow-replay champion-challenger (016 — production-traffic evaluation)
+
+011's `compare()` judges a challenger on a fixed held-out benchmark; **016** judges it on the **real
+traffic the champion actually served**. It is **advisory** — it never touches the 011/015 promotion gate
+(production labels are sparse/delayed, so gating on them would stall promotions). Scope = the
+labeled-prediction modalities **LLM / vision / ASR**.
+
+- **Recoverable input capture** — 013's prediction logging is extended (behind the `QUALITY_CAPTURE_IO`
+  opt-in, under a **sampled + capped + TTL** policy — `SHADOW_CAPTURE_*`) to store the *recoverable* served
+  input (prompt / image / audio — vision was a SHA hash only, ASR nothing) under an `inputs/<modality>/`
+  prefix. Fire-and-forget + fail-open (never affects serving), bounded on the constrained drive.
+- **`POST /models/{name}/shadow-replay {challenger}`** dispatches an async **trainer-side** job: it loads
+  the challenger's served artifact **under the single GPU lease** (one model in VRAM, sequential — 015's
+  in-process scorers) and scores it over the **captured ∩ labeled** replay window; the **champion is not
+  re-run** (its predictions are already logged — 013). The job persists an advisory per-metric verdict
+  (`results` `shadow/` prefix); `GET /models/{name}/shadow-replay/{id}` returns it.
+- **Honest degradation** — `< QUALITY_MIN_PAIRS` captured∩labeled pairs → `insufficient_data`; capture
+  disabled → `no_corpus`; a modality with no captured inputs → a clear refusal — never a misleading verdict.
+
+```bash
+curl -X POST localhost:8080/models/<name>/shadow-replay -H "X-API-Key: $KEY" \
+  -d '{"challenger":"3"}'                                                  # → 202 {shadow_id, window_n}
+curl localhost:8080/models/<name>/shadow-replay/<shadow_id> -H "X-API-Key: $KEY"  # → advisory verdict
+```
+
+No new dependency / service — reuses 013's logging, 015's scorers, and 011's pure-Python metrics.
+
 ## Batch inference & data-validation gates (014)
 
 014 closes the two open lifecycle edges — offline scoring and pre-training readiness:
@@ -432,4 +459,5 @@ and served live at `http://localhost:8080/docs`.
 | 012 | hyperparameter-optimization | Optuna study over the fine-tune path, optimizing 011's eval metric |
 | 013 | quality-monitoring | Prediction + ground-truth logging → windowed quality → breach-retrain |
 | 014 | batch-and-validation | Offline batch inference + pre-training data-validation gates |
+| 016 | shadow-replay | Production-traffic champion-challenger: bounded recoverable-input capture + advisory shadow-replay verdict (reuses 013 logging + 015 scorers; never gates) |
 | 015 | on-demand-version-loading | Score-at-registration: every fine-tune logs its eval metric in-process; gate/compare/HPO read logged metrics; `/evaluate` guard (closes SC-068) |

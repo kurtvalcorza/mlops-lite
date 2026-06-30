@@ -1,6 +1,6 @@
 # Implementation Plan: Shadow-Replay Champion-Challenger
 
-**Branch**: `016-shadow-replay` | **Date**: 2026-06-30 | **Spec**: [spec.md](spec.md)
+ **Branch**: `016-shadow-replay`<br>**Status**: **BUILT (offline) — on-hardware SCs pending the operator.** | **Date**: 2026-06-30 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/016-shadow-replay/spec.md` (DRAFT — GRILLED).
 

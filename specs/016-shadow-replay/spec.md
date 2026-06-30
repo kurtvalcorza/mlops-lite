@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-30
 
-**Status**: **DRAFT — GRILLED (2026-06-30), build-ready** (pending plan/tasks).
+**Status**: **BUILT (offline, 2026-06-30) — on-hardware SCs (SC-094/095/096/098) pending the RTX 5070 Ti box.** Code + offline unit tests landed and green (no regression); advisory verdict never gates.
 
 **Input**: The deferred half of 011's champion-challenger. 011 compares champion vs challenger on a fixed
 **held-out benchmark**; it explicitly deferred **shadow-replay** — re-scoring a challenger against

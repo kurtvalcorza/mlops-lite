@@ -6,18 +6,33 @@ contention: the ASR supervisor returns 409 when another GPU tenant holds the lea
 VRAM can't admit the model — both surfaced here with their hints. Audio is carried as base64 in JSON
 (mirroring /vision/classify); up_all.ps1 injects the daemon IP via ASR_URL.
 """
+import asyncio
 import base64
 import os
+import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
+
+from .. import quality, registry
 
 router = APIRouter()
 
 ASR_URL = os.getenv("ASR_URL", "http://host.docker.internal:8095")
 ASR_REQUESTS = Counter("gateway_transcribe_total", "Transcription requests", ["status"])
+ASR_SERVING_MODEL = os.getenv("ASR_SERVING_MODEL")  # prefer this name when several asr models are promoted
+
+
+def _resolve_asr_version() -> tuple:
+    """Best-effort (model_name, version) currently serving asr, for prediction logging — never raises."""
+    try:
+        target = registry.resolve_serving_target("asr", ASR_SERVING_MODEL)
+        return (target["name"], target["version"]) if target else (None, None)
+    except Exception:
+        return (None, None)
 
 
 class TranscribeRequest(BaseModel):
@@ -51,7 +66,26 @@ async def transcribe(req: TranscribeRequest):
         ASR_REQUESTS.labels(status="error").inc()
         raise HTTPException(status_code=502, detail=f"ASR service error {r.status_code}: {r.text[:200]}")
     ASR_REQUESTS.labels(status="ok").inc()
-    return r.json()
+    data = r.json()
+    # 013/016: log the served transcription off the request path (fire-and-forget, fail-open) so it can be
+    # scored against a delayed label, and capture the recoverable AUDIO under the bounded opt-in policy so
+    # the ASR champion can be shadow-replayed over real traffic (016 FR-146). The prediction id is returned
+    # to the caller for label attachment; the registry resolve + store writes run off the response path.
+    pid = (data.get("prediction_id") if isinstance(data, dict) else None) or uuid.uuid4().hex
+
+    async def _log():
+        name, version = await run_in_threadpool(_resolve_asr_version)
+        text = data.get("text") if isinstance(data, dict) else None
+        quality.log_prediction(name, version, "asr", req.filename, text, prediction_id=pid)
+        quality.capture_input(pid, "asr", req.audio_b64)
+
+    try:
+        asyncio.ensure_future(_log())
+    except Exception:  # never let logging setup affect the served response (fail-open)
+        pass
+    if isinstance(data, dict):
+        data = {**data, "prediction_id": pid}
+    return data
 
 
 @router.get("/transcribe/health")
