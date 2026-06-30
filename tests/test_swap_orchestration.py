@@ -118,6 +118,19 @@ def test_unload_now_failure_is_a_swap_error():
         raise AssertionError("expected SwapError when unload-now returns non-200")
 
 
+def test_unload_now_busy_body_is_a_swap_error():
+    # the holder returns 200 but couldn't evict (vision's in-process model refuses a hard-cut to keep
+    # one-model-in-VRAM) → status "busy" must be a SwapError, never a "proceed onto an occupied GPU".
+    state = StateSeq({"holder": "vision", "resident": True})
+    post = PostRecorder(status=200, body={"status": "busy", "detail": "did not drain"})
+    try:
+        run(m.preempt_if_needed("llm", state_fn=state, http_post=post, sleep=_nosleep))
+    except m.SwapError as e:
+        assert "did not unload" in str(e)
+    else:
+        raise AssertionError("expected SwapError when unload-now returns a non-unloaded status")
+
+
 def test_lease_never_frees_is_a_swap_error():
     # holder stays resident forever after unload-now → wait-for-free times out.
     state = StateSeq({"holder": "llm", "resident": True})  # always returns the holder

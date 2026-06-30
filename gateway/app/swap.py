@@ -108,7 +108,13 @@ async def _unload_holder(holder: str, url: str, http_post, drain_timeout_s: floa
         raise SwapError(f"could not reach {holder} supervisor to unload-now: {e}") from e
     if status != 200:
         raise SwapError(f"{holder} unload-now failed ({status}): {str(body)[:200]}")
-    return body if isinstance(body, dict) else {}
+    result = body if isinstance(body, dict) else {}
+    # The supervisor returns 200 even when it COULDN'T evict (e.g. the in-process vision model refuses a
+    # hard-cut to preserve one-model-in-VRAM → status "busy"). Only "unloaded"/"idle" mean the GPU is
+    # free; anything else must be a SwapError so we never forward the target onto a still-occupied GPU.
+    if result.get("status") not in ("unloaded", "idle"):
+        raise SwapError(f"{holder} did not unload: {result.get('detail') or result}")
+    return result
 
 
 async def _wait_for_free(target_label: str, state_fn, sleep, free_wait_s: float) -> None:

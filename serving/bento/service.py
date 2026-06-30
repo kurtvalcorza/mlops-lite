@@ -183,14 +183,23 @@ class VisionClassifier:
         if self._model is None:
             return {"status": "idle"}
         acquired = self._lock.acquire(timeout=max(float(drain_timeout_s), 0.0))
+        if not acquired:
+            # Vision is an IN-PROCESS torch model — unlike the subprocess llama/whisper supervisors, whose
+            # hard-cut kills the model proc and frees VRAM *before* releasing the lease. Dropping the model
+            # + releasing the lease here, while an in-flight classify is still computing on CUDA under the
+            # lock, would momentarily co-reside with the next tenant (Principle II violation) and risk a
+            # NoneType mid-inference. Vision inference is sub-second, so a drain rarely times out; when it
+            # does we REFUSE the swap (status != unloaded → the gateway surfaces a clean 409) rather than
+            # break the one-model-in-VRAM invariant. The operator can retry the swap.
+            return {"status": "busy", "drained": False, "device": DEVICE,
+                    "detail": "in-flight classify did not drain within the timeout — retry the swap"}
         try:
             if self._model is None:
                 return {"status": "idle"}
-            self._release()  # drops the model + (on GPU) releases the lease
-            return {"status": "unloaded", "drained": acquired, "device": DEVICE}
+            self._release()  # drops the model + (on GPU) releases the lease — under the lock, never racy
+            return {"status": "unloaded", "drained": True, "device": DEVICE}
         finally:
-            if acquired:
-                self._lock.release()
+            self._lock.release()
 
     @bentoml.api
     def info(self) -> dict:
