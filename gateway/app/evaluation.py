@@ -373,7 +373,7 @@ def read_eval(c, name: str, version: Optional[str]) -> Optional[dict]:
 
 def compute_verdict(candidate: Optional[dict], incumbent: Optional[dict], *, mode: str = GATE_MODE,
                     tolerance: float = GATE_TOLERANCE, missing_policy: str = GATE_MISSING_METRIC,
-                    override: bool = False) -> dict:
+                    override: bool = False, incumbent_present: Optional[bool] = None) -> dict:
     """Pure gate math — decide pass / warn / blocked from a candidate vs incumbent EvalResult.
 
     Honours each metric's **direction** (higher/lower-better) and compares **like-for-like** (same
@@ -389,14 +389,26 @@ def compute_verdict(candidate: Optional[dict], incumbent: Optional[dict], *, mod
             "delta": delta,
         }
 
-    if incumbent is None or incumbent.get("value") is None:
+    # Distinguish "nothing is @serving" (genuine first promotion → pass) from "an incumbent IS serving
+    # but was never evaluated" (read_eval returned None for *both*). The caller (gate) passes
+    # incumbent_present from the @serving version's existence; pure callers that hand in an explicit
+    # incumbent dict fall back to inferring it from the dict (backward-compatible).
+    if incumbent_present is None:
+        incumbent_present = incumbent is not None
+    if not incumbent_present:
         return verdict("pass", "no incumbent — first promotion")
+    # An incumbent IS serving: a missing metric on EITHER side → the missing-metric policy, never a
+    # silent pass (FR-104). An unevaluated incumbent must not wave every candidate through the gate.
     if candidate is None or candidate.get("value") is None:
-        flagged = True
-        return (verdict("blocked", "candidate has no logged eval metric", flagged=flagged)
+        return (verdict("blocked", "candidate has no logged eval metric", flagged=True)
                 if missing_policy == "block" and not override
                 else verdict("warn", "candidate has no logged eval metric (missing-metric policy)",
-                             flagged=flagged))
+                             flagged=True))
+    if incumbent is None or incumbent.get("value") is None:
+        return (verdict("blocked", "incumbent has no logged eval metric", flagged=True)
+                if missing_policy == "block" and not override
+                else verdict("warn", "incumbent has no logged eval metric (missing-metric policy)",
+                             flagged=True))
     # like-for-like — a vision metric vs an LLM metric is meaningless (FR-103).
     if (candidate.get("metric") != incumbent.get("metric")
             or candidate.get("modality") != incumbent.get("modality")):
@@ -439,7 +451,8 @@ def gate(name: str, candidate_version: str, *, override: bool = False, mode: str
     candidate = read_eval(c, name, candidate_version)
     incumbent = read_eval(c, name, incumbent_version)
     v = compute_verdict(candidate, incumbent, mode=mode, tolerance=tolerance,
-                        missing_policy=missing_policy, override=override)
+                        missing_policy=missing_policy, override=override,
+                        incumbent_present=incumbent_version is not None)
     # Always expose the candidate's version, even when it has no logged metric (its brief is None) —
     # so the UI can offer an override on a missing-metric block (it needs a version to re-promote).
     if v["candidate"] is None:
