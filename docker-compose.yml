@@ -127,6 +127,12 @@ services:
       AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
       AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
       AWS_DEFAULT_REGION: us-east-1
+      # 011 eval harness — the held-out benchmark fixtures live in the repo (the build context is
+      # ./gateway, so they aren't in the image). Bind-mount them read-only and point the harness at the
+      # mount; they're operator-extendable by design (benchmarks/README → BENCHMARKS_DIR override).
+      BENCHMARKS_DIR: /benchmarks
+    volumes:
+      - ./benchmarks:/benchmarks:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

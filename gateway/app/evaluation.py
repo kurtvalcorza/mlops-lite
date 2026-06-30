@@ -39,6 +39,10 @@ _log = logging.getLogger(__name__)
 # the same dependency-light stance as monitoring.py.
 
 REGISTRY_TASK_TAG = "task"  # mirrors registry.TASK_TAG (009 FR-074); kept local to avoid an eager import
+# The configured text-generation LLM (mirrors serving.SERVING_MODEL; read locally to keep this module
+# import-light/offline-testable). An untagged @serving version of THIS model is text-generation by
+# construction — the eval path falls back to that, exactly as /infer does (see _version_modality).
+SERVING_MODEL = os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 
 # --- configuration (operator-settable; defaults captured in specs/011-evaluation-gates) ------------
 
@@ -266,6 +270,12 @@ def _version_modality(c, name: str, version: str) -> str:
         raise EvalError(f"no version {name}@{version}: {e}") from e
     task = dict(mv.tags or {}).get(REGISTRY_TASK_TAG)
     if not task:
+        # A legacy/untagged version of the configured serving LLM is text-generation by construction:
+        # mirror /infer's SERVING_MODEL fallback so the committed LLM eval modality (011) still resolves
+        # when the @serving version predates 009 tagging (the served LLM can sit on an untagged version).
+        # Any OTHER untagged model genuinely can't be guessed → still an error.
+        if name == SERVING_MODEL:
+            return "text-generation"
         raise EvalError(f"{name}@{version} has no '{REGISTRY_TASK_TAG}' tag — cannot pick a metric")
     return task
 

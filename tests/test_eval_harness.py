@@ -142,7 +142,19 @@ def test_evaluate_rejects_untagged_version():
     except m.EvalError:
         pass
     else:
-        raise AssertionError("expected EvalError when the version has no task tag")
+        raise AssertionError("an untagged non-serving model must error, not guess a modality")
+
+
+def test_untagged_serving_llm_falls_back_to_text_generation():
+    # On-hardware finding: the @serving LLM can sit on a legacy version with no `task` tag (registered
+    # before 009 tagging), which made `evaluate` error "no 'task' tag — cannot pick a metric" — so the
+    # committed LLM eval modality couldn't run against the served model. An untagged version of the
+    # CONFIGURED SERVING_MODEL is text-generation by construction (mirrors /infer's fallback).
+    name = m.SERVING_MODEL
+    client = FakeClient({(name, "9"): FakeMV({}, run_id="r9")})  # no task tag, but it's the serving LLM
+    assert m._version_modality(client, name, "9") == "text-generation"
+    r = m.evaluate(name, "9", predict_fn=_perfect_predict, client=client)
+    assert r["modality"] == "text-generation" and r["metric"] == "task_accuracy" and r["value"] == 1.0
 
 
 if __name__ == "__main__":
