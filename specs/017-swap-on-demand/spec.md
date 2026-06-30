@@ -4,7 +4,9 @@
 
 **Created**: 2026-06-30
 
-**Status**: **DRAFT — GRILLED (2026-06-30), build-ready** (pending plan/tasks).
+**Status**: **BUILT (offline, 2026-06-30) — on-hardware SCs (SC-100/102/103/104) + T342 constitution
+wording pending the operator.** Code + offline unit tests landed and green (no regression). The default
+(non-preempt) path is byte-for-byte 008.
 
 **Input**: The deferred **A2** fast-follow from 008. 008 shipped a **cooperative refuse-if-held** GPU lease:
 when a tenant holds the GPU, another tenant is refused (the Infer tab disables `classify` with a hint —

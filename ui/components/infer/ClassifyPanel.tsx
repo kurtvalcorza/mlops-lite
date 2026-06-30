@@ -8,10 +8,11 @@ import type { PanelProps } from './types';
 type Pred = { label: string; score: number };
 type VisionResp = { predictions: Pred[]; device?: string; model?: string };
 
-// image-classification renderer (009 US1): drop an image → top-5. Lease-governed (008 US3, A1
-// disable-with-hint) — one model in VRAM, so when another GPU tenant holds the lease classify is
-// disabled with a hint. The operator frees the GPU (idle-release or stop serving) to classify; no
-// preemption/swap (A2 deferred). Vision holding the lease itself is fine.
+// image-classification renderer (009 US1): drop an image → top-5. Lease-governed (008 — one model in
+// VRAM). 017/A2: when another *serving* model (LLM/ASR) holds the lease, classify is no longer a dead
+// end — it offers a cost-stating "Swap & classify" that, on confirm, sends preempt=true so the gateway
+// evicts the resident model and loads vision (sequential, one model in VRAM). A **training** holder is
+// never preemptable, so that case keeps the 008/A1 disabled-with-hint. Vision holding the lease is fine.
 export function ClassifyPanel({ serving }: PanelProps) {
   const [preds, setPreds] = useState<Pred[] | null>(null);
   const [device, setDevice] = useState('');
@@ -19,24 +20,24 @@ export function ClassifyPanel({ serving }: PanelProps) {
   const [err, setErr] = useState('');
   const [fileName, setFileName] = useState('');
 
-  const heldByOther = !!serving?.holder && serving.holder !== 'vision';
-  const heldHint =
-    serving?.holder === 'llm'
-      ? 'GPU busy: LLM resident'
-      : serving?.holder === 'training'
-        ? 'GPU busy: training run active'
-        : `GPU busy: ${serving?.holder} resident`;
+  const holder = serving?.holder;
+  const heldByOther = !!holder && holder !== 'vision';
+  const heldByTraining = holder === 'training';
+  // A serving holder (LLM/ASR) is swappable; a training run is not (017 FR-155) → stay disabled.
+  const swappable = heldByOther && !heldByTraining;
+  const blocked = heldByOther && !swappable; // training holder → no swap offered
+  const holderLabel = holder === 'llm' ? 'LLM' : holder === 'asr' ? 'ASR' : String(holder);
 
   const handleFile = useCallback(
-    async (file: File) => {
-      if (heldByOther) return; // belt-and-suspenders: the input is disabled when held
+    async (file: File, preempt = false) => {
+      if (blocked) return; // training holds the GPU — never preempted
       setErr('');
       setPreds(null);
       setFileName(file.name);
       setBusy(true);
       try {
         const b64 = await toBase64(file);
-        const res = await gwPost<VisionResp>('vision/classify', { image_b64: b64 });
+        const res = await gwPost<VisionResp>('vision/classify', { image_b64: b64, preempt });
         setPreds(res.predictions || []);
         setDevice(res.device || '');
       } catch (e) {
@@ -45,7 +46,22 @@ export function ClassifyPanel({ serving }: PanelProps) {
         setBusy(false);
       }
     },
-    [heldByOther],
+    [blocked],
+  );
+
+  // On a swappable holder, confirm the cost before sending preempt=true; otherwise classify normally.
+  const onPick = useCallback(
+    (file: File) => {
+      if (blocked) return;
+      if (swappable) {
+        if (window.confirm(`Evict the resident ${holderLabel} model (~2.5s reload) and classify?`)) {
+          handleFile(file, true);
+        }
+        return;
+      }
+      handleFile(file, false);
+    },
+    [blocked, swappable, holderLabel, handleFile],
   );
 
   return (
@@ -54,31 +70,38 @@ export function ClassifyPanel({ serving }: PanelProps) {
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
-          if (heldByOther) return;
+          if (blocked) return;
           const f = e.dataTransfer.files?.[0];
-          if (f) handleFile(f);
+          if (f) onPick(f);
         }}
-        aria-disabled={heldByOther}
+        aria-disabled={blocked}
         className={
           'hairline flex h-32 flex-col items-center justify-center rounded-sm bg-soft text-caption-md text-mute ' +
-          (heldByOther ? 'cursor-not-allowed opacity-40' : 'cursor-pointer')
+          (blocked ? 'cursor-not-allowed opacity-40' : 'cursor-pointer')
         }
       >
         <input
           type="file"
           accept="image/*"
           className="hidden"
-          disabled={heldByOther}
+          disabled={blocked}
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f) handleFile(f);
+            if (f) onPick(f);
           }}
         />
-        {heldByOther ? (
+        {blocked ? (
           <>
             <span className="st-danger">[!]</span>
-            <span className="mt-1">{heldHint}</span>
-            <span className="mt-1 text-ash">free the GPU (idle-release or stop serving) to classify</span>
+            <span className="mt-1">GPU busy: training run active</span>
+            <span className="mt-1 text-ash">training is never preempted — wait for it to finish</span>
+          </>
+        ) : swappable ? (
+          <>
+            <span className="st-warn">[⇄]</span>
+            <span className="mt-1">Swap &amp; classify</span>
+            <span className="mt-1 text-ash">evicts the resident {holderLabel} (~2.5s reload)</span>
+            {fileName && <span className="mt-1 text-ash">{fileName}</span>}
           </>
         ) : (
           <>

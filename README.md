@@ -199,7 +199,31 @@ race-free lease** and moved vision onto the GPU:
   child PID, so an orphaned child keeps the lease held and a dead child frees it even if the
   supervisor lives.
 - **Infer tab** shows a read-only `serving:` status line; `classify` is disabled-with-hint while the
-  GPU is held (swap-on-demand deferred).
+  GPU is held — or offers a **Swap & classify** (017, below) when the holder is another serving model.
+
+## Swap-on-demand (017 — 008's A2 fast-follow)
+
+008 shipped the lease as **cooperative refuse-if-held**: a serving request is refused (`409 GPU busy`)
+while another tenant holds the GPU. 017 adds 008's deferred **A2** — an **operator-confirmed preemptive
+swap for serving models**. A serving request (`/infer`, `/infer/stream`, `/vision/classify`,
+`/transcribe`) may carry an explicit **`preempt: true`**; when a *serving* model is resident, the gateway
+**evicts it and loads the target** — a single sequential swap, **one model in VRAM throughout**.
+
+- **Gateway-brokered** (`gateway/app/swap.py`) — the gateway never holds the lease: it resolves the holder
+  (`/serving/state`), calls the holder's new **`POST /unload-now`** control endpoint, waits for the lease
+  to free, then forwards the request to the target daemon (which acquires + loads). Concurrent
+  `preempt=true` requests serialize on the single lease.
+- **`unload-now` drains, then unloads** — each preemptable supervisor (llama / whisper.cpp / BentoML
+  vision) finishes in-flight request(s) within `SWAP_DRAIN_TIMEOUT_S` (the GPU lock *is* the in-flight
+  detector), then unloads + releases the lease; past the timeout it hard-unloads so a stuck request can't
+  hang the swap. Reuses each supervisor's existing `_unload` + the 008 `gpu_lease.release` — **no new
+  dependency, no new service.**
+- **Training is never preempted** — a `preempt=true` request against a training/HPO/batch holder is
+  **refused** (`409 "training in progress — not preemptable"`); long-running GPU work is never evicted.
+- **Default is byte-for-byte 008** — with `preempt` omitted/false, behavior is unchanged refuse-if-held.
+- **UI** — the Infer tab's `classify` "GPU busy" dead-end becomes a cost-stating **"Swap & classify"**
+  confirm (evicts the resident LLM/ASR, ~2.5s reload) that sends `preempt=true`; a training holder keeps
+  the disabled hint.
 
 ## Evaluation gates (011)
 
@@ -433,3 +457,4 @@ and served live at `http://localhost:8080/docs`.
 | 013 | quality-monitoring | Prediction + ground-truth logging → windowed quality → breach-retrain |
 | 014 | batch-and-validation | Offline batch inference + pre-training data-validation gates |
 | 015 | on-demand-version-loading | Score-at-registration: every fine-tune logs its eval metric in-process; gate/compare/HPO read logged metrics; `/evaluate` guard (closes SC-068) |
+| 017 | swap-on-demand | Operator-confirmed preemptive GPU swap for serving (`preempt=true` → evict resident serving model, load target; training never preempted; default = 008 refuse-if-held) |

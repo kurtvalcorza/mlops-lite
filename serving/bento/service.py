@@ -170,6 +170,28 @@ class VisionClassifier:
         preds = [{"label": lbl, "score": sc} for lbl, sc in zip(labels, scores)]
         return {"model": NAME, "device": DEVICE, "predictions": preds}
 
+    @bentoml.api(route="/unload-now")
+    def unload_now(self, drain_timeout_s: float = 10) -> dict:
+        """017 (FR-156): the gateway's swap control call — drain an in-flight classify within
+        `drain_timeout_s`, then drop the resident model + release the GPU lease so the target serving
+        model can load. `self._lock` is held for the whole duration of a classify (load + GPU op), so
+        acquiring it === drained and blocks new work; on timeout we hard-release (best-effort — vision
+        inference is sub-second, so a clean drain is the norm). Idempotent: not loaded → `idle`.
+
+        Off a GPU (CPU, lease-exempt) there is nothing to swap — drop the model so a later request reloads
+        but report `idle` since no lease was involved."""
+        if self._model is None:
+            return {"status": "idle"}
+        acquired = self._lock.acquire(timeout=max(float(drain_timeout_s), 0.0))
+        try:
+            if self._model is None:
+                return {"status": "idle"}
+            self._release()  # drops the model + (on GPU) releases the lease
+            return {"status": "unloaded", "drained": acquired, "device": DEVICE}
+        finally:
+            if acquired:
+                self._lock.release()
+
     @bentoml.api
     def info(self) -> dict:
         return {"ok": True, "loaded": self._model is not None, "model": NAME,

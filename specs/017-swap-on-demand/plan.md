@@ -4,6 +4,8 @@
 
 **Input**: Feature specification from `specs/017-swap-on-demand/spec.md` (DRAFT — GRILLED). 008's deferred A2.
 
+**Status**: **BUILT (offline) — on-hardware SCs + T342 constitution wording pending the operator.** See tasks.md.
+
 ## Summary
 
 Upgrade 008's **cooperative refuse-if-held** GPU lease to **operator-confirmed preemptive swap for serving

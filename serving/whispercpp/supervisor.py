@@ -165,6 +165,24 @@ def _unload() -> None:
     gpu_lease.release(LEASE_TENANT)  # free the GPU slot for the next tenant (idle-release / failure)
 
 
+def _unload_now(drain_timeout_s: float) -> dict:
+    """017 (FR-156): drain in-flight transcription within a bounded timeout, then unload + release the GPU
+    lease — the gateway's `unload-now` control call during a swap. The GPU `_lock` is held for the whole
+    duration of an in-flight `_do_transcribe`, so acquiring it === drained (no new work can start either);
+    on timeout we hard-unload so a stuck request can't hang the swap. Idempotent: not resident → `idle`."""
+    if not _resident():
+        return {"status": "idle"}
+    acquired = _lock.acquire(timeout=max(drain_timeout_s, 0.0))
+    try:
+        if not _resident():
+            return {"status": "idle"}
+        _unload()
+        return {"status": "unloaded", "drained": acquired}
+    finally:
+        if acquired:
+            _lock.release()
+
+
 def _idle_watcher() -> None:
     while True:
         time.sleep(5)
@@ -280,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path != "/transcribe":
+        if self.path not in ("/transcribe", "/unload-now"):
             self._send(404, {"error": "not found"})
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -288,6 +306,14 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             self._send(400, {"error": "invalid JSON"})
+            return
+        if self.path == "/unload-now":
+            # 017: gateway-only control call during a swap (unauthenticated like the other routes — the
+            # gateway is the auth boundary + only caller on the private WSL network).
+            try:
+                self._send(200, _unload_now(float(body.get("drain_timeout_s", 10))))
+            except Exception as e:
+                self._send(500, {"error": f"unload-now failed: {e}"})
             return
         try:
             self._send(200, _do_transcribe(body))
