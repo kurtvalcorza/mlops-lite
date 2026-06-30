@@ -185,6 +185,37 @@ def _register(output_name, state_dict, categories, run_id, *, backbone, dataset_
     return {"name": output_name, "version": str(mv.version), "source": source}
 
 
+def _score_at_registration(mv, state_dict, categories, backbone, device):
+    """015 (FR-137/139): score the just-registered vision version in-memory. The trained classifier IS
+    the served artifact (009 BentoML loads the same {state_dict, categories}), so rebuild it from the
+    saved weights — equivalent to the in-memory trained model, with the training model + optimizer
+    already freed (one model in VRAM, Principle II) — run the held-out images through it, and log the
+    metric on the version. Scoring failure warns + registers without a metric (does not fail the run)."""
+    import torch  # noqa: F401  (kept explicit so a torch-less import surfaces clearly)
+
+    training_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if training_root not in sys.path:
+        sys.path.insert(0, training_root)
+    from scoring import score_at_registration, vision
+
+    model = None
+    try:
+        model = _build_model(backbone, len(categories), pretrained=False)
+        model.load_state_dict(state_dict)
+        model = model.to(device)
+        model.eval()
+        return score_at_registration(
+            mv["name"], mv["version"], "image-classification",
+            vision.make_predict_fn(model, categories, device), log_fn=_log)
+    except Exception as e:  # noqa: BLE001 — rebuilding the served artifact is part of scoring; a failure
+        _log(f"WARNING: score-at-registration setup failed for {mv['name']}@{mv['version']} "
+             f"(vision): {e} — version registered WITHOUT an eval metric")
+        return None
+    finally:
+        del model
+        free_cuda()
+
+
 @flow(name="vision-finetune")
 def vision_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                          base_model: str | None = DEFAULT_BACKBONE, epochs: int = 3, lr: float = 1e-3,
@@ -225,10 +256,14 @@ def vision_finetune_flow(dataset_name: str, dataset_version: str, output_name: s
                            dataset_name=dataset_name, dataset_version=dataset_version,
                            base_model=backbone, parent_version=parent_version,
                            parent_run_id=parent["run_id"] if parent else None, device=device)
+            eval_result = _score_at_registration(mv, state_dict, categories, backbone, device)
+            if eval_result:
+                mlflow.set_tag("eval_metric", f"{eval_result['metric']}={eval_result['value']}")
         finally:
             free_cuda()  # release VRAM whether training/registration succeeded or raised (Principle II)
         mlflow.set_tag("registered_version", mv["version"])
-        return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params}
+        return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params,
+                "eval": eval_result}
 
 
 if __name__ == "__main__":

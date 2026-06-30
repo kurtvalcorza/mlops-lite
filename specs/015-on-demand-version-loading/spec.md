@@ -4,7 +4,8 @@
 
 **Created**: 2026-06-30
 
-**Status**: **DRAFT — GRILLED (2026-06-30), build-ready** (pending plan/tasks). The grill pivoted the
+**Status**: **BUILT (offline, 2026-06-30) — on-hardware SCs (SC-087/088/089/090/091/092) pending the
+RTX 5070 Ti box.** Code + offline unit tests landed and green (no regression). The grill pivoted the
 approach: instead of teaching every serving daemon to load any requested version on demand (heavy,
 multi-daemon), 015 **scores each model version in-process at registration** so every version is *born*
 with its logged eval metric, and the gate / compare / quality / HPO read those logged metrics. This is

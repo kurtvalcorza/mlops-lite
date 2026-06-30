@@ -3,9 +3,11 @@
 **Input**: Design documents from `specs/015-on-demand-version-loading/` (spec.md, plan.md, research.md,
 data-model.md, contracts/evaluate-guard.md, quickstart.md).
 
-> **Status (2026-06-30):** **PLANNED — not started.** Grilled spec + plan complete; this is the
-> dependency-ordered task list. IDs continue the shared space (T276+). Tests included (the project's
-> pattern: importlib-load + injected scoring seams, plus on-hardware SCs).
+> **Status (2026-06-30):** **BUILT (offline) — on-hardware SCs pending Kurt's GPU box.** All code +
+> offline unit tests landed and green (134 passed / 31 skipped, no regression). The on-hardware SCs
+> (SC-087/088/089/090/091/092, the real llama-server/whisper-cli/torch scoring + `nvidia-smi`
+> one-model-in-VRAM checks, and the live 2-trial HPO study) must run on the RTX 5070 Ti box — they skip
+> cleanly offline. IDs continue the shared space (T276+).
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -15,11 +17,11 @@ data-model.md, contracts/evaluate-guard.md, quickstart.md).
 
 ## Phase 1: Setup — benchmark fixtures + metric finalization (D4)
 
-- [ ] **T276** [P] Add the embeddings held-out fixture `benchmarks/embedding/recall_smoke.jsonl` (tiny,
+- [x] **T276** [P] Add the embeddings held-out fixture `benchmarks/embedding/recall_smoke.jsonl` (tiny,
   `{query, relevant_ids/positives}` shape for recall@k); content-hashed at load.
-- [ ] **T277** [P] Add the ASR held-out fixture `benchmarks/asr/wer_smoke.jsonl` (`{audio_b64, text}`,
+- [x] **T277** [P] Add the ASR held-out fixture `benchmarks/asr/wer_smoke.jsonl` (`{audio_b64, text}`,
   tiny); content-hashed at load.
-- [ ] **T278** Finalize `embedding`/`asr` defaults in `gateway/app/evaluation.py`
+- [x] **T278** Finalize `embedding`/`asr` defaults in `gateway/app/evaluation.py`
   (`DEFAULT_BENCHMARKS` + `METRICS`): wire `embedding→recall@k` (higher-better) and `asr→wer`
   (lower-better) to the new fixtures; confirm directions. Update `benchmarks/README.md` (drop "stub").
 
@@ -30,20 +32,20 @@ metric+direction.
 
 ## Phase 2: Foundational — the in-process scoring module (BLOCKS all stories)
 
-- [ ] **T279** Create `training/scoring/__init__.py` with `score_and_log(name, version, modality,
+- [x] **T279** Create `training/scoring/__init__.py` with `score_and_log(name, version, modality,
   predict_fn, *, client=None)`: load the modality benchmark (repo path — reachable from the native
   trainer), run `predict_fn(rows, modality, version)`, compute the metric via `evaluation.metric_for`,
   and log it on the new version via `evaluation._log_eval`. Assumes the **caller holds the GPU lease**.
-- [ ] **T280** [P] In-process **vision** scorer (`training/scoring/vision.py`): run the in-memory torch
+- [x] **T280** [P] In-process **vision** scorer (`training/scoring/vision.py`): run the in-memory torch
   model over the benchmark images → top-1 labels.
-- [ ] **T281** [P] In-process **embeddings** scorer (`training/scoring/embeddings.py`): encode with the
+- [x] **T281** [P] In-process **embeddings** scorer (`training/scoring/embeddings.py`): encode with the
   in-memory sentence-transformers model → vectors → recall@k.
-- [ ] **T282** [P] Transient **llama.cpp** LLM scorer (`training/scoring/llm.py`): load base GGUF +
+- [x] **T282** [P] Transient **llama.cpp** LLM scorer (`training/scoring/llm.py`): load base GGUF +
   LoRA-GGUF adapter (the adapter the flow just produced) in a short-lived llama.cpp, generate over the
   QA prompts → answers; **load → score → free** (D5). *(Resolve llama-cli vs short-lived llama-server.)*
-- [ ] **T283** [P] Transient **whisper.cpp** ASR scorer (`training/scoring/asr.py`): transcribe the WER
+- [x] **T283** [P] Transient **whisper.cpp** ASR scorer (`training/scoring/asr.py`): transcribe the WER
   fixture via the served ggml in a short-lived whisper.cpp → text; **load → score → free** (D6).
-- [ ] **T284** Lease-hold discipline (`training/trainer.py` / flow glue): scoring runs **inside the
+- [x] **T284** Lease-hold discipline (`training/trainer.py` / flow glue): scoring runs **inside the
   fine-tune's existing lease hold** — the training model (+optimizer) is **freed** (`empty_cache`) before
   any served-artifact scorer loads; never two models resident; release **once** after scoring (D7, FR-140).
 
@@ -59,14 +61,14 @@ VRAM at any instant.
 **Independent Test**: fine-tune two distinct versions → each registers with a distinct logged metric;
 `nvidia-smi` shows ≤ one model resident through train→score.
 
-- [ ] **T285** [P] [US1] `tests/test_score_at_registration.py` — per-modality `score_and_log` logs a
+- [x] **T285** [P] [US1] `tests/test_score_at_registration.py` — per-modality `score_and_log` logs a
   version metric over a tiny fixture with an injected `predict_fn` (offline; assert tags + direction).
-- [ ] **T286** [US1] Wire `score_and_log` into `training/flows/finetune.py` (LLM) **after** GGUF
+- [x] **T286** [US1] Wire `score_and_log` into `training/flows/finetune.py` (LLM) **after** GGUF
   convert + register, **before** lease release (uses the T282 scorer).
-- [ ] **T287** [P] [US1] Wire into `training/flows/vision.py` (T280 scorer).
-- [ ] **T288** [P] [US1] Wire into `training/flows/embeddings.py` (T281 scorer).
-- [ ] **T289** [P] [US1] Wire into `training/flows/asr.py` (T283 scorer).
-- [ ] **T290** [US1] Scoring-failure policy: a fine-tune whose **training** succeeds but **scoring** fails
+- [x] **T287** [P] [US1] Wire into `training/flows/vision.py` (T280 scorer).
+- [x] **T288** [P] [US1] Wire into `training/flows/embeddings.py` (T281 scorer).
+- [x] **T289** [P] [US1] Wire into `training/flows/asr.py` (T283 scorer).
+- [x] **T290** [US1] Scoring-failure policy: a fine-tune whose **training** succeeds but **scoring** fails
   registers the version + **warns** (the gate's missing-metric policy, PR #20, then applies) — does not
   fail the whole run (spec Edge Case).
 - [ ] **T291** [US1] On-hardware: one real fine-tune per modality registers with a logged metric; VRAM
@@ -84,12 +86,12 @@ gone (FR-141/142).
 **Independent Test**: a 2-trial study logs **distinct** objectives + registers the real best, with no
 hostname error.
 
-- [ ] **T292** [P] [US2] Test: the HPO objective reads the **trial's own registered metric** (no daemon
+- [x] **T292** [P] [US2] Test: the HPO objective reads the **trial's own registered metric** (no daemon
   call); `compare` reads both versions' logged metrics with no reload (injected fakes).
-- [ ] **T293** [US2] `training/flows/hpo.py`: objective = the trial's registered version's logged metric
+- [x] **T293** [US2] `training/flows/hpo.py`: objective = the trial's registered version's logged metric
   (produced by US1's `score_and_log`); **remove** the live-predictor-over-HTTP objective path so no
   `host.docker.internal` call occurs (closes finding #4).
-- [ ] **T294** [US2] `gateway/app/evaluation.py` `compare()`: judge from **logged metrics** of champion +
+- [x] **T294** [US2] `gateway/app/evaluation.py` `compare()`: judge from **logged metrics** of champion +
   challenger (no sequential model reload); keep the metric/direction math unchanged.
 - [ ] **T295** [US2] On-hardware: 2-trial HPO study → distinct objectives, best registered, **no**
   `Name or service not known` (**SC-089, SC-090**).
@@ -105,9 +107,9 @@ hostname error.
 
 **Independent Test**: `/evaluate` for a non-`@serving` unscored version → clear error, not a score.
 
-- [ ] **T296** [P] [US3] `tests/test_eval_guard.py` — unscored non-serving version → clear error; a
+- [x] **T296** [P] [US3] `tests/test_eval_guard.py` — unscored non-serving version → clear error; a
   version with a logged metric → returns/uses it; `@serving` version → still scores (per contract).
-- [ ] **T297** [US3] Implement the guard in `gateway/app/routers/models.py` + a helper in
+- [x] **T297** [US3] Implement the guard in `gateway/app/routers/models.py` + a helper in
   `gateway/app/evaluation.py` per `contracts/evaluate-guard.md` (requested ≠ `@serving` AND no logged
   metric → clear `409/422` error).
 - [ ] **T298** [US3] On-hardware: guard returns the error (not a score); `/compare` reads logged metrics
@@ -119,11 +121,11 @@ hostname error.
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] **T299** [P] Docs: README (new "score-at-registration" behavior + the two fixtures), `benchmarks/
+- [x] **T299** [P] Docs: README (new "score-at-registration" behavior + the two fixtures), `benchmarks/
   README.md` (embedding/asr no longer stubs); flip spec/plan/tasks Status → BUILT.
-- [ ] **T300** No-regression: full **001–014** suite green (GPU-tenant tests validated in isolation per the
+- [x] **T300** No-regression: full **001–014** suite green (GPU-tenant tests validated in isolation per the
   single-lease behavior) (**SC-093**).
-- [ ] **T301** [P] Confirm **no new dependency** (the scorers reuse torch / built llama.cpp+whisper.cpp /
+- [x] **T301** [P] Confirm **no new dependency** (the scorers reuse torch / built llama.cpp+whisper.cpp /
   pure-Python metrics); update the deps note.
 - [ ] **T302** PR + **dual-bot review loop** (`@claude` + `@codex`) → fix → merge when clean.
 

@@ -124,12 +124,21 @@ def _set_trial_vram_owner(pid: int) -> None:
 
 
 def _default_eval(name: str, version: str, modality: str) -> dict:
-    """Score a trained candidate with **011's eval harness** (the objective, FR-114). Inherits 011's
-    documented SC-068 limitation: the live serving path scores the resident model, so on-demand
-    per-version loading is the on-hardware step that makes each trial's score truly version-specific —
-    until then, drive a study with an injected `eval_fn` (as the tests do)."""
+    """Read the trial's **own registered version's logged eval metric** as the objective (012 FR-114,
+    015 FR-141). Since 015 every fine-tune scores its model in-process at registration (the trial's
+    `finetune_flow` already logged the metric on the version), so the objective is a pure metric lookup —
+    no serving-daemon call, no `host.docker.internal` hostname the native trainer can't resolve (finding
+    #4 closed, SC-089). Each trial trains a distinct model, so each logs a distinct metric → the study
+    optimizes toward the genuinely best candidate (no degenerate shared-resident-model score, SC-068)."""
     ev = _load_evaluation()
-    return ev.evaluate(name, version)
+    c = ev._client()
+    result = ev.read_eval(c, name, str(version))
+    if result is None or result.get("value") is None:
+        # The trial trained + registered but carries no logged metric — score-at-registration must have
+        # failed (its warn path, T290). A trial with no objective is a FAILED trial, not a worst score.
+        raise HpoError(f"trial version {name}@{version} has no logged eval metric — "
+                       f"score-at-registration (015) did not log one; treating the trial as failed")
+    return result
 
 
 # --- the study runner -----------------------------------------------------------------------------

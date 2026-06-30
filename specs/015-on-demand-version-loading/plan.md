@@ -2,6 +2,8 @@
 
 **Branch**: `015-on-demand-version-loading` | **Date**: 2026-06-30 | **Spec**: [spec.md](spec.md)
 
+**Status**: **BUILT (offline) — on-hardware SCs pending Kurt's GPU box.** See tasks.md.
+
 **Input**: Feature specification from `specs/015-on-demand-version-loading/spec.md` (DRAFT — GRILLED).
 
 ## Summary

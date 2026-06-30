@@ -133,6 +133,20 @@ def _register(model, output_name, run_id, *, base_model, dataset_name, dataset_v
     return {"name": output_name, "version": version, "source": f"models:/{output_name}/{version}"}
 
 
+def _score_at_registration(mv, model):
+    """015 (FR-137/139): score the just-registered embeddings version in-memory. The fine-tuned ST model
+    IS the served artifact (009 embed service loads the same model), so the still-resident `model` scores
+    recall@k over the held-out fixture directly — one model in VRAM (Principle II) — and the metric is
+    logged on the version. Scoring failure warns + registers without a metric (does not fail the run)."""
+    training_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if training_root not in sys.path:
+        sys.path.insert(0, training_root)
+    from scoring import embeddings, score_at_registration
+    return score_at_registration(
+        mv["name"], mv["version"], "embedding",
+        embeddings.make_predict_fn(model), log_fn=_log)
+
+
 @flow(name="embeddings-finetune")
 def embeddings_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
                              base_model: str | None = DEFAULT_BASE, epochs: int = 1, batch_size: int = 16,
@@ -172,10 +186,14 @@ def embeddings_finetune_flow(dataset_name: str, dataset_version: str, output_nam
             mv = _register(model, output_name, run_id, base_model=base, dataset_name=dataset_name,
                            dataset_version=dataset_version, parent_version=parent_version,
                            parent_run_id=parent["run_id"] if parent else None, device=device)
+            eval_result = _score_at_registration(mv, model)
+            if eval_result:
+                mlflow.set_tag("eval_metric", f"{eval_result['metric']}={eval_result['value']}")
         finally:
             free_cuda()  # release VRAM whether training succeeded or failed (Principle II)
         mlflow.set_tag("registered_version", mv["version"])
-        return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params}
+        return {"run_id": run_id, "model": mv, "metrics": metrics, "params": params,
+                "eval": eval_result}
 
 
 if __name__ == "__main__":

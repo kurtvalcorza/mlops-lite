@@ -77,3 +77,24 @@ def score_and_log(name, version, modality, predict_fn, *, benchmark=None, client
         c = client or ev._client()
         ev._log_eval(c, name, version, result)
     return result
+
+
+def score_at_registration(name, version, modality, predict_fn, *, log_fn=print, client=None,
+                          benchmark=None):
+    """Flow-facing wrapper around `score_and_log` with the **scoring-failure policy** (D7 edge / T290):
+    a fine-tune whose *training* succeeded but whose *scoring* fails must NOT fail the whole run — the
+    version still registers, scoring just **warns** and returns None, and the promotion gate's
+    missing-metric policy (PR #20) then applies. Catches broadly on purpose: scoring can fail many
+    unrelated ways (a transient llama-server crash, a missing built binary, an OOM on the served
+    artifact) and none of those should discard a successfully-trained, registered model.
+    """
+    try:
+        res = score_and_log(name, version, modality, predict_fn, benchmark=benchmark, client=client)
+        log_fn(f"scored {name}@{version} at registration: {res['metric']}={res['value']} "
+               f"({res['direction']}-better, benchmark={res['benchmark']}/{res['benchmark_hash']})")
+        return res
+    except Exception as e:  # noqa: BLE001 — register-and-warn is the policy (spec Edge Case / FR-137)
+        log_fn(f"WARNING: score-at-registration failed for {name}@{version} ({modality}): {e} — "
+               f"version registered WITHOUT an eval metric; the promotion gate's missing-metric policy "
+               f"applies")
+        return None

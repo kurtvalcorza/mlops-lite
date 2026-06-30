@@ -1,10 +1,11 @@
-"""011 US3 — offline champion-challenger (T218 / SC-068).
+"""011 US3 champion-challenger, corrected by 015 (SC-090, FR-142).
 
-compare() scores the `@serving` champion and a challenger on the same held-out benchmark and declares
-a per-metric winner. The non-negotiable invariant (Principle II): the two models are loaded
-**sequentially** — at most one resident at any instant. The injected predict_fn doubles as a VRAM
-residency monitor that fails if a second "load" ever overlaps the first, locking the mutex against a
-future refactor to concurrent scoring.
+After 015 every version is scored **at registration**, so `compare()` declares a winner by reading the
+champion's and challenger's **logged eval metrics** — a pure metric lookup, no model reload. This closes
+the SC-068 mislabel where the old live path scored whichever model the serving daemon happened to hold
+(so both legs hit the same resident model and the comparison was degenerate). Loading no model trivially
+preserves the one-model-in-VRAM invariant (Principle II): the residency monitor below proves the
+predictor is **never** called at all.
 """
 import sys
 
@@ -14,83 +15,92 @@ m = load_evaluation()
 VIS = "image-classification"
 
 
-class ResidencyMonitor:
-    """Stands in for the serving path: each call models a sequential load→score→release of ONE model.
-    Records the load order and asserts residency never exceeds 1 (the VRAM mutex)."""
-
-    def __init__(self, scores):
-        self.scores = scores          # version -> the label the "model" predicts for every row
-        self.resident = 0
-        self.max_resident = 0
-        self.order = []
-
-    def __call__(self, rows, modality, version):
-        self.resident += 1
-        self.max_resident = max(self.max_resident, self.resident)
-        self.order.append(version)
-        assert self.resident == 1, "two models resident at once — VRAM mutex violated"
-        try:
-            return [self.scores[version]] * len(rows)  # uniform prediction → deterministic accuracy
-        finally:
-            self.resident -= 1
+def _ev_tags(metric, value, direction, modality, benchmark="vision/shapes_smoke.jsonl", h="hash0"):
+    """The version tags read_eval reads back — what score-at-registration (015) logged on the version."""
+    return {"task": modality, m.TAG_METRIC: metric, m.TAG_VALUE: str(value),
+            m.TAG_DIRECTION: direction, m.TAG_MODALITY: modality,
+            m.TAG_BENCHMARK: benchmark, m.TAG_BENCHMARK_HASH: h}
 
 
-def _client():
+class NeverCalled:
+    """A predictor that fails the test if compare ever loads/scores a model — compare must read logged
+    metrics only (no reload, SC-090)."""
+
+    def __call__(self, *a, **k):
+        raise AssertionError("compare loaded a model — it must read logged metrics only (SC-090)")
+
+
+def _client(champ_val, chall_val, *, metric="accuracy", direction=m.HIGHER, modality=VIS,
+            champ_hash="hash0", chall_hash="hash0"):
     return FakeClient({
-        ("clf", "1"): FakeMV({"task": VIS}, run_id="r1"),   # champion @serving
-        ("clf", "2"): FakeMV({"task": VIS}, run_id="r2"),   # challenger
+        ("clf", "1"): FakeMV(_ev_tags(metric, champ_val, direction, modality, h=champ_hash), run_id="r1"),
+        ("clf", "2"): FakeMV(_ev_tags(metric, chall_val, direction, modality, h=chall_hash), run_id="r2"),
     })
 
 
-def test_challenger_wins_when_more_accurate(monkeypatch):
+def test_challenger_wins_from_logged_metrics(monkeypatch):
     monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
-    # benchmark's first label is the ground-truth the monitor must hit to "be correct".
-    truth = m.load_benchmark(VIS).rows[0]["label"]
-    wrong = "definitely-not-a-label"
-    mon = ResidencyMonitor({"1": wrong, "2": truth})  # champion always wrong, challenger sometimes right
-
-    res = m.compare("clf", "2", predict_fn=mon, client=_client())
+    res = m.compare("clf", "2", predict_fn=NeverCalled(), client=_client(0.5, 0.9))
     assert res["metric"] == "accuracy" and res["direction"] == m.HIGHER
-    assert res["challenger"]["value"] >= res["champion"]["value"]
-    assert res["winner"] == "challenger"
-    # sequential, never concurrent: champion loaded and released before the challenger (SC-068).
-    assert mon.max_resident == 1
-    assert mon.order == ["1", "2"]
+    assert res["champion"]["value"] == 0.5 and res["challenger"]["value"] == 0.9
+    assert res["winner"] == "challenger" and res["delta"] == round(0.9 - 0.5, 6)
+    assert res["benchmark_mismatch"] is False
 
 
 def test_champion_wins_and_tie(monkeypatch):
     monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
-    truth = m.load_benchmark(VIS).rows[0]["label"]
-    champ_better = ResidencyMonitor({"1": truth, "2": "wrong"})
-    assert m.compare("clf", "2", predict_fn=champ_better, client=_client())["winner"] == "champion"
-
-    same = ResidencyMonitor({"1": truth, "2": truth})
-    assert m.compare("clf", "2", predict_fn=same, client=_client())["winner"] == "tie"
+    assert m.compare("clf", "2", client=_client(0.9, 0.4))["winner"] == "champion"
+    assert m.compare("clf", "2", client=_client(0.7, 0.7))["winner"] == "tie"
 
 
-def test_lower_is_better_winner_direction(monkeypatch):
-    """A lower-better metric must invert the winner test — the lower scorer wins."""
+def test_lower_is_better_inverts_winner(monkeypatch):
+    """A lower-better metric (WER) must invert the winner test — the lower scorer wins."""
     monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
-    client = FakeClient({
-        ("asr", "1"): FakeMV({"task": "asr"}, run_id="r1"),
-        ("asr", "2"): FakeMV({"task": "asr"}, run_id="r2"),
-    })
-    # WER benchmark of one item: champion transcribes perfectly (WER 0), challenger errs (WER>0).
-    rows = [{"audio_b64": "x", "text": "the quick brown fox"}]
-    monkeypatch.setattr(m, "load_benchmark", lambda modality, ref=None: m.Benchmark("asr/x", "h", rows))
-
-    def predict(rows, modality, version):
-        return ["the quick brown fox"] if version == "1" else ["the slow brown fox"]
-
-    res = m.compare("asr", "2", predict_fn=predict, client=client)
+    client = _client(0.1, 0.4, metric="wer", direction=m.LOWER, modality="asr")
+    res = m.compare("clf", "2", client=client)  # name is arbitrary here; only the modality tag matters
     assert res["metric"] == "wer" and res["direction"] == m.LOWER
     assert res["winner"] == "champion"  # champion's lower WER wins
+
+
+def test_benchmark_mismatch_flagged(monkeypatch):
+    monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
+    res = m.compare("clf", "2", client=_client(0.5, 0.9, champ_hash="hA", chall_hash="hB"))
+    assert res["benchmark_mismatch"] is True  # scored on different bytes — surfaced, not silent
+
+
+def test_metric_mismatch_refuses(monkeypatch):
+    monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
+    client = FakeClient({
+        ("clf", "1"): FakeMV(_ev_tags("accuracy", 0.8, m.HIGHER, VIS), run_id="r1"),
+        ("clf", "2"): FakeMV(_ev_tags("wer", 0.1, m.LOWER, "asr"), run_id="r2"),
+    })
+    try:
+        m.compare("clf", "2", client=client)
+    except m.EvalError:
+        pass
+    else:
+        raise AssertionError("expected EvalError on a metric/modality mismatch")
+
+
+def test_missing_metric_refuses(monkeypatch):
+    """A version with no logged metric can't be compared — 015 should have scored it at registration."""
+    monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
+    client = FakeClient({
+        ("clf", "1"): FakeMV(_ev_tags("accuracy", 0.8, m.HIGHER, VIS), run_id="r1"),
+        ("clf", "2"): FakeMV({"task": VIS}, run_id="r2"),  # registered but unscored
+    })
+    try:
+        m.compare("clf", "2", client=client)
+    except m.EvalError:
+        pass
+    else:
+        raise AssertionError("expected EvalError when the challenger has no logged metric")
 
 
 def test_compare_requires_a_champion(monkeypatch):
     monkeypatch.setattr(m, "_serving_version", lambda c, name: None)
     try:
-        m.compare("clf", "2", predict_fn=ResidencyMonitor({}), client=_client())
+        m.compare("clf", "2", client=_client(0.5, 0.9))
     except m.EvalError:
         pass
     else:
