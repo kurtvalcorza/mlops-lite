@@ -287,7 +287,10 @@ complementing (not replacing) the PSI signal.
   dataset version against a served model as an **ephemeral Prefect flow on the native daemon**
   (`training/flows/batch_infer.py`), writing content-addressed results back to MinIO. A GPU-backed model
   goes **through the single GPU lease** — acquire once, iterate rows, release at batch end (never a
-  second model in VRAM); CPU/tabular models score off-lease.
+  second model in VRAM); CPU/tabular models score off-lease. *Like 011's `compare` and 012's eval,
+  the batch flow scores against whichever version the serving tenant currently holds* (the request's
+  `model`/`registry_version` are recorded for provenance) — promote/serve the intended version before
+  launching a batch.
 - **Data-validation gates** — lightweight **hand-rolled** checks (schema/columns, null rate, value
   ranges, label balance, row count) over the dataset bytes, gating `finetune_flow` **before**
   `train_lora` so a malformed/empty/schema-drifted dataset fails fast at the edge instead of deep in the

@@ -5,7 +5,7 @@
 **Created**: 2026-06-28
 
 **Status**: **BUILT & MERGED (2026-06-29, PR #17)** — US1–US3. Offline batch inference (`POST /batch`
-+ `GET /batch/{id}` → native `training/flows/batch_infer.py` ephemeral Prefect flow, single GPU lease,
++ `GET /batch/{batch_id}` → native `training/flows/batch_infer.py` ephemeral Prefect flow, single GPU lease,
 content-addressed MinIO results; CPU/tabular off-lease) + hand-rolled data-validation gates
 (`gateway/app/validation.py`) gating `finetune_flow` before `train_lora` + advisory
 `POST /datasets/{name}/{version}/validate`; UI wire-in + BFF allowlist. No new dep/service/stage. See
