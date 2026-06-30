@@ -48,3 +48,22 @@ curl localhost:8080/monitor                          # recent reports
 
 Implementation: [`gateway/app/monitoring.py`](../gateway/app/monitoring.py) (drift + storage) and
 [`gateway/app/routers/monitor.py`](../gateway/app/routers/monitor.py) (API + retrain trigger).
+
+## Output-side: quality monitoring with ground truth (013)
+
+PSI above is **input-distribution** drift only — it can't see whether the model's *predictions* are
+getting worse. 013 adds the **output** half (concept drift), in the same dependency-light style and
+reusing the same retrain trigger:
+
+- Every served prediction is logged fire-and-forget / fail-open with a stable prediction id + the
+  resolved model version (wired into the `infer` / `stream` / `vision` routes).
+- `POST /monitor/labels` attaches **(usually delayed)** ground-truth labels, keyed by prediction id
+  (thin client: [`data/submit_labels.py`](../data/submit_labels.py)).
+- `POST /monitor/quality/check` computes a per-modality quality metric over a time window (reusing
+  011's metric libs), compares it to a **like-for-like baseline**, and on a breach fires the **same**
+  `_launch_retrain` trigger as input-drift (OR-combined, with a cooldown). `GET /monitor/quality`
+  lists reports; the Grafana dashboard carries the quality series alongside `gateway_drift_score`.
+
+Pure-Python + the 011 metric libs; `monitoring.py` (PSI) is untouched and quality is CPU-side
+aggregation off the request path — never a second resident model (Principle II). Implementation:
+[`gateway/app/quality.py`](../gateway/app/quality.py).
