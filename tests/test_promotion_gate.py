@@ -124,6 +124,41 @@ def test_gate_exposes_candidate_version_even_without_a_metric(monkeypatch):
     assert v["verdict"] == "blocked" and v["candidate"] == {"version": "2"}
 
 
+def test_unevaluated_incumbent_is_not_a_silent_pass(monkeypatch):
+    # Live-found regression: an @serving incumbent with NO logged eval metric made read_eval return
+    # None, which the gate read as "no incumbent → pass" — silently waving EVERY candidate through
+    # (the common case: the serving model was seeded/promoted before eval ran). An incumbent that
+    # exists but is unevaluated must hit the missing-metric policy, never a silent pass (FR-104).
+    client = FakeClient({
+        ("clf", "1"): FakeMV({"task": "image-classification"}),  # incumbent @serving, NO metric
+        ("clf", "2"): FakeMV({"task": "image-classification"}),  # candidate, NO metric
+    })
+    monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
+    assert m.gate("clf", "2", client=client)["verdict"] == "warn"                  # default policy: warn+move
+    assert m.gate("clf", "2", client=client, missing_policy="block")["verdict"] == "blocked"
+
+
+def test_unevaluated_incumbent_vs_evaluated_candidate_uses_policy(monkeypatch):
+    # incumbent present but unevaluated, candidate HAS a metric → still the missing-metric policy
+    # (can't compare like-for-like against a missing incumbent metric), exercising the incumbent branch.
+    client = FakeClient({
+        ("clf", "1"): FakeMV({"task": "image-classification"}),  # incumbent @serving, NO metric
+        ("clf", "2"): FakeMV(_tags(_ev(0.95))),                  # candidate evaluated
+    })
+    monkeypatch.setattr(m, "_serving_version", lambda c, name: "1")
+    assert m.gate("clf", "2", client=client)["verdict"] == "warn"
+    assert m.gate("clf", "2", client=client, missing_policy="block")["verdict"] == "blocked"
+
+
+def test_compute_verdict_present_unevaluated_incumbent_is_not_a_silent_pass():
+    # The pure-function seam: incumbent_present=True with a None incumbent dict (unevaluated) must take
+    # the missing-metric policy, not the no-incumbent pass. Default (no flag) stays first-promotion pass.
+    cand = _ev(0.95)
+    assert m.compute_verdict(cand, None, incumbent_present=True)["verdict"] == "warn"
+    assert m.compute_verdict(cand, None, incumbent_present=True, missing_policy="block")["verdict"] == "blocked"
+    assert m.compute_verdict(cand, None)["verdict"] == "pass"  # backward-compatible: no flag → first promotion
+
+
 # --- live wiring leg: every promotion returns a verdict (no ungated path) -------------------------
 
 GW = f"http://localhost:{os.getenv('GATEWAY_PORT', '8080')}"
