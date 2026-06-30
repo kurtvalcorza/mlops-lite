@@ -245,6 +245,7 @@ def vision_finetune_flow(dataset_name: str, dataset_version: str, output_name: s
 
         rows = fetch_jsonl(dataset_name, dataset_version)
         images, labels, categories = _parse_rows(rows)
+        eval_result = None  # 015: bound before any score-at-registration (warn path leaves it None)
         try:
             state_dict, metrics, device = _train(
                 images, labels, categories, backbone=backbone, epochs=epochs, lr=lr,

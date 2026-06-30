@@ -230,6 +230,7 @@ def asr_finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
 
         rows = fetch_jsonl(dataset_name, dataset_version)
         audios, texts = _parse_rows(rows)
+        eval_result = None  # 015: bound before any score-at-registration (warn path leaves it None)
         try:
             with tempfile.TemporaryDirectory(prefix="asr-") as tmp:
                 merged_dir = os.path.join(tmp, "hf")

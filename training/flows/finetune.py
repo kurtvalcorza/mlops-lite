@@ -289,6 +289,7 @@ def finetune_flow(dataset_name: str, dataset_version: str, output_name: str,
             mlflow.set_tag("validation_warnings", ",".join(validation_report["warnings"]))
 
         rows = fetch_dataset(dataset_name, dataset_version)
+        eval_result = None  # 015: bound before any score-at-registration (warn path leaves it None)
         with tempfile.TemporaryDirectory(prefix="lora-") as tmp:
             trained = train_lora(base_model, rows, tmp, steps, lora_r, seed,
                                  lora_alpha=lora_alpha, lr=lr)

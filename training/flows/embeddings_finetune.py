@@ -176,6 +176,7 @@ def embeddings_finetune_flow(dataset_name: str, dataset_version: str, output_nam
 
         rows = fetch_jsonl(dataset_name, dataset_version)
         anchors, positives, negatives, mode = _parse_rows(rows)
+        eval_result = None  # 015: bound before any score-at-registration (warn path leaves it None)
         try:
             model, metrics, device = _train(
                 anchors, positives, negatives, mode, base_model=base, parent_model_uri=parent_uri,

@@ -20,10 +20,14 @@ WHISPER_CLI = os.path.expanduser(
     os.getenv("WHISPER_CLI", os.path.join(WHISPER_DIR, "build", "bin", "whisper-cli")))
 
 
-def make_predict_fn(ggml_path: str, *, cli_bin: str = WHISPER_CLI, ngl: int = 999):
+def make_predict_fn(ggml_path: str, *, cli_bin: str = WHISPER_CLI, use_gpu: bool = True):
     """Build a `predict_fn` that transcribes each benchmark clip through the served `ggml_path` via a
     transient `whisper-cli` (`-nt -np` → bare transcription on stdout, no timestamps/progress). The
-    benchmark `audio_b64` is already a 16 kHz mono PCM WAV, so it is written straight to a temp file."""
+    benchmark `audio_b64` is already a 16 kHz mono PCM WAV, so it is written straight to a temp file.
+
+    whisper.cpp uses the GPU by default when built with CUDA (the 009 whisper-server supervisor passes no
+    GPU flag either — it has no per-layer offload like llama.cpp); `use_gpu=False` adds `-ng/--no-gpu` to
+    force CPU."""
 
     def predict_fn(rows, _modality, _version):
         if not os.path.exists(cli_bin):
@@ -37,7 +41,8 @@ def make_predict_fn(ggml_path: str, *, cli_bin: str = WHISPER_CLI, ngl: int = 99
                 with open(wav, "wb") as f:
                     f.write(base64.b64decode(r["audio_b64"], validate=True))
                 cmd = [cli_bin, "-m", ggml_path, "-f", wav, "-nt", "-np"]
-                cmd += ["-ngl", str(ngl)] if ngl else ["-ng"]  # GPU offload, or force CPU when ngl=0
+                if not use_gpu:
+                    cmd.append("-ng")  # --no-gpu (whisper.cpp); default is GPU when built with CUDA
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode != 0:
                     raise RuntimeError(
