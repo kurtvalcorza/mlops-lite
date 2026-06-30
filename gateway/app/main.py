@@ -92,8 +92,9 @@ def root():
             "/predict", "/predict/health",
             "/infer/stream", "/platform/events", "/serving/tasks",
         ],
-        "phase": "8 (complete) + 002 (auth/supervisor) + 003 (streaming UI) + 005 (fail-closed auth) "
-        "+ 006 (inference tracing) + 007 (MLflow 3.x) + 008 (GPU lease) + 009 (modalities) "
+        "phase": "8 (complete) + 002 (auth/supervisor) + 003 (streaming UI) + 004 (BFF hardening) "
+        "+ 005 (fail-closed auth) + 006 (inference tracing) + 007 (MLflow 3.x) + 008 (GPU lease) "
+        "+ 009 (modalities) "
         "+ 010 (multimodal fine-tune) + 011 (eval gates) + 012 (HPO) + 013 (quality) "
         "+ 014 (batch/validation)",
         "auth_mode": auth_mode(),
