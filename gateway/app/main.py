@@ -78,19 +78,24 @@ def root():
         "endpoints": [
             "/healthz", "/metrics", "/platform/health", "/infer", "/serving/health", "/serving/state",
             "/models", "/models/{name}", "/models/{name}/promote",
+            "/models/{name}/evaluate", "/models/{name}/compare",
             "/datasets", "/datasets/{name}", "/datasets/{name}/{version}",
             "/datasets/{name}/{version}/validate",
             "/runs", "/runs/{id}", "/runs/{id}/events", "/training/health",
+            "/studies", "/studies/{id}",
             "/batch", "/batch/{id}",
-            "/monitor", "/monitor/check", "/monitor/quality/check",
+            "/monitor", "/monitor/check", "/monitor/labels",
+            "/monitor/quality", "/monitor/quality/check",
             "/vision/classify", "/vision/health",
             "/embed", "/embed/health",
             "/transcribe", "/transcribe/health",
             "/predict", "/predict/health",
             "/infer/stream", "/platform/events", "/serving/tasks",
         ],
-        "phase": "8 (complete) + 002 US1 (auth) + US2 (supervisor) + 003 US1 (streaming) "
-        "+ 005 US2 (fail-closed auth) + 006 (inference tracing)",
+        "phase": "8 (complete) + 002 (auth/supervisor) + 003 (streaming UI) + 005 (fail-closed auth) "
+        "+ 006 (inference tracing) + 007 (MLflow 3.x) + 008 (GPU lease) + 009 (modalities) "
+        "+ 010 (multimodal fine-tune) + 011 (eval gates) + 012 (HPO) + 013 (quality) "
+        "+ 014 (batch/validation)",
         "auth_mode": auth_mode(),
         "tracing": tracing.enabled(),
         "trace_capture": tracing.capture_io(),
