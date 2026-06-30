@@ -183,14 +183,14 @@ class Metric:
 
 
 # Per-modality default primary metric + direction (the grilled defaults; all operator-configurable).
-# Keyed by the registry `task` tag (009 FR-074). LLM + vision are COMMITTED (served today); ASR /
-# embeddings / tabular are guidance stubs until their serving paths exist (009).
+# Keyed by the registry `task` tag (009 FR-074). LLM + vision + ASR + embeddings all score at
+# registration as of 015 (each ships a held-out fixture); tabular has no fine-tune flow → still a stub.
 METRICS = {
     "text-generation": Metric("task_accuracy", HIGHER, task_accuracy),  # LLM (committed)
     "image-classification": Metric("accuracy", HIGHER, accuracy),       # vision (committed)
-    "asr": Metric("wer", LOWER, wer),                                   # stub
-    "embedding": Metric("recall_at_k", HIGHER, recall_at_k),            # stub
-    "tabular": Metric("auc", HIGHER, auc),                              # stub
+    "asr": Metric("wer", LOWER, wer),                                   # 015 — WER fixture shipped
+    "embedding": Metric("recall_at_k", HIGHER, recall_at_k),            # 015 — recall@k fixture shipped
+    "tabular": Metric("auc", HIGHER, auc),                              # stub (no fine-tune flow)
 }
 # Universal LLM fallback (used when a QA answer key is absent) — kept out of METRICS so it is opt-in.
 PERPLEXITY = Metric("perplexity", LOWER, perplexity)
@@ -231,6 +231,8 @@ BENCHMARKS_DIR = os.getenv(
 DEFAULT_BENCHMARKS = {
     "text-generation": "llm/qa_smoke.jsonl",
     "image-classification": "vision/shapes_smoke.jsonl",
+    "embedding": "embedding/recall_smoke.jsonl",  # 015 — recall@k held-out fixture (score-at-registration)
+    "asr": "asr/wer_smoke.jsonl",                  # 015 — WER held-out fixture (score-at-registration)
 }
 
 

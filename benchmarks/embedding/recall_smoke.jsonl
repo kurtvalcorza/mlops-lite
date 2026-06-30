@@ -1,0 +1,8 @@
+{"query": "How do I reset my account password?", "positive": "To reset your password, open Settings, choose Security, and select Reset password."}
+{"query": "What time does the support team open?", "positive": "Customer support is available from 9am to 5pm Eastern, Monday through Friday."}
+{"query": "How can I get a refund for my order?", "positive": "Refunds are issued to the original payment method within five business days of an approved request."}
+{"query": "Which file formats can I upload for a dataset?", "positive": "Datasets may be uploaded as JSONL, CSV, or Parquet files up to two gigabytes each."}
+{"query": "How do I train a model on a pinned dataset version?", "positive": "Launch a fine-tune from the Runs page, pick the dataset and the pinned version, then submit the job."}
+{"query": "Where can I see the GPU memory usage?", "positive": "Live GPU memory is shown on the Monitoring dashboard under the hardware utilization panel."}
+{"query": "How do I promote a model to serving?", "positive": "Open the model in the registry, select a version, and click Promote to move the serving alias through the gate."}
+{"query": "What is the maximum image size for classification?", "positive": "The vision service accepts images up to 4096 by 4096 pixels and resizes them before inference."}
