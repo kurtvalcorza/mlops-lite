@@ -4,7 +4,11 @@
 
 **Created**: 2026-06-28
 
-**Status**: **DRAFT — GRILLED (2026-06-28), build-ready**
+**Status**: **BUILT & MERGED (2026-06-29, PR #16)** — US1–US3. Output-side quality monitoring with
+ground truth: prediction logging (infer/stream/vision) + `POST /monitor/labels` + windowed per-modality
+quality (`gateway/app/quality.py`, reusing 011's metric libs) + like-for-like baseline breach →
+`_launch_retrain` (OR-combined w/ input PSI, cooldown); `GET /monitor/quality` + Grafana series.
+Pure-Python, `monitoring.py` untouched. See tasks.md status block. (Was DRAFT — GRILLED 2026-06-28.)
 
 **Input**: The monitoring stage today watches only the **input** side: `gateway/app/monitoring.py`
 computes pure-Python **PSI** (Population Stability Index) over *feature distributions* between two

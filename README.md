@@ -5,16 +5,16 @@ register → serve → monitor → retrain — built around a single GPU that ho
 a time under a race-free lease**. A spec-driven (GitHub Spec Kit) reimagining of a heavier reference
 platform, sized to a laptop.
 
-> Status: **merged through increment 012** (010 validated on hardware; 011/012 merged via the
+> Status: **merged through increment 014** (010 validated on hardware; 011–014 merged via the
 > dual-bot review loop). Five served modalities (LLM text-generation, vision image-classification,
 > embeddings, ASR, tabular), a multimodal trainer (LLM + vision + embeddings + ASR fine-tuning with
 > lineage/adapter-chaining), a **gated promotion** path (offline eval harness + champion-challenger),
-> and **Optuna hyperparameter optimization** — all over a single race-free GPU lease. Constitution
-> `v1.4.0`. Reference stack on MLflow `3.14.0`.
+> **Optuna hyperparameter optimization**, **model-quality monitoring** with ground-truth labels, and
+> **offline batch inference + data-validation gates** — all over a single race-free GPU lease.
+> Constitution `v1.4.0`. Reference stack on MLflow `3.14.0`.
 >
 > Per-increment detail lives under [`specs/`](specs/) (each has `spec.md` / `plan.md` / `tasks.md`);
 > [`specs/001-mlops-platform/quickstart.md`](specs/001-mlops-platform/quickstart.md) is the run guide.
-> Next up: **013-quality-monitoring** and **014-batch-and-validation** — specced, not yet built.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ GPU works natively in WSL, so the gateway proxies to native daemons over an inje
 ```mermaid
 flowchart LR
   subgraph Compose["Docker Compose (infra)"]
-    GW["FastAPI gateway :8080<br/>infer · embed · transcribe · predict · vision<br/>models(evaluate·compare·gated-promote) · datasets · runs · studies · monitor"]
+    GW["FastAPI gateway :8080<br/>infer · embed · transcribe · predict · vision · batch<br/>models(evaluate·compare·gated-promote) · datasets(validate) · runs · studies<br/>monitor(drift · quality · labels)"]
     MLF["MLflow :5500<br/>tracking + registry + traces"]
     MIN["MinIO :9000<br/>datasets · models · results"]
     PG["Postgres"]
@@ -261,6 +261,41 @@ curl localhost:8080/studies/<study_id> -H "X-API-Key: $KEY"     # study status +
 > `task` tag. `dataset_name` + `dataset_version` pin the training data; `output_name` is the registered
 > model name the best trial lands under.
 
+## Quality monitoring with ground truth (013)
+
+The 001 monitor watches only the **input** side — pure-Python PSI over feature distributions (drift on
+what goes *in*). 013 adds the missing half: **output/concept-drift** monitoring against ground truth,
+complementing (not replacing) the PSI signal.
+
+- **Prediction logging** — every served prediction is logged fire-and-forget / fail-open with a stable
+  prediction id + the resolved model version (wired into the `infer` / `stream` / `vision` routes),
+  landing in the existing MinIO `results` store.
+- **Delayed labels** — `POST /monitor/labels` attaches ground-truth labels whenever they become known
+  (minutes to days later); a thin client `data/submit_labels.py` drives it.
+- **Windowed quality** — `POST /monitor/quality/check` computes per-modality quality over a time window
+  (reusing 011's metric libs), compares it **relative to a like-for-like baseline**, and on a breach
+  fires the **same** `_launch_retrain` trigger as input-drift (OR-combined, with a cooldown).
+  `GET /monitor/quality` lists reports; the Grafana dashboard is extended with the quality series.
+- **Dependency-light.** Pure-Python + the 011 metric libs; `monitoring.py` (PSI) is untouched, and
+  quality is CPU-side aggregation off the request path — never a second resident model (Principle II).
+
+## Batch inference & data-validation gates (014)
+
+014 closes the two open lifecycle edges — offline scoring and pre-training readiness:
+
+- **Offline batch inference** — `POST /batch` (+ `GET /batch/{batch_id}`) scores a registered MinIO
+  dataset version against a served model as an **ephemeral Prefect flow on the native daemon**
+  (`training/flows/batch_infer.py`), writing content-addressed results back to MinIO. A GPU-backed model
+  goes **through the single GPU lease** — acquire once, iterate rows, release at batch end (never a
+  second model in VRAM); CPU/tabular models score off-lease.
+- **Data-validation gates** — lightweight **hand-rolled** checks (schema/columns, null rate, value
+  ranges, label balance, row count) over the dataset bytes, gating `finetune_flow` **before**
+  `train_lora` so a malformed/empty/schema-drifted dataset fails fast at the edge instead of deep in the
+  LoRA loop. Also exposed advisory via `POST /datasets/{name}/{version}/validate`. **Not** Great
+  Expectations / pandera — same "deliver the guarantee, lighter" precedent as DVC→content-addressing and
+  Evidently→PSI (Principle III). Surfaced in the operator console (datasets validation report + a Runs
+  batch launcher).
+
 ## Inference traces (006, on MLflow 3.x since 007)
 
 Every `POST /infer` and `POST /infer/stream` emits one **MLflow trace** (prompt, params, output,
@@ -282,7 +317,8 @@ and use the **Traces** tab.
 MinIO (storage) · MLflow `3.14.0` (tracking + registry + traces) · `llama.cpp` (LLM serving) ·
 BentoML (vision / embeddings / tabular serving) · whisper.cpp (ASR serving) · sentence-transformers
 (embeddings) · LightGBM (tabular) · PyTorch + PEFT/LoRA (training, Prefect-structured) · Optuna
-(hyperparameter search, server-less) · pure-Python PSI (drift) + pure-Python eval metrics (gates) ·
+(hyperparameter search, server-less) · pure-Python PSI (input drift) + pure-Python eval/quality metrics
+(gates + ground-truth monitoring) + hand-rolled data validation ·
 Prometheus + Grafana (observability).
 
 Three components diverge from the plan's first-choice tools, each justified by **Lightweight
@@ -375,6 +411,5 @@ and served live at `http://localhost:8080/docs`.
 | 010 | multimodal-finetune | Vision · embeddings · ASR fine-tuning + lineage/adapter-chaining |
 | 011 | evaluation-gates | Offline eval harness + gated promotion + offline champion-challenger |
 | 012 | hyperparameter-optimization | Optuna study over the fine-tune path, optimizing 011's eval metric |
-
-Roadmap specs **013-quality-monitoring** and **014-batch-and-validation** are drafted under
-[`specs/`](specs/) and not yet built.
+| 013 | quality-monitoring | Prediction + ground-truth logging → windowed quality → breach-retrain |
+| 014 | batch-and-validation | Offline batch inference + pre-training data-validation gates |
