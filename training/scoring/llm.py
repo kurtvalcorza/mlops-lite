@@ -21,7 +21,7 @@ LLAMA_DIR = os.path.expanduser(os.getenv("LLAMA_DIR", "~/llama.cpp"))
 LLAMA_SERVER = os.path.expanduser(
     os.getenv("LLAMA_BIN", os.path.join(LLAMA_DIR, "build", "bin", "llama-server")))
 GGUF_DIR = os.path.expanduser(os.getenv("GGUF_DIR", "~/models/gguf"))
-SCORER_PORT = int(os.getenv("LLM_SCORER_PORT", "8096"))  # free port: 8081=serving llama child,
+SCORER_PORT = int(os.getenv("LLM_SCORER_PORT", "8096"))  # free port: 8081/8082=llama/whisper children,
 # 8090=serving supervisor, 8091-8095=trainer/vision/embed/tabular/asr, 8099=supervise status server.
 # 8099 (the earlier default) collided with the supervisor's status HTTP server → the scorer's POST hit
 # a GET-only handler and got 501, so LLM score-at-registration silently register-and-warned on-hardware.

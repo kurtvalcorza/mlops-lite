@@ -16,6 +16,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESERVED_PORTS = {
     8080,  # gateway
     8081,  # serving llama-server child
+    8082,  # asr whisper-server child (WHISPER_PORT)
     8090,  # serving supervisor
     8091,  # trainer
     8092,  # vision (bento)
