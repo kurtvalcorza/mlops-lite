@@ -15,7 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import quality, registry
+from .. import quality, registry, swap
 
 router = APIRouter()
 
@@ -50,15 +50,22 @@ def _top_label(data) -> object:
 
 class ClassifyRequest(BaseModel):
     image_b64: str
+    preempt: bool = False  # 017: opt-in swap — evict a resident *serving* model first (default 008 refuse)
 
 
 @router.post("/vision/classify")
 async def classify(req: ClassifyRequest):
-    """Classify an image (base64 in, top-5 labels out) via the BentoML vision service."""
+    """Classify an image (base64 in, top-5 labels out) via the BentoML vision service.
+
+    017: with `preempt=true` and a different *serving* model resident, the gateway evicts it first (a
+    sequential swap, one model in VRAM) so the vision model can load; a **training** holder is never
+    evicted (409). Default (`preempt` omitted/false) is byte-for-byte 008 refuse-if-held."""
     try:
         raw = base64.b64decode(req.image_b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="image_b64 is not valid base64")
+    if req.preempt:
+        await swap.preempt_or_409("vision")
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             r = await client.post(

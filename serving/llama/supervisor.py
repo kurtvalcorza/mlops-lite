@@ -146,6 +146,29 @@ def _unload() -> None:
     gpu_lease.release(LEASE_TENANT)  # free the GPU slot for the next tenant (idle-release / failure)
 
 
+def _unload_now(drain_timeout_s: float) -> dict:
+    """017 (FR-156): drain in-flight work within a bounded timeout, then unload the model and release the
+    GPU lease — the gateway's `unload-now` control call during a swap.
+
+    The GPU `_lock` is held for the **entire** duration of any in-flight `_do_infer`/`_do_infer_stream`,
+    so it doubles as the in-flight detector: acquiring it means in-flight work has drained AND no new work
+    can start (a clean drain → `drained=True`). If it can't be acquired within `drain_timeout_s`, a request
+    is still running long → **hard-unload** (terminate the llama-server out from under it; the in-flight
+    call then errors) so a stuck request can't hang the swap. Idempotent: not resident → `idle` (no-op).
+    """
+    if not _resident():
+        return {"status": "idle"}  # nothing to unload — the lease is already free for the next tenant
+    acquired = _lock.acquire(timeout=max(drain_timeout_s, 0.0))
+    try:
+        if not _resident():
+            return {"status": "idle"}
+        _unload()  # under the lock on the clean path; on a hard-cut (no lock) it terminates the proc,
+        return {"status": "unloaded", "drained": acquired}  # which unblocks the in-flight call
+    finally:
+        if acquired:
+            _lock.release()
+
+
 def _idle_watcher() -> None:
     while True:
         time.sleep(5)
@@ -273,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path not in ("/infer", "/infer/stream"):
+        if self.path not in ("/infer", "/infer/stream", "/unload-now"):
             self._send(404, {"error": "not found"})
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -281,6 +304,21 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             self._send(400, {"error": "invalid JSON"})
+            return
+        if self.path == "/unload-now":
+            # 017: gateway-only control call during a swap. The supervisor's control surface is
+            # gateway-gated on the private WSL network (like /infer). As opt-in defense-in-depth for this
+            # *destructive* route, when SWAP_CONTROL_SECRET is set the gateway forwards it as X-Swap-Control
+            # and we require a match; unset → 008 behavior (no check).
+            secret = os.getenv("SWAP_CONTROL_SECRET", "")
+            if secret and self.headers.get("X-Swap-Control", "") != secret:
+                self._send(401, {"error": "unauthorized unload-now (bad or missing X-Swap-Control)"})
+                return
+            drain = float(body.get("drain_timeout_s", 10))
+            try:
+                self._send(200, _unload_now(drain))
+            except Exception as e:
+                self._send(500, {"error": f"unload-now failed: {e}"})
             return
         if self.path == "/infer/stream":
             self._stream(body)
