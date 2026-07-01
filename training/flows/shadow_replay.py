@@ -65,11 +65,19 @@ def replay_job(name, champion_version, challenger_version, modality, *, shadow_i
     """Trainer-side entry for a dispatched shadow-replay: build the challenger's 015 predict_fn (loads the
     served artifact under the GPU lease — one model in VRAM, FR-148), then run the gateway's orchestration
     (resolve the captured∩labeled window → score the challenger → build the advisory verdict → persist).
-    The caller (trainer daemon) holds the lease and releases it after."""
+    The caller (trainer daemon) holds the lease and releases it after.
+
+    The challenger artifact is built **lazily, inside `scorer`** — `run_replay` runs its own `prepare()`
+    guard and only invokes `scorer` when the window is `ready`, returning early (no scoring) on
+    `insufficient_data`/`no_corpus`/`inputs_not_captured`. Building the `predict_fn` here (which, for
+    vision, loads the model onto the GPU, and for LLM/ASR downloads the artifact) up front would leave it
+    resident/on-disk on any guard-fail path, because the closures' cleanup `finally` only runs once
+    `predict_fn` is actually called. Deferring the build until `scorer` fires ties the load and its
+    cleanup to the same ready-and-scoring path — one model in VRAM, nothing left behind (Principle II)."""
     shadow = _load_gateway_shadow()
-    predict_fn = build_challenger_predict_fn(name, challenger_version, modality)
 
     def scorer(pairs, mod, version):
+        predict_fn = build_challenger_predict_fn(name, challenger_version, modality)
         return score_challenger(pairs, mod, version, predict_fn=predict_fn)
 
     return shadow.run_replay(name, champion_version, challenger_version, modality,

@@ -95,6 +95,37 @@ def test_build_challenger_predict_fn_dispatches_per_modality():
     assert calls["asr"] == "s3://models/m/5/art"
 
 
+def _fake_shadow(status):
+    """A stand-in for the gateway's shadow orchestration: `run_replay` mirrors the real guard — it calls
+    `scorer` only when the window is `ready`, and returns early (no scoring) otherwise."""
+    class _S:
+        @staticmethod
+        def run_replay(name, champion, challenger, modality, *, shadow_id, scorer, window_n=None):
+            if status != "ready":
+                return {"status": status, "shadow_id": shadow_id, "name": name}
+            return {"status": "ready", "verdict": scorer([{"input": "x", "label": "l"}], modality, challenger)}
+    return _S
+
+
+def test_replay_job_builds_challenger_only_when_scored():
+    # Guard-fail path (e.g. the window shrank below min between the gateway's check and the trainer's
+    # re-check): run_replay never calls scorer, so the challenger artifact must NOT be built — otherwise
+    # the eager GPU load / temp-dir download leaks (its cleanup lives in the never-called closure).
+    built = []
+    m._load_gateway_shadow = lambda: _fake_shadow("insufficient_data")
+    m.build_challenger_predict_fn = lambda *a, **k: built.append(a) or (lambda rows, mod, v: [])
+    out = m.replay_job("mdl", "1", "2", "vision", shadow_id="s1")
+    assert out["status"] == "insufficient_data"
+    assert built == [], "challenger artifact must not be built on a guard-fail (non-ready) path"
+
+    # Ready path: scorer fires, so the challenger IS built (exactly once) and scored.
+    m._load_gateway_shadow = lambda: _fake_shadow("ready")
+    m.build_challenger_predict_fn = lambda *a, **k: built.append(a) or (lambda rows, mod, v: ["PRED"])
+    out = m.replay_job("mdl", "1", "2", "vision", shadow_id="s2")
+    assert out["status"] == "ready" and out["verdict"] == ["PRED"]
+    assert len(built) == 1, "challenger built exactly once, on the ready-and-scoring path"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
