@@ -171,7 +171,7 @@ class VisionClassifier:
         return {"model": NAME, "device": DEVICE, "predictions": preds}
 
     @bentoml.api(route="/unload-now")
-    def unload_now(self, drain_timeout_s: float = 10) -> dict:
+    def unload_now(self, drain_timeout_s: float = 10, ctx: bentoml.Context = None) -> dict:
         """017 (FR-156): the gateway's swap control call — drain an in-flight classify within
         `drain_timeout_s`, then drop the resident model + release the GPU lease so the target serving
         model can load. `self._lock` is held for the whole duration of a classify (load + GPU op), so
@@ -179,9 +179,26 @@ class VisionClassifier:
         inference is sub-second, so a clean drain is the norm). Idempotent: not loaded → `idle`.
 
         Off a GPU (CPU, lease-exempt) there is nothing to swap — drop the model so a later request reloads
-        but report `idle` since no lease was involved."""
-        if self._model is None:
-            return {"status": "idle"}
+        but report `idle` since no lease was involved.
+
+        Acquire the lock **first** rather than fast-pathing on `self._model is None`: during a cold load,
+        `_ensure_loaded_locked` holds the lease + the lock but hasn't assigned `self._model` yet, so an
+        early `is None` check would report `idle` while vision genuinely holds the GPU — the gateway would
+        then wait out SWAP_FREE_WAIT_S and fail while the classify completes and stays resident. Holding
+        the lock === no classify/cold-load is in flight, so a `None` model under the lock is truly idle.
+
+        Opt-in defense-in-depth (like the native supervisors): when SWAP_CONTROL_SECRET is set, require the
+        X-Swap-Control header the gateway forwards; unset → 008 behavior. BentoML masks raised 5xx bodies,
+        so refuse via a structured status the gateway maps to a clean swap-failure (as the busy path does)."""
+        secret = os.getenv("SWAP_CONTROL_SECRET", "")
+        if secret:
+            try:
+                got = ctx.request.headers.get("x-swap-control", "") if ctx is not None else ""
+            except Exception:
+                got = ""
+            if got != secret:
+                return {"status": "unauthorized", "device": DEVICE,
+                        "detail": "unauthorized unload-now (bad or missing X-Swap-Control)"}
         acquired = self._lock.acquire(timeout=max(float(drain_timeout_s), 0.0))
         if not acquired:
             # Vision is an IN-PROCESS torch model — unlike the subprocess llama/whisper supervisors, whose
@@ -192,10 +209,10 @@ class VisionClassifier:
             # does we REFUSE the swap (status != unloaded → the gateway surfaces a clean 409) rather than
             # break the one-model-in-VRAM invariant. The operator can retry the swap.
             return {"status": "busy", "drained": False, "device": DEVICE,
-                    "detail": "in-flight classify did not drain within the timeout — retry the swap"}
+                    "detail": "in-flight classify/cold-load did not drain within the timeout — retry the swap"}
         try:
             if self._model is None:
-                return {"status": "idle"}
+                return {"status": "idle"}  # lock free ⇒ no classify/cold-load in flight ⇒ truly idle
             self._release()  # drops the model + (on GPU) releases the lease — under the lock, never racy
             return {"status": "unloaded", "drained": True, "device": DEVICE}
         finally:

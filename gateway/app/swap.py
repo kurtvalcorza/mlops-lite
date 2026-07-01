@@ -10,8 +10,19 @@ sends the holder's supervisor an `unload-now` control call, waits for the lease 
 caller's normal forward (which acquires the now-free lease and loads the target) proceeds. The default
 (no `preempt`) path never calls in here, so 008 behavior is byte-for-byte unchanged (FR-161/SC-101).
 
-Seams (`state_fn`, `http_post`, `sleep`) are injectable so the orchestration is unit-testable with the
-lease + daemon HTTP mocked (no GPU, no live daemons).
+Robustness (review hardening):
+  - **Batch never preempted** — a GPU *batch* drives a serving supervisor **without** holding the training
+    lease, so the holder reads as `llm`/`vision`/`asr`; the broker asks the trainer whether a GPU batch is
+    active and refuses the swap if so (FR-155), on top of the `training` lease-holder refusal.
+  - **Verify the target before evicting** — probe the target daemon's health first, so an unreachable
+    target never causes us to drop the only working serving model for a request that would 503 anyway.
+  - **Re-resolve a stale holder** — if the holder we snapshotted already idle-released (`unload-now` →
+    `idle`) we re-read the lease and act on the real current holder instead of assuming the swap is done.
+  - **Serialize swaps** — concurrent `preempt=true` swaps are serialized (per event loop) so they don't
+    evict each other's freshly-loaded target.
+
+Seams (`state_fn`, `http_post`, `sleep`, `batch_active_fn`, `target_probe_fn`) are injectable so the
+orchestration is unit-testable with the lease + daemon HTTP mocked (no GPU, no live daemons).
 """
 import asyncio
 import os
@@ -25,6 +36,17 @@ SWAP_DRAIN_TIMEOUT_S = float(os.getenv("SWAP_DRAIN_TIMEOUT_S", "10"))
 # unload + VRAM teardown is bounded by the supervisor's own drain+kill, so this just backstops a wedge).
 SWAP_FREE_WAIT_S = float(os.getenv("SWAP_FREE_WAIT_S", "30"))
 
+# How many times we re-resolve the holder when `unload-now` reports `idle` (a stale snapshot — the holder
+# released between our state read and the control call). Bounds churn if the holder keeps changing.
+SWAP_MAX_RERESOLVE = int(os.getenv("SWAP_MAX_RERESOLVE", "3"))
+
+TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
+
+# Optional gateway-only shared secret for the destructive `unload-now` control call. When set, the gateway
+# forwards it as the `X-Swap-Control` header and each supervisor requires it; unset → 008 behavior (the
+# supervisors' control surface is gateway-gated on the private WSL network, like /infer).
+SWAP_CONTROL_SECRET = os.getenv("SWAP_CONTROL_SECRET", "")
+
 # Holder LABEL (as reported by serving.gpu_state, mapped from the lease tenant) → the supervisor base URL
 # that owns it and exposes `unload-now`. Only **serving** tenants are here; "training" is intentionally
 # absent — it is never preemptable (FR-155) and the orchestrator refuses before any unload-now.
@@ -33,9 +55,21 @@ SERVING_HOLDER_URLS = {
     "vision": os.getenv("BENTO_URL", "http://host.docker.internal:8092"),
     "asr": os.getenv("ASR_URL", "http://host.docker.internal:8095"),
 }
+# Health URL used to verify a swap *target* is reachable before we evict the current holder. The llama /
+# whisper supervisors expose `/health`; the BentoML vision service exposes `/healthz` (override-able).
+TARGET_HEALTH_URLS = {
+    "llm": f"{SERVING_HOLDER_URLS['llm']}/health",
+    "asr": f"{SERVING_HOLDER_URLS['asr']}/health",
+    "vision": os.getenv("BENTO_HEALTH_URL", f"{SERVING_HOLDER_URLS['vision']}/healthz"),
+}
 # Tenants that hold the GPU for long-running work and must never be evicted by a swap (FR-155). "training"
 # is the shared lease identity for fine-tune / HPO / batch runs (see training/trainer.py, hpo.py).
 NON_PREEMPTABLE = {"training"}
+
+# Per-event-loop swap lock: serialize preempt swaps so two concurrent ones don't evict each other's target.
+# Keyed by loop so the offline tests (a fresh `asyncio.run` loop per test) each get their own lock rather
+# than reusing one bound to a dead loop; in the live gateway (one persistent loop) it is a singleton.
+_swap_locks: dict = {}
 
 
 class PreemptRefused(Exception):
@@ -47,48 +81,78 @@ class SwapError(Exception):
     """The swap could not be completed (holder unreachable, lease never freed). Maps to 409/503."""
 
 
+def _loop_swap_lock() -> asyncio.Lock:
+    loop = asyncio.get_event_loop()
+    lock = _swap_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _swap_locks[loop] = lock
+    return lock
+
+
 async def preempt_if_needed(target_label: str, *, state_fn=None, http_post=None, sleep=None,
+                            batch_active_fn=None, target_probe_fn=None,
                             drain_timeout_s: float = SWAP_DRAIN_TIMEOUT_S,
-                            free_wait_s: float = SWAP_FREE_WAIT_S) -> dict:
+                            free_wait_s: float = SWAP_FREE_WAIT_S,
+                            max_reresolve: int = SWAP_MAX_RERESOLVE) -> dict:
     """Make room on the GPU for `target_label` when an operator opted into a swap (`preempt=true`).
 
     Returns a small dict describing what happened (`{"swapped": bool, "evicted": <label|None>, ...}`); the
     caller then runs its **normal forward**, which acquires the now-free lease and loads the target. Raises:
-      - `PreemptRefused` if the holder is a training/HPO/batch tenant (never evicted, FR-155).
-      - `SwapError` if the holder is unreachable or the lease never frees.
+      - `PreemptRefused` if the holder is a training/HPO/batch tenant or a GPU batch is active (FR-155).
+      - `SwapError` if the target is unreachable, the holder can't be evicted, or the lease never frees.
 
     Cases (contracts/preempt-flag.md):
       - no holder, or holder is already the target → **no swap** (the normal forward just serves).
-      - holder is a serving tenant ≠ target → `unload-now` → wait for the lease to free → return.
+      - holder is a serving tenant ≠ target → verify target reachable → `unload-now` → wait for free.
+      - `unload-now` reports `idle` (holder already released) → re-resolve the real holder and retry.
     """
     state_fn = state_fn or _default_state
     http_post = http_post or _default_post
     sleep = sleep or asyncio.sleep
+    batch_active_fn = batch_active_fn or _default_batch_active
+    target_probe_fn = target_probe_fn or _default_target_probe
 
-    state = await state_fn()
-    holder = state.get("holder")
-    # Gate solely on `holder` (the global lease holder, from gpu_lease.current_holder — which already
-    # filters out dead holders, so a non-null holder IS a live, evictable tenant; matches data-model.md).
-    # Do NOT also require `state["resident"]`: that flag is the LLM supervisor's own /health residency and
-    # tracks only whether the *llama-server child* is alive — it is False whenever a vision/asr tenant
-    # holds the lease (Principle II → the LLM child isn't resident then), which would wrongly skip the swap
-    # for every non-LLM holder and silently fall back to 008 refuse-if-held.
-    if not holder:
-        return {"swapped": False, "evicted": None, "reason": "no holder"}
-    if holder == target_label:
-        return {"swapped": False, "evicted": None, "reason": "holder is already the target"}
-    if holder in NON_PREEMPTABLE:
-        raise PreemptRefused("training in progress — not preemptable")
+    async with _loop_swap_lock():  # serialize the whole evict→free so concurrent preempts don't fight
+        for _ in range(max(1, max_reresolve)):
+            state = await state_fn()
+            holder = state.get("holder")
+            # Gate solely on `holder` (the global lease holder, from gpu_lease.current_holder — which
+            # already filters out dead holders, so a non-null holder IS a live, evictable tenant; matches
+            # data-model.md). The LLM-supervisor `resident` flag is NOT used: it is False whenever a
+            # vision/asr tenant holds the lease (Principle II), which would wrongly skip the swap.
+            if not holder:
+                return {"swapped": False, "evicted": None, "reason": "no holder"}
+            if holder == target_label:
+                return {"swapped": False, "evicted": None, "reason": "holder is already the target"}
+            if holder in NON_PREEMPTABLE:
+                raise PreemptRefused("training in progress — not preemptable")
+            # A GPU batch drives a serving supervisor without taking the training lease, so its holder is
+            # llm/vision/asr — but a running batch is never preempted (FR-155). Refuse before evicting.
+            if await batch_active_fn():
+                raise PreemptRefused("batch inference in progress — not preemptable")
 
-    url = SERVING_HOLDER_URLS.get(holder)
-    if url is None:
-        # An unknown/serving holder we don't have an unload-now URL for — refuse rather than guess and
-        # unload the wrong tenant (spec Edge Case: never unload the wrong holder).
-        raise PreemptRefused(f"holder {holder!r} is not a swappable serving tenant")
+            url = SERVING_HOLDER_URLS.get(holder)
+            if url is None:
+                # An unknown/serving holder we don't have an unload-now URL for — refuse rather than guess
+                # and unload the wrong tenant (spec Edge Case: never unload the wrong holder).
+                raise PreemptRefused(f"holder {holder!r} is not a swappable serving tenant")
 
-    await _unload_holder(holder, url, http_post, drain_timeout_s)
-    await _wait_for_free(target_label, state_fn, sleep, free_wait_s)
-    return {"swapped": True, "evicted": holder, "reason": "ok"}
+            # Verify the target daemon is reachable BEFORE evicting the current holder — otherwise a
+            # down/unreachable target would drop the only working serving model for a request that then
+            # 503s anyway (evict-then-fail). Reachable-but-idle is fine (it loads on demand).
+            if not await target_probe_fn(target_label):
+                raise SwapError(f"target {target_label!r} is unreachable — not evicting {holder!r}")
+
+            result = await _unload_holder(holder, url, http_post, drain_timeout_s)
+            if result.get("status") == "idle":
+                # Stale snapshot: the holder we saw already released the lease before our unload-now landed
+                # (idle = nothing to unload). Re-resolve — the lease may now be free, or a different tenant
+                # may have grabbed it — and act on the real current holder rather than assume we're done.
+                continue
+            await _wait_for_free(target_label, state_fn, sleep, free_wait_s)
+            return {"swapped": True, "evicted": holder, "reason": "ok"}
+        raise SwapError("holder kept changing during the swap — could not free the lease")
 
 
 async def preempt_or_409(target_label: str, **kwargs) -> dict:
@@ -107,7 +171,8 @@ async def preempt_or_409(target_label: str, **kwargs) -> dict:
 
 async def _unload_holder(holder: str, url: str, http_post, drain_timeout_s: float) -> dict:
     """Send the holder's supervisor `unload-now` (drain → unload → release the lease). A non-200 or an
-    unreachable holder is a SwapError (don't proceed to forward onto a still-occupied GPU)."""
+    unreachable holder is a SwapError (don't proceed to forward onto a still-occupied GPU). Returns the
+    parsed body so the caller can distinguish `unloaded` (evicted) from `idle` (already released → stale)."""
     try:
         status, body = await http_post(f"{url}/unload-now", {"drain_timeout_s": drain_timeout_s})
     except Exception as e:  # noqa: BLE001 — any transport error means we couldn't evict
@@ -148,12 +213,54 @@ async def _default_state() -> dict:
     return await serving.gpu_state()
 
 
-async def _default_post(url: str, json_body: dict):
-    """POST a control call to a serving supervisor; returns (status_code, parsed_json_or_text)."""
+async def _default_batch_active() -> bool:
+    """Whether the trainer is running a **GPU** batch (which drives a serving supervisor without holding the
+    training lease). Reads the trainer /health `gpu_batch_active`. Fail-open (`False`) if the trainer is
+    unreachable — the hard `training` lease-holder refusal still covers train/HPO/tabular; only the rarer
+    GPU-batch case relies on this probe, and failing closed would break every swap whenever the trainer is
+    down."""
     import httpx
 
-    async with httpx.AsyncClient(timeout=SWAP_FREE_WAIT_S + 5) as client:
-        r = await client.post(url, json=json_body)
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get(f"{TRAINER_URL}/health")
+        if r.status_code == 200:
+            return bool(r.json().get("gpu_batch_active"))
+    except Exception:
+        pass
+    return False
+
+
+async def _default_target_probe(target_label: str) -> bool:
+    """Whether the swap *target* daemon is reachable (so we don't evict the holder just to 503). Any HTTP
+    response means the daemon is up; only a transport error (process down/unreachable) returns False. An
+    unmapped target isn't blocked (best-effort — the forward will surface any error)."""
+    url = TARGET_HEALTH_URLS.get(target_label)
+    if not url:
+        return True
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            await client.get(url)
+        return True
+    except Exception:
+        return False
+
+
+async def _default_post(url: str, json_body: dict):
+    """POST a control call to a serving supervisor; returns (status_code, parsed_json_or_text).
+
+    The HTTP timeout is sized off the **drain bound** (plus the free-wait backstop and a small buffer), not
+    just `SWAP_FREE_WAIT_S`: `unload-now` can legitimately take up to `SWAP_DRAIN_TIMEOUT_S` draining an
+    in-flight request before it responds, so a timeout tied only to the post-unload wait would spuriously
+    report `swap failed` during a normal long request."""
+    import httpx
+
+    headers = {"X-Swap-Control": SWAP_CONTROL_SECRET} if SWAP_CONTROL_SECRET else None
+    timeout = SWAP_DRAIN_TIMEOUT_S + SWAP_FREE_WAIT_S + 5
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=json_body, headers=headers)
         try:
             return r.status_code, r.json()
         except Exception:

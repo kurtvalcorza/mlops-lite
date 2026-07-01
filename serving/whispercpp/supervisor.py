@@ -308,8 +308,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "invalid JSON"})
             return
         if self.path == "/unload-now":
-            # 017: gateway-only control call during a swap (unauthenticated like the other routes — the
-            # gateway is the auth boundary + only caller on the private WSL network).
+            # 017: gateway-only control call during a swap. Gateway-gated on the private WSL network (like
+            # /transcribe). Opt-in defense-in-depth for this *destructive* route: when SWAP_CONTROL_SECRET
+            # is set, require the X-Swap-Control header the gateway forwards; unset → 008 behavior.
+            secret = os.getenv("SWAP_CONTROL_SECRET", "")
+            if secret and self.headers.get("X-Swap-Control", "") != secret:
+                self._send(401, {"error": "unauthorized unload-now (bad or missing X-Swap-Control)"})
+                return
             try:
                 self._send(200, _unload_now(float(body.get("drain_timeout_s", 10))))
             except Exception as e:

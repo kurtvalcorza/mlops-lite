@@ -56,11 +56,27 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def _up(_label):    # swap target daemon reachable (health probe ok)
+    return True
+
+
+async def _nobatch():     # no GPU batch active in the trainer
+    return False
+
+
+def _preempt(target, **kw):
+    """Existing tests drive the holder-resolution logic; default the new guards to 'target up, no batch'
+    so they don't fall through to the live-HTTP defaults. The guard-specific tests pass these explicitly."""
+    kw.setdefault("target_probe_fn", _up)
+    kw.setdefault("batch_active_fn", _nobatch)
+    return m.preempt_if_needed(target, **kw)
+
+
 def test_serving_holder_is_evicted_then_free():
     # LLM resident, target = vision → unload-now to the LLM supervisor, then the lease frees.
     state = StateSeq({"holder": "llm", "resident": True}, {"holder": None, "resident": False})
     post = PostRecorder()
-    res = run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep))
+    res = run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep))
     assert res["swapped"] is True and res["evicted"] == "llm"
     assert len(post.calls) == 1
     url, body = post.calls[0]
@@ -71,14 +87,14 @@ def test_serving_holder_is_evicted_then_free():
 def test_no_holder_no_swap():
     state = StateSeq({"holder": None, "resident": False})
     post = PostRecorder()
-    res = run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep))
+    res = run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep))
     assert res["swapped"] is False and post.calls == []  # nothing to evict → no unload-now
 
 
 def test_holder_is_already_target_no_swap():
     state = StateSeq({"holder": "vision", "resident": True})
     post = PostRecorder()
-    res = run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep))
+    res = run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep))
     assert res["swapped"] is False and post.calls == []  # already the target → just serve
 
 
@@ -87,7 +103,7 @@ def test_training_holder_is_refused_never_evicted():
     state = StateSeq({"holder": "training", "resident": True})
     post = PostRecorder()
     try:
-        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep))
+        run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep))
     except m.PreemptRefused as e:
         assert "not preemptable" in str(e)
     else:
@@ -99,7 +115,7 @@ def test_unknown_serving_holder_refused_not_guessed():
     state = StateSeq({"holder": "mystery", "resident": True})
     post = PostRecorder()
     try:
-        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep))
+        run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep))
     except m.PreemptRefused:
         pass
     else:
@@ -111,7 +127,7 @@ def test_unload_now_failure_is_a_swap_error():
     state = StateSeq({"holder": "llm", "resident": True})
     post = PostRecorder(status=500, body={"error": "boom"})
     try:
-        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep))
+        run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep))
     except m.SwapError:
         pass
     else:
@@ -124,7 +140,7 @@ def test_unload_now_busy_body_is_a_swap_error():
     state = StateSeq({"holder": "vision", "resident": True})
     post = PostRecorder(status=200, body={"status": "busy", "detail": "did not drain"})
     try:
-        run(m.preempt_if_needed("llm", state_fn=state, http_post=post, sleep=_nosleep))
+        run(_preempt("llm", state_fn=state, http_post=post, sleep=_nosleep))
     except m.SwapError as e:
         assert "did not unload" in str(e)
     else:
@@ -136,7 +152,7 @@ def test_lease_never_frees_is_a_swap_error():
     state = StateSeq({"holder": "llm", "resident": True})  # always returns the holder
     post = PostRecorder()
     try:
-        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep,
+        run(_preempt("vision", state_fn=state, http_post=post, sleep=_nosleep,
                                 free_wait_s=1.0))
     except m.SwapError as e:
         assert "did not free" in str(e)
@@ -147,7 +163,7 @@ def test_lease_never_frees_is_a_swap_error():
 def test_asr_holder_evicted_via_asr_url():
     state = StateSeq({"holder": "asr", "resident": True}, {"holder": None, "resident": False})
     post = PostRecorder()
-    run(m.preempt_if_needed("llm", state_fn=state, http_post=post, sleep=_nosleep))
+    run(_preempt("llm", state_fn=state, http_post=post, sleep=_nosleep))
     assert "8095" in post.calls[0][0]  # the ASR supervisor URL
 
 
@@ -160,9 +176,71 @@ def test_non_llm_holder_swaps_even_though_llm_resident_is_false():
         state = StateSeq({"holder": holder, "resident": False},   # the real gpu_state() shape
                          {"holder": None, "resident": False})       # lease freed after unload-now
         post = PostRecorder()
-        res = run(m.preempt_if_needed("llm", state_fn=state, http_post=post, sleep=_nosleep))
+        res = run(_preempt("llm", state_fn=state, http_post=post, sleep=_nosleep))
         assert res["swapped"] is True and res["evicted"] == holder
         assert len(post.calls) == 1 and port in post.calls[0][0]
+
+
+def test_gpu_batch_holder_is_refused_never_evicted():
+    # A GPU batch drives the serving holder (llm) WITHOUT taking the training lease, so holder reads as a
+    # serving tenant — but a running batch is never preempted (FR-155). Refuse before any unload-now.
+    state = StateSeq({"holder": "llm", "resident": True})
+    post = PostRecorder()
+
+    async def _batch():
+        return True
+
+    try:
+        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep,
+                                target_probe_fn=_up, batch_active_fn=_batch))
+    except m.PreemptRefused as e:
+        assert "batch" in str(e).lower()
+    else:
+        raise AssertionError("expected PreemptRefused while a GPU batch is active")
+    assert post.calls == []  # the batch-driven holder was never told to unload
+
+
+def test_unreachable_target_refuses_without_evicting():
+    # If the swap target daemon is down, we must NOT evict the current holder (that would drop the only
+    # working serving model for a request that then 503s anyway).
+    state = StateSeq({"holder": "llm", "resident": True})
+    post = PostRecorder()
+
+    async def _down(_label):
+        return False
+
+    try:
+        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep,
+                                target_probe_fn=_down, batch_active_fn=_nobatch))
+    except m.SwapError as e:
+        assert "unreachable" in str(e)
+    else:
+        raise AssertionError("expected SwapError when the target is unreachable")
+    assert post.calls == []  # holder never evicted
+
+
+def test_stale_idle_holder_is_reresolved():
+    # The snapshotted holder (llm) already idle-released → its unload-now returns `idle`; the broker must
+    # re-resolve and evict the REAL current holder (vision), not assume the swap is done.
+    state = StateSeq({"holder": "llm", "resident": True},     # 1st resolve → llm (stale)
+                     {"holder": "vision", "resident": True},  # re-resolve → vision (the real holder)
+                     {"holder": None, "resident": False})     # freed after evicting vision
+
+    class _Seq:
+        def __init__(self):
+            self.calls = []
+
+        async def __call__(self, url, body):
+            self.calls.append(url)
+            if "8090" in url:                       # llm already released → idle
+                return 200, {"status": "idle"}
+            return 200, {"status": "unloaded", "drained": True}
+
+    post = _Seq()
+    res = run(m.preempt_if_needed("asr", state_fn=state, http_post=post, sleep=_nosleep,
+                                  target_probe_fn=_up, batch_active_fn=_nobatch))
+    assert res["swapped"] is True and res["evicted"] == "vision"
+    assert len(post.calls) == 2 and "8090" in post.calls[0] and "8092" in post.calls[1]
 
 
 if __name__ == "__main__":
