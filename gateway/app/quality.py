@@ -281,11 +281,14 @@ def parse_input_key(key: str):
     return modality, int(stamp) / 1000.0, pid
 
 
-def capture_input(prediction_id: str, modality: str, recoverable_input, *, roll: float = None) -> None:
+def capture_input(prediction_id: str, modality: str, recoverable_input, *, options: dict = None,
+                  roll: float = None) -> None:
     """016 (FR-146): store a **recoverable** served input (prompt/image-b64/audio-b64) under
     `inputs/<modality>/...` for a sampled prediction, so a challenger can be shadow-replayed over real
-    traffic. Gated by `QUALITY_CAPTURE_IO` + the sampling policy; **fire-and-forget + fail-open** (never
-    affects serving, like 013 logging) on the bounded `_log_sem`; lazy cap/TTL prune on write."""
+    traffic. `options` carries the served request settings whose scorer behaviour depends on them (LLM
+    `max_tokens`/`temperature`, ASR `language`) so a replay reproduces the champion's decoding rather than
+    the scorer defaults. Gated by `QUALITY_CAPTURE_IO` + the sampling policy; **fire-and-forget + fail-open**
+    (never affects serving, like 013 logging) on the bounded `_log_sem`; lazy cap/TTL prune on write."""
     if (not QUALITY_LOGGING_ENABLED or not QUALITY_CAPTURE_IO
             or recoverable_input is None
             or normalize_modality(modality) not in SHADOW_MODALITIES
@@ -295,6 +298,8 @@ def capture_input(prediction_id: str, modality: str, recoverable_input, *, roll:
     key = _input_key(modality, prediction_id, ts)
     record = {"prediction_id": prediction_id, "modality": normalize_modality(modality),
               "input": recoverable_input, "ts": ts}
+    if options:
+        record["options"] = {k: v for k, v in options.items() if v is not None}
     if not _log_sem.acquire(blocking=False):  # backpressure: store slow → drop (serving unaffected)
         return
 

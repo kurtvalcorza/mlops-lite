@@ -52,6 +52,7 @@ LEASE_TENANT = "training"          # this daemon's GPU lease identity (008 US1)
 # mostly consumed (e.g. a leftover CUDA context), instead of letting the worker hit CUDA OOM (#11).
 TRAIN_EST_GB = float(os.getenv("TRAIN_EST_GB", "2.0"))
 RUN_FLOW = os.path.join(HERE, "run_flow.py")  # the per-run subprocess entry (CUDA isolation)
+RUN_SHADOW = os.path.join(HERE, "run_shadow.py")  # the per-shadow-replay subprocess entry (CUDA isolation)
 LOG_DIR = os.getenv("TRAINER_LOG_DIR", os.path.join(tempfile.gettempdir(), "mlops-lite-trainer-logs"))
 
 _lock = threading.Lock()           # one run OR study OR batch at a time (shared single-GPU-tenant gate)
@@ -195,16 +196,60 @@ def _shadow_worker(shadow_id: str, req: dict):
     rec = _shadows[shadow_id]
     try:
         rec["status"] = "running"
-        from flows.shadow_replay import replay_job
-        out = replay_job(req["name"], req["champion_version"], req["challenger"], req["modality"],
-                         shadow_id=shadow_id, window_n=req.get("window_n"))
-        rec.update(status="succeeded", result=out)
+        # Run the replay in a fresh subprocess (run_shadow.py) — CUDA isolation, same as /train's
+        # _run_subprocess: the vision challenger's torch/CUDA context lives and dies with the child so it
+        # never accumulates in the long-lived daemon, and the daemon records the child as the lease's vram
+        # owner (one model in VRAM, Principle II; an orphaned child keeps the lease held).
+        rec.update(**_run_shadow_subprocess(shadow_id, req))
     except Exception as e:
         rec.update(status="failed", error=f"{type(e).__name__}: {e}")
     finally:
         with _lock:
             gpu_lease.release(LEASE_TENANT)  # free the single GPU slot (the challenger artifact is gone)
             _active = None
+
+
+def _run_shadow_subprocess(shadow_id: str, req: dict) -> dict:
+    """Run one shadow-replay in a fresh subprocess (run_shadow.py) and return its job-record update.
+
+    Mirrors `_run_subprocess` (the /train CUDA-isolation path): the request travels through a temp file,
+    the child's stdout/stderr merge into a per-shadow log we tail on failure, and the daemon records the
+    child as the lease's **vram owner** right after spawn so the single-GPU lease tracks the real VRAM
+    holder. A death without a result file (hard CUDA/OOM crash) is surfaced as a failed replay."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, f"shadow-{shadow_id}.log")
+    with tempfile.TemporaryDirectory(prefix=f"shadow-{shadow_id}-") as tmp:
+        req_path = os.path.join(tmp, "request.json")
+        result_path = os.path.join(tmp, "result.json")
+        with open(req_path, "w", encoding="utf-8") as f:
+            json.dump({**req, "shadow_id": shadow_id}, f)
+        with open(log_path, "w", encoding="utf-8") as logf:
+            proc = subprocess.Popen(
+                [sys.executable, RUN_SHADOW, req_path, result_path],
+                stdout=logf, stderr=subprocess.STDOUT, env=os.environ.copy())
+            gpu_lease.set_vram_owner(LEASE_TENANT, proc.pid)  # child is the VRAM owner (008.1 pattern)
+            proc.wait()
+        return _read_shadow_result(result_path, proc.returncode, _tail(log_path))
+
+
+def _read_shadow_result(result_path: str, returncode: int, log_tail: str = "") -> dict:
+    """Daemon side of the run_shadow.py protocol → a shadow job-record update. A missing/corrupt result
+    file means the child died without a handled outcome (hard crash) → a failed replay with the log tail."""
+    payload = None
+    if os.path.exists(result_path):
+        try:
+            with open(result_path, encoding="utf-8") as f:
+                payload = json.load(f)
+        except (ValueError, OSError):
+            payload = None  # truncated/corrupt (e.g. SIGKILL mid-write) → treat as a hard crash
+    if payload is None:
+        suffix = f"; log tail:\n{log_tail}" if log_tail else ""
+        return {"status": "failed",
+                "error": f"shadow subprocess exited {returncode} without a valid result "
+                         f"(likely a hard CUDA/OOM crash){suffix}"}
+    if payload.get("ok"):
+        return {"status": "succeeded", "result": payload["result"]}
+    return {"status": "failed", "error": payload.get("error", "unknown shadow subprocess failure")}
 
 
 class Handler(BaseHTTPRequestHandler):

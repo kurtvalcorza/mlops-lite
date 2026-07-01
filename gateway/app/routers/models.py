@@ -149,12 +149,25 @@ class ShadowReplayRequest(BaseModel):
     modality: Optional[str] = None        # auto-resolved from the @serving version's task tag if omitted
 
 
+# The `kind` tag each fine-tune flow stamps → the modality, for versions that carry no `task` tag. The
+# LLM flow (training/flows/finetune.py) registers `kind=lora-adapter`/`format=gguf` with NO `task`, so a
+# bare `task` lookup would wrongly refuse a valid text-generation champion for the documented no-modality
+# shadow-replay call. Vision/ASR do set `task`, but map their `kind` too for symmetry.
+_KIND_TO_MODALITY = {
+    "vision-classifier": "image-classification",
+    "lora-adapter": "text-generation",
+    "asr": "asr",
+}
+
+
 def _serving_modality(name: str, version: str) -> Optional[str]:
-    """The registry `task` tag of `name@version` (the modality), best-effort."""
+    """The modality of `name@version` — the registry `task` tag, falling back to the artifact `kind` tag
+    (so an LLM LoRA version, which has no `task`, still resolves to `text-generation`), best-effort."""
     try:
         for v in registry.list_versions(name):
             if str(v.get("version")) == str(version):
-                return (v.get("tags") or {}).get("task")
+                tags = v.get("tags") or {}
+                return tags.get("task") or _KIND_TO_MODALITY.get(tags.get("kind"))
     except Exception:
         return None
     return None

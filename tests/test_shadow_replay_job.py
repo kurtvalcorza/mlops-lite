@@ -33,6 +33,20 @@ def test_replay_rows_shape_per_modality():
     assert m.replay_rows(_pairs(["AUD"]), "asr") == [{"audio_b64": "AUD"}]
 
 
+def test_replay_rows_threads_served_options():
+    # The champion's captured request options ride onto the scorer rows so the challenger replays with the
+    # same decoding (not the scorer defaults). Vision has no options; a bare row when options are absent.
+    llm = [{"prediction_id": "p", "input": "hi", "label": "l", "champion_prediction": "c", "ts": 0,
+            "options": {"max_tokens": 16, "temperature": 0.2}}]
+    assert m.replay_rows(llm, "text-generation") == [{"prompt": "hi", "max_tokens": 16, "temperature": 0.2}]
+    asr = [{"prediction_id": "p", "input": "AUD", "label": "l", "champion_prediction": "c", "ts": 0,
+            "options": {"language": "en"}}]
+    assert m.replay_rows(asr, "asr") == [{"audio_b64": "AUD", "language": "en"}]
+    vis = [{"prediction_id": "p", "input": "IMG", "label": "l", "champion_prediction": "c", "ts": 0,
+            "options": {"temperature": 0.5}}]
+    assert m.replay_rows(vis, "vision") == [{"image_b64": "IMG"}]  # vision ignores decoding options
+
+
 def test_replay_rows_rejects_unsupported_modality():
     try:
         m.replay_rows(_pairs(["x"]), "embedding")

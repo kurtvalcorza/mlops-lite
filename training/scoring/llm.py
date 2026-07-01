@@ -63,21 +63,31 @@ def _wait_ready(base_url: str, proc: subprocess.Popen, timeout: float = 180.0) -
     raise RuntimeError("llama-server (scorer) did not become ready in time")
 
 
-def make_predict_fn(adapter_gguf: str, base_hf: str = DEFAULT_BASE_HF, *, n_predict: int = 32,
+def make_predict_fn(gguf_path: str, base_hf: str = DEFAULT_BASE_HF, *, lora: bool = True,
+                    n_predict: int = 32, temperature: float = 0.0,
                     ngl: int = 999, ctx: int = 2048, port: int = SCORER_PORT,
                     server_bin: str = LLAMA_SERVER):
-    """Build a `predict_fn` that scores the served base GGUF + this run's LoRA-GGUF adapter via a
-    short-lived llama-server. One VRAM load for the whole benchmark; the server is always terminated
-    (load → score → free), so nothing stays resident or holds the lease past the fine-tune."""
+    """Build a `predict_fn` that scores an LLM GGUF via a short-lived llama-server. One VRAM load for the
+    whole benchmark; the server is always terminated (load → score → free), so nothing stays resident or
+    holds the lease past the fine-tune.
+
+    `lora=True` (default): `gguf_path` is a **LoRA-GGUF adapter** served on top of `base_hf`'s f16 GGUF
+    (`-m base --lora adapter`) — the 015 fine-tune shape. `lora=False`: `gguf_path` is a **full-model
+    GGUF** served directly (`-m gguf`, `base_hf` ignored) — a baseline/raw registered LLM version rather
+    than a fine-tuned adapter (016 shadow-replay). Per-row `max_tokens`/`temperature` override the defaults
+    so a replay can reproduce the champion's served decoding settings."""
 
     def predict_fn(rows, _modality, _version):
         import httpx
 
         if not os.path.exists(server_bin):
             raise FileNotFoundError(f"llama-server not found at {server_bin} — build llama.cpp first")
-        base_gguf = resolve_base_gguf(base_hf)
+        if lora:
+            model_args = ["-m", resolve_base_gguf(base_hf), "--lora", gguf_path]
+        else:
+            model_args = ["-m", gguf_path]  # full-model GGUF — the served artifact itself, no adapter
         base_url = f"http://127.0.0.1:{port}"
-        cmd = [server_bin, "-m", base_gguf, "--lora", adapter_gguf, "-ngl", str(ngl),
+        cmd = [server_bin, *model_args, "-ngl", str(ngl),
                "--host", "127.0.0.1", "--port", str(port), "-c", str(ctx)]
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -87,7 +97,7 @@ def make_predict_fn(adapter_gguf: str, base_hf: str = DEFAULT_BASE_HF, *, n_pred
                 for r in rows:
                     resp = client.post(f"{base_url}/completion", json={
                         "prompt": r["prompt"], "n_predict": int(r.get("max_tokens", n_predict)),
-                        "temperature": 0.0, "cache_prompt": False,
+                        "temperature": float(r.get("temperature", temperature)), "cache_prompt": False,
                     })
                     resp.raise_for_status()
                     out.append(resp.json().get("content", ""))

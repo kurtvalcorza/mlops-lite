@@ -41,6 +41,9 @@ def make_predict_fn(ggml_path: str, *, cli_bin: str = WHISPER_CLI, use_gpu: bool
                 with open(wav, "wb") as f:
                     f.write(base64.b64decode(r["audio_b64"], validate=True))
                 cmd = [cli_bin, "-m", ggml_path, "-f", wav, "-nt", "-np"]
+                lang = r.get("language")  # 016: replay the champion's served language, not the default
+                if lang and lang != "auto":
+                    cmd += ["-l", str(lang)]
                 if not use_gpu:
                     cmd.append("-ng")  # --no-gpu (whisper.cpp); default is GPU when built with CUDA
                 proc = subprocess.run(cmd, capture_output=True, text=True)

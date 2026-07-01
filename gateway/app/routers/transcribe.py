@@ -48,6 +48,12 @@ async def transcribe(req: TranscribeRequest):
         base64.b64decode(req.audio_b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="audio_b64 is not valid base64")
+    # Resolve the serving ASR version at request ARRIVAL, not in the post-serve detached task (016): if an
+    # operator promotes a different asr version before that task runs, the old transcription would be
+    # logged under the NEW version and its labels joined into the wrong champion window during shadow
+    # replay. `_resolve_asr_version` is a quick registry lookup (never raises); a multi-second transcription
+    # dominates, so this adds negligible latency while pinning the correct champion.
+    asr_name, asr_version = await run_in_threadpool(_resolve_asr_version)
     async with httpx.AsyncClient(timeout=300) as client:
         try:
             r = await client.post(f"{ASR_URL}/transcribe", json={
@@ -74,10 +80,9 @@ async def transcribe(req: TranscribeRequest):
     pid = (data.get("prediction_id") if isinstance(data, dict) else None) or uuid.uuid4().hex
 
     async def _log():
-        name, version = await run_in_threadpool(_resolve_asr_version)
         text = data.get("text") if isinstance(data, dict) else None
-        quality.log_prediction(name, version, "asr", req.filename, text, prediction_id=pid)
-        quality.capture_input(pid, "asr", req.audio_b64)
+        quality.log_prediction(asr_name, asr_version, "asr", req.filename, text, prediction_id=pid)
+        quality.capture_input(pid, "asr", req.audio_b64, options={"language": req.language})
 
     try:
         asyncio.ensure_future(_log())

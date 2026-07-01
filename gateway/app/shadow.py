@@ -12,6 +12,8 @@ absent data, compute the like-for-like verdict, and persist it. The pure pieces 
 `training/flows/shadow_replay.py` and is invoked through an injectable seam so the orchestration tests
 need no GPU.
 """
+import time
+
 try:
     from . import quality
 except ImportError:  # standalone (offline tests, or the trainer path with gateway/app on sys.path)
@@ -52,6 +54,7 @@ def join_window(input_recs, predictions, labels, *, name, version, modality, win
             continue  # unlabeled → pending, excluded
         pairs.append({"prediction_id": pid, "input": rec.get("input"), "label": labels[pid],
                       "champion_prediction": pred.get("prediction"),
+                      "options": rec.get("options"),  # served decoding settings, replayed for fidelity
                       "ts": rec.get("ts", pred.get("ts", 0))})
     pairs.sort(key=lambda p: p["ts"])
     return pairs[-window_n:] if window_n and window_n > 0 else pairs
@@ -93,31 +96,57 @@ def build_verdict(name, champion_version, challenger_version, modality, pairs, c
 
 # --- I/O: resolve the replay window from the store ------------------------------------------------
 
-def resolve_window(name, version, modality, *, window_n=None, s3=None):
+def resolve_window(name, version, modality, *, window_n=None, s3=None, now=None, ttl_s=None):
     """Join the captured inputs ↔ champion predictions ↔ labels from the `results` bucket into the replay
     window for the champion `name@version` + `modality`. Reuses 013's store helpers; bounded GETs (only
-    the captured-input pids, themselves capped by the 016 policy)."""
+    the captured-input pids, themselves capped by the 016 policy).
+
+    Two robustness properties beyond the pure join:
+      - **TTL filter at resolve time**, not just on capture-write: if traffic for a modality stops, no
+        later `capture_input` runs the prune, so a delayed label could otherwise pull an expired input
+        into a ready window. The ts is parsed from the key name (no extra GET). `now`/`ttl_s` are
+        injectable for tests; `ttl_s<=0` disables (as in `inputs_to_prune`).
+      - **Store-read failures surface** (ShadowError) instead of silently dropping a row: only a
+        *confirmed-missing* key (404/NoSuchKey — a prune race, or a never-logged prediction/pending
+        label) is skipped; a transient MinIO/S3 error aborts the replay rather than compute an advisory
+        verdict on a partial, biased window.
+    """
     window_n = quality.WINDOW_N if window_n is None else window_n
     modality = quality.normalize_modality(modality)
     s3 = s3 or quality._s3()
+    now = time.time() if now is None else now
+    ttl_s = quality.SHADOW_CAPTURE_TTL_S if ttl_s is None else ttl_s
     input_recs, predictions, labels = [], {}, {}
     for key in quality._list_keys(s3, f"{quality.INPUT_PREFIX}{modality}/"):
+        if ttl_s and ttl_s > 0:
+            try:
+                _, ts_key, _ = quality.parse_input_key(key)
+            except Exception:
+                ts_key = None
+            if ts_key is not None and (now - ts_key) > ttl_s:
+                continue  # expired per the retention policy — never score stale traffic
         try:
             rec = quality._get_json(key)
-        except Exception:
-            continue
+        except Exception as e:
+            if quality._missing(e):
+                continue  # deleted between list and get (a prune race) → skip
+            raise ShadowError(f"shadow-replay store read failed for input {key}: {e}") from e
         pid = rec.get("prediction_id")
         if not pid:
             continue
         input_recs.append(rec)
         try:
             predictions[pid] = quality._get_json(f"{quality.PRED_PREFIX}{pid}.json")
-        except Exception:
-            pass
+        except Exception as e:
+            if not quality._missing(e):  # transient store error → abort, don't bias the window
+                raise ShadowError(f"shadow-replay store read failed for prediction {pid}: {e}") from e
+            # confirmed-missing → never logged a champion prediction → excluded by join_window
         try:
             labels[pid] = quality._get_json(f"{quality.LABEL_PREFIX}{pid}.json").get("label")
-        except Exception:
-            pass
+        except Exception as e:
+            if not quality._missing(e):
+                raise ShadowError(f"shadow-replay store read failed for label {pid}: {e}") from e
+            # confirmed-missing → unlabeled/pending → excluded by join_window
     return join_window(input_recs, predictions, labels, name=name, version=version, modality=modality,
                        window_n=window_n)
 

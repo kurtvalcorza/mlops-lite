@@ -37,6 +37,9 @@ def make_quality(s3, **flags):
     q._s3 = lambda: s3
     q.QUALITY_CAPTURE_IO = flags.get("capture", True)
     q.QUALITY_LOGGING_ENABLED = flags.get("logging", True)
+    # TTL off by default so the window/verdict tests (tiny absolute timestamps) exercise the join, not
+    # expiry; the dedicated TTL test drives resolve_window(now=, ttl_s=) explicitly.
+    q.SHADOW_CAPTURE_TTL_S = flags.get("ttl_s", 0)
     return q
 
 

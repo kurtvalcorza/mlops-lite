@@ -21,15 +21,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 def replay_rows(pairs: list, modality: str) -> list:
     """Shape the replay window's recoverable inputs into the row dicts 015's per-modality scorer expects
     — **pure**. LLM → `{prompt}`, vision → `{image_b64}`, ASR → `{audio_b64}`. The input payload is the
-    recoverable served input captured by 016 (016 capture-extension)."""
+    recoverable served input captured by 016 (016 capture-extension).
+
+    Each pair's captured `options` (the champion's served request settings) are threaded onto the row so
+    the challenger is scored with the SAME decoding rather than the scorer defaults — otherwise the verdict
+    could reflect a `temperature`/`max_tokens`/`language` difference, not a model difference. Scorers that
+    ignore an option just don't read it (vision has none)."""
+    mod = _normalize(modality)
     field = {
         "text-generation": "prompt",
         "image-classification": "image_b64",
         "asr": "audio_b64",
-    }.get(_normalize(modality))
+    }.get(mod)
     if not field:
         raise ValueError(f"shadow-replay does not support modality {modality!r}")
-    return [{field: p["input"]} for p in pairs]
+    replayed = {"text-generation": ("max_tokens", "temperature"), "asr": ("language",)}.get(mod, ())
+    rows = []
+    for p in pairs:
+        row = {field: p["input"]}
+        opts = p.get("options") or {}
+        for k in replayed:
+            if opts.get(k) is not None:
+                row[k] = opts[k]
+        rows.append(row)
+    return rows
 
 
 def _normalize(modality: str) -> str:
@@ -108,14 +123,14 @@ def build_challenger_predict_fn(name: str, version: str, modality: str):
     # vision `model.pt` and an LLM LoRA under the same name). The scorer is chosen from the request
     # modality, so verify the challenger version's own artifact kind matches BEFORE downloading it or
     # taking the GPU lease — otherwise a mismatched artifact (e.g. a model.pt loaded as a LoRA adapter)
-    # fails deep in the scorer, after the fetch/load. `kind` is the per-flow discriminator
-    # (vision-classifier / lora-adapter / asr); only reject when it's present and wrong, so versions
-    # registered before the tag existed still replay.
+    # fails deep in the scorer, after the fetch/load. `kind` is the per-flow discriminator; only reject
+    # when it's present and out of the modality's kind set, so versions registered before the tag existed
+    # still replay (a full-model LLM GGUF and a LoRA adapter are both text-generation).
     kind = tags.get("kind")
-    if kind and kind != _EXPECTED_KIND[mod]:
+    if kind and kind not in _MODALITY_KINDS[mod]:
         raise ValueError(
             f"challenger {name} v{version} is a {kind!r} artifact — cannot shadow-replay it as {mod!r} "
-            f"(expected kind {_EXPECTED_KIND[mod]!r}; like-for-like replay only)")
+            f"(expected one of {sorted(_MODALITY_KINDS[mod])}; like-for-like replay only)")
     if mod == "image-classification":
         return _vision_predict_fn(source, tags)
     if mod == "text-generation":
@@ -123,12 +138,13 @@ def build_challenger_predict_fn(name: str, version: str, modality: str):
     return _asr_predict_fn(source)
 
 
-# The `kind` tag each 015 fine-tune flow stamps on its registered version, per modality — the reliable
-# discriminator for the like-for-like challenger guard above (vision_finetune / finetune / asr_finetune).
-_EXPECTED_KIND = {
-    "image-classification": "vision-classifier",
-    "text-generation": "lora-adapter",
-    "asr": "asr",
+# The artifact `kind` tags each modality's registered versions may carry — the discriminator for the
+# like-for-like challenger guard above. `lora-adapter` is the 015 fine-tune shape; `llm-gguf`/`gguf` cover
+# a baseline/raw full-model LLM GGUF (scored without --lora). Vision/ASR each have a single kind.
+_MODALITY_KINDS = {
+    "image-classification": {"vision-classifier"},
+    "text-generation": {"lora-adapter", "llm-gguf", "gguf"},
+    "asr": {"asr"},
 }
 
 
@@ -193,14 +209,19 @@ def _vision_predict_fn(source: str, tags: dict):
 
 
 def _llm_predict_fn(source: str, tags: dict):
-    """Download the challenger's LoRA-GGUF adapter and build 015's transient-llama.cpp scorer against the
-    served base GGUF + adapter (`base_model` from lineage tags). The scorer tears the server down per call;
-    we delete the fetched adapter afterwards so nothing lingers."""
+    """Download the challenger's LLM GGUF and build 015's transient-llama.cpp scorer. A `lora-adapter`
+    version (the 015 fine-tune shape) is served on the base GGUF + `--lora` (`base_model` from lineage
+    tags); a full-model GGUF version (`kind` in {llm-gguf, gguf}) is served directly with no `--lora`.
+    The scorer tears the server down per call; we delete the fetched artifact afterwards so nothing
+    lingers."""
     from scoring import llm
 
-    tmp, adapter = _fetch_to_tmp(source, "shadow-llm-", "adapter.gguf")
-    base_model = tags.get("base_model") or os.getenv("BASE_MODEL", llm.DEFAULT_BASE_HF)
-    inner = llm.make_predict_fn(adapter, base_model)
+    tmp, gguf = _fetch_to_tmp(source, "shadow-llm-", "artifact.gguf")
+    if tags.get("kind") == "lora-adapter":
+        base_model = tags.get("base_model") or os.getenv("BASE_MODEL", llm.DEFAULT_BASE_HF)
+        inner = llm.make_predict_fn(gguf, base_model)              # base GGUF + LoRA adapter
+    else:
+        inner = llm.make_predict_fn(gguf, lora=False)             # full-model GGUF served directly
     return _cleanup_after(inner, tmp)
 
 
