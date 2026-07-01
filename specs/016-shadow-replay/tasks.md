@@ -76,7 +76,9 @@ champion-logged on the same window; one model in VRAM; gate unchanged.
   verdict (`results` `shadow/` prefix and/or MLflow).
 - [x] **T314** [US2] `training/flows/shadow_replay.py` (NEW): trainer-side job — **acquire the lease**, load
   the challenger's served artifact, score over the replay corpus via **015's scorer** (replay rows as the
-  source), release; return per-metric value. **One model in VRAM** (FR-148).
+  source), release; return per-metric value. **One model in VRAM** (FR-148). `build_challenger_predict_fn`
+  now wired per-modality (vision→in-memory rebuild; LLM/ASR→fetch GGUF/ggml from MinIO→transient scorer,
+  cleaned up after; modality validated before any fetch). The live load/score is validated by T316.
 - [x] **T315** [US2] `gateway/app/routers/models.py`: `POST /models/{name}/shadow-replay` (dispatch, `202`)
   + `GET /models/{name}/shadow-replay/{id}` (verdict) per contracts/shadow-replay-endpoint.md; BFF
   allowlist if surfaced in the UI.

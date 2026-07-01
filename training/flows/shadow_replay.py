@@ -80,11 +80,130 @@ def build_challenger_predict_fn(name: str, version: str, modality: str):
     """On-hardware seam: fetch the challenger version's **served artifact** from the registry and build
     015's per-modality `predict_fn` for it (loaded sequentially under the lease — one model in VRAM).
 
-    This is the GPU/IO path exercised by the on-hardware SCs (SC-095/096): vision/embeddings score the
-    in-memory artifact; LLM/ASR load the served GGUF/ggml via a transient llama.cpp/whisper.cpp (015's
-    `training.scoring`). It is intentionally not invoked offline — tests inject a `predict_fn` into
-    `score_challenger`. Raises a clear error if called without the live stack."""
-    raise NotImplementedError(
-        "build_challenger_predict_fn loads a registered artifact under the GPU lease — on-hardware only "
-        "(SC-095/096). Offline, inject a predict_fn into score_challenger(). Wiring the per-modality "
-        "artifact fetch (GGUF/ggml/model.pt by version) + 015 scorer is the reference-hardware step.")
+    This is the GPU/IO path exercised by the on-hardware SCs (SC-095/096): vision scores the in-memory
+    artifact (the trained classifier *is* the served model); LLM/ASR load the served GGUF/ggml via a
+    transient llama.cpp/whisper.cpp (015's `training.scoring`). It is intentionally not invoked offline —
+    tests inject a `predict_fn` into `score_challenger`; the heavy imports here are all deferred so this
+    module still imports on any box. Scope mirrors `replay_rows` (labeled-prediction modalities only).
+
+    All three per-modality builders return a `predict_fn(rows, modality, version)` that scores the
+    challenger and then releases what it loaded (LLM/ASR tear down the transient server + delete the
+    fetched artifact; vision drops the model ref + frees CUDA), so nothing stays resident past the replay.
+    """
+    mod = _normalize(modality)
+    if mod not in ("image-classification", "text-generation", "asr"):
+        raise ValueError(
+            f"shadow-replay does not support modality {modality!r} — labeled-prediction modalities only "
+            f"(text-generation / image-classification / asr)")
+    source, tags = _version_source_and_tags(name, version)  # network only after the modality is valid
+    if mod == "image-classification":
+        return _vision_predict_fn(source, tags)
+    if mod == "text-generation":
+        return _llm_predict_fn(source, tags)
+    return _asr_predict_fn(source)
+
+
+def _version_source_and_tags(name: str, version: str):
+    """(source, tags) for a registry version — the challenger's `s3://` artifact URI + its provenance
+    tags (`arch` for vision, `base_model` for the LLM). Mirrors how the 015 flows read a version."""
+    from _common import MLFLOW_URI
+    from mlflow.tracking import MlflowClient
+
+    mv = MlflowClient(tracking_uri=MLFLOW_URI).get_model_version(name, str(version))
+    return mv.source, dict(mv.tags or {})
+
+
+def _download_source(source: str) -> bytes:
+    """Fetch a registry `s3://bucket/key` artifact from MinIO → bytes (mirrors vision `_warm_start`)."""
+    from _common import s3_client
+
+    if not source or not source.startswith("s3://"):
+        raise ValueError(f"unexpected registry source {source!r} — expected s3://bucket/key")
+    bucket, key = source[len("s3://"):].split("/", 1)
+    return s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
+def _vision_predict_fn(source: str, tags: dict):
+    """Rebuild the served vision classifier in-memory from its `model.pt` {state_dict, categories} (the
+    009 BentoML load shape) and score in-process — the trained model IS the served artifact, no
+    quantization gap (015 D6). Drops the model + frees CUDA after the single scoring call (Principle II)."""
+    import io
+    import os as _os
+
+    import torch
+
+    from vision_finetune import _build_model
+
+    # weights_only=False: model.pt carries the `categories` list alongside the state_dict, so the
+    # torch>=2.6 weights-only default would refuse it — mirrors vision `_warm_start`.
+    payload = torch.load(io.BytesIO(_download_source(source)), map_location="cpu", weights_only=False)
+    state_dict, categories = payload["state_dict"], list(payload["categories"])
+    backbone = tags.get("arch") or _os.getenv("VISION_BASE_ARCH", "mobilenet_v2")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = _build_model(backbone, len(categories), pretrained=False)
+    model.load_state_dict(state_dict)
+    model = model.to(device)
+    model.eval()
+    holder = [model]
+
+    def predict_fn(rows, _modality, _version):
+        from scoring import vision
+        try:
+            return vision.make_predict_fn(holder[0], categories, device)(rows, _modality, _version)
+        finally:
+            holder[0] = None  # drop the only surviving ref so GC + empty_cache can reclaim VRAM
+            _free_cuda()
+
+    return predict_fn
+
+
+def _llm_predict_fn(source: str, tags: dict):
+    """Download the challenger's LoRA-GGUF adapter and build 015's transient-llama.cpp scorer against the
+    served base GGUF + adapter (`base_model` from lineage tags). The scorer tears the server down per call;
+    we delete the fetched adapter afterwards so nothing lingers."""
+    from scoring import llm
+
+    tmp, adapter = _fetch_to_tmp(source, "shadow-llm-", "adapter.gguf")
+    base_model = tags.get("base_model") or os.getenv("BASE_MODEL", llm.DEFAULT_BASE_HF)
+    inner = llm.make_predict_fn(adapter, base_model)
+    return _cleanup_after(inner, tmp)
+
+
+def _asr_predict_fn(source: str):
+    """Download the challenger's `ggml-*.bin` and build 015's transient-whisper.cpp scorer against it
+    (load → transcribe → free per clip). Deletes the fetched ggml after the scoring call."""
+    from scoring import asr
+
+    tmp, ggml = _fetch_to_tmp(source, "shadow-asr-", os.path.basename(source.rstrip("/")) or "model.bin")
+    inner = asr.make_predict_fn(ggml)
+    return _cleanup_after(inner, tmp)
+
+
+def _fetch_to_tmp(source: str, prefix: str, filename: str):
+    """Download `source` into a fresh temp dir under `filename`; return (tmpdir, filepath). The file must
+    outlive `build_challenger_predict_fn` (llama.cpp/whisper.cpp read it at predict time), so the dir is
+    cleaned by `_cleanup_after` once the single scoring call completes."""
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    path = os.path.join(tmp, filename)
+    with open(path, "wb") as f:
+        f.write(_download_source(source))
+    return tmp, path
+
+
+def _cleanup_after(inner, tmpdir: str):
+    """Wrap a per-call `predict_fn` so its downloaded artifact dir is removed after the (single) call."""
+    def predict_fn(rows, _modality, _version):
+        try:
+            return inner(rows, _modality, _version)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return predict_fn
+
+
+def _free_cuda():
+    from _common import free_cuda
+    free_cuda()

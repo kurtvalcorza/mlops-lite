@@ -64,13 +64,35 @@ def test_score_challenger_length_mismatch_raises():
         raise AssertionError("expected ValueError on a prediction/row length mismatch")
 
 
-def test_build_challenger_predict_fn_is_on_hardware_only():
+def test_build_challenger_predict_fn_rejects_unsupported_modality_before_any_fetch():
+    # An out-of-scope modality is refused BEFORE the registry/MinIO fetch (fail-fast, no network): if the
+    # ordering regressed, this would hang trying to reach MLflow instead of raising.
+    m._version_source_and_tags = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("registry must not be consulted for an unsupported modality"))
     try:
-        m.build_challenger_predict_fn("m", "1", "asr")
-    except NotImplementedError:
+        m.build_challenger_predict_fn("m", "1", "embedding")
+    except ValueError:
         pass
     else:
-        raise AssertionError("offline, build_challenger_predict_fn must refuse clearly (on-hardware seam)")
+        raise AssertionError("expected ValueError for an out-of-scope modality (labeled-prediction only)")
+
+
+def test_build_challenger_predict_fn_dispatches_per_modality():
+    # The on-hardware artifact load is stubbed; this verifies the loader resolves the version once and
+    # routes each modality to its 015 scorer builder (vision→in-memory, LLM/ASR→transient server) with
+    # the fetched source + provenance tags — the GPU/IO itself is exercised by SC-095/096.
+    calls = {}
+    m._version_source_and_tags = lambda name, version: (f"s3://models/{name}/{version}/art", {"arch": "x"})
+    m._vision_predict_fn = lambda source, tags: (calls.__setitem__("vision", (source, tags)), "V")[1]
+    m._llm_predict_fn = lambda source, tags: (calls.__setitem__("llm", (source, tags)), "L")[1]
+    m._asr_predict_fn = lambda source: (calls.__setitem__("asr", source), "A")[1]
+
+    assert m.build_challenger_predict_fn("m", "3", "vision") == "V"
+    assert m.build_challenger_predict_fn("m", "4", "llm") == "L"
+    assert m.build_challenger_predict_fn("m", "5", "asr") == "A"
+    assert calls["vision"] == ("s3://models/m/3/art", {"arch": "x"})
+    assert calls["llm"] == ("s3://models/m/4/art", {"arch": "x"})
+    assert calls["asr"] == "s3://models/m/5/art"
 
 
 if __name__ == "__main__":
