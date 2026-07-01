@@ -99,6 +99,9 @@ async def classify(req: ClassifyRequest):
         name, version = await run_in_threadpool(_resolve_vision_version)
         quality.log_prediction(name, version, "image-classification", input_ref, label,
                                prediction_id=pid)
+        # 016 (FR-146): capture the recoverable IMAGE (was a SHA hash only) under the bounded opt-in
+        # policy, so a challenger can be shadow-replayed over real traffic. Fire-and-forget + fail-open.
+        quality.capture_input(pid, "image-classification", req.image_b64)
 
     try:
         asyncio.ensure_future(_log())

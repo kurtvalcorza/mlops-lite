@@ -102,6 +102,11 @@ async def infer(req: InferRequest):
         # can be scored later against a delayed label. Returns a synchronous id regardless of store state.
         prediction_id = quality.log_prediction(
             SERVING_MODEL, registry_version, "text-generation", req.prompt, result.get("text"))
+        # 016 (FR-146): also route the prompt to the bounded recoverable-input capture (uniform replay
+        # corpus across modalities), so it can be shadow-replayed. The served decoding settings ride along
+        # so a replay reproduces them, not the scorer defaults. Fire-and-forget + fail-open.
+        quality.capture_input(prediction_id, "text-generation", req.prompt,
+                              options={"max_tokens": req.max_tokens, "temperature": req.temperature})
         return {
             "status": "completed",
             "registry_model": SERVING_MODEL,

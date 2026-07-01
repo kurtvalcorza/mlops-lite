@@ -20,6 +20,7 @@ Design (mirrors the siblings it lives beside):
 """
 import json
 import os
+import random
 import sys
 import threading
 import time
@@ -48,7 +49,16 @@ MIN_PAIRS = int(os.getenv("QUALITY_MIN_PAIRS", "20"))            # fewer labeled
 DROP_PCT = float(os.getenv("QUALITY_DROP_PCT", "0.10"))         # breach: >X% below the 011 baseline
 RETRAIN_COOLDOWN_SEC = float(os.getenv("QUALITY_RETRAIN_COOLDOWN_SEC", "3600"))  # OR+cooldown debounce
 
+# 016 shadow-replay input capture (FR-146/147). Storing the *recoverable* served input (prompt/image/audio)
+# — not just a hash — lets a challenger be re-run over real traffic. It is SENSITIVE (full prompts/images/
+# audio) and unbounded by nature, so it is gated by the existing QUALITY_CAPTURE_IO opt-in AND a bounded
+# sampled+capped+TTL policy (Principle III — the constrained drive). Off ⇒ no replay corpus.
+SHADOW_CAPTURE_SAMPLE = float(os.getenv("SHADOW_CAPTURE_SAMPLE", "1.0"))   # fraction of preds to capture
+SHADOW_CAPTURE_CAP_N = int(os.getenv("SHADOW_CAPTURE_CAP_N", "500"))       # ring-buffer cap per modality
+SHADOW_CAPTURE_TTL_S = float(os.getenv("SHADOW_CAPTURE_TTL_S", str(7 * 24 * 3600)))  # retention TTL (7d)
+
 PRED_PREFIX, LABEL_PREFIX, QUALITY_PREFIX = "predictions/", "labels/", "quality/"
+INPUT_PREFIX, SHADOW_PREFIX = "inputs/", "shadow/"  # 016: recoverable captured inputs + shadow verdicts
 
 # Logging exports run on bounded daemon threads (the 006 pattern): drop a record rather than pile up
 # threads when the store is slow, and never block process/test shutdown.
@@ -217,6 +227,113 @@ def attach_label(prediction_id: str, label) -> dict:
         except Exception as e:
             raise QualityStoreError(f"cannot store label for {prediction_id}: {e}") from e
     return {"prediction_id": prediction_id, "status": "attached"}
+
+
+# --- 016: recoverable input capture for shadow-replay (pure policy + fire-and-forget storage) ------
+
+# The replayable modalities (a single per-prediction (input, label) pair). Embeddings/tabular are out of
+# scope (no clean per-request label) — see specs/016-shadow-replay/spec.md Non-Goals.
+SHADOW_MODALITIES = {"text-generation", "image-classification", "asr"}
+_MODALITY_ALIAS = {"llm": "text-generation", "vision": "image-classification"}
+
+
+def normalize_modality(modality: str) -> str:
+    """Map a friendly alias (llm/vision) to the registry `task` string; pass others through."""
+    return _MODALITY_ALIAS.get(modality, modality)
+
+
+def should_capture(*, sample: float = None, roll: float = None) -> bool:
+    """Sampling admission for input capture (016 FR-147) — **pure**. Captures a `sample` fraction of
+    predictions (1.0 = all, 0.0 = none). `roll` (a [0,1) draw) is injectable for deterministic tests;
+    it defaults to `random.random()`. The master `QUALITY_CAPTURE_IO` opt-in is checked by the caller."""
+    s = SHADOW_CAPTURE_SAMPLE if sample is None else sample
+    if s >= 1.0:
+        return True
+    if s <= 0.0:
+        return False
+    return (random.random() if roll is None else roll) < s
+
+
+def inputs_to_prune(records, *, now: float, cap_n: int = None, ttl_s: float = None) -> list:
+    """Given `[(key, ts)]` captured-input records for ONE modality, return the keys to delete to enforce
+    the **TTL** (older than `ttl_s`) and the **ring-buffer cap** (keep only the newest `cap_n`). Pure —
+    unit-testable with synthetic records, no I/O. Bounds storage on the constrained drive (Principle III)."""
+    cap_n = SHADOW_CAPTURE_CAP_N if cap_n is None else cap_n
+    ttl_s = SHADOW_CAPTURE_TTL_S if ttl_s is None else ttl_s
+    expired = {k for k, ts in records if ttl_s and ttl_s > 0 and (now - ts) > ttl_s}
+    fresh = sorted(((k, ts) for k, ts in records if k not in expired), key=lambda kt: kt[1], reverse=True)
+    over_cap = {k for k, _ in fresh[cap_n:]} if cap_n and cap_n > 0 else set()
+    return sorted(expired | over_cap)
+
+
+def _input_key(modality: str, prediction_id: str, ts: float) -> str:
+    """Storage key for a captured input: `inputs/<modality>/<ts_ms padded>-<pid>.json`. The zero-padded
+    millisecond timestamp in the key name makes a plain `list_objects` lexically time-sortable, so the
+    prune + the replay-window selection need no per-record GET to find the newest N (cheap on the cap)."""
+    return f"{INPUT_PREFIX}{normalize_modality(modality)}/{int(ts * 1000):015d}-{prediction_id}.json"
+
+
+def parse_input_key(key: str):
+    """Recover `(modality, ts, prediction_id)` from a captured-input key (the inverse of `_input_key`)."""
+    rest = key[len(INPUT_PREFIX):]
+    modality, _, fname = rest.partition("/")
+    stamp, _, pid = fname[:-len(".json")].partition("-")
+    return modality, int(stamp) / 1000.0, pid
+
+
+def capture_input(prediction_id: str, modality: str, recoverable_input, *, options: dict = None,
+                  roll: float = None) -> None:
+    """016 (FR-146): store a **recoverable** served input (prompt/image-b64/audio-b64) under
+    `inputs/<modality>/...` for a sampled prediction, so a challenger can be shadow-replayed over real
+    traffic. `options` carries the served request settings whose scorer behaviour depends on them (LLM
+    `max_tokens`/`temperature`, ASR `language`) so a replay reproduces the champion's decoding rather than
+    the scorer defaults. Gated by `QUALITY_CAPTURE_IO` + the sampling policy; **fire-and-forget + fail-open**
+    (never affects serving, like 013 logging) on the bounded `_log_sem`; lazy cap/TTL prune on write."""
+    if (not QUALITY_LOGGING_ENABLED or not QUALITY_CAPTURE_IO
+            or recoverable_input is None
+            or normalize_modality(modality) not in SHADOW_MODALITIES
+            or not should_capture(roll=roll)):
+        return
+    ts = time.time()
+    key = _input_key(modality, prediction_id, ts)
+    record = {"prediction_id": prediction_id, "modality": normalize_modality(modality),
+              "input": recoverable_input, "ts": ts}
+    if options:
+        record["options"] = {k: v for k, v in options.items() if v is not None}
+    if not _log_sem.acquire(blocking=False):  # backpressure: store slow → drop (serving unaffected)
+        return
+
+    def _run():
+        try:
+            _put_json(key, record)
+            _prune_inputs(normalize_modality(modality))  # bound storage (cap + TTL)
+        except Exception:  # noqa: BLE001 — capture must never affect serving (fail-open)
+            pass
+        finally:
+            _log_sem.release()
+
+    try:
+        threading.Thread(target=_run, name="shadow-capture", daemon=True).start()
+    except Exception:  # noqa: BLE001 — even a thread-spawn failure must not break serving
+        _log_sem.release()
+
+
+def _prune_inputs(modality: str) -> None:
+    """Enforce the per-modality cap + TTL by deleting old `inputs/<modality>/` records (best-effort). The
+    ts is parsed from the key name (no per-record GET), so this stays cheap on the bounded corpus."""
+    s3 = _s3()
+    records = []
+    for key in _list_keys(s3, f"{INPUT_PREFIX}{modality}/"):
+        try:
+            _, ts, _ = parse_input_key(key)
+        except Exception:
+            continue
+        records.append((key, ts))
+    for key in inputs_to_prune(records, now=time.time()):
+        try:
+            s3.delete_object(Bucket=RESULTS_BUCKET, Key=key)
+        except Exception:  # noqa: BLE001 — a prune miss is harmless; never fail the capture
+            pass
 
 
 # --- US2: windowed quality (pure scoring split from I/O) -------------------------------------------

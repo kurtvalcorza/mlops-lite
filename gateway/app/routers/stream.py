@@ -150,6 +150,11 @@ async def infer_stream(req: StreamRequest):
                         version = None
                     quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
                                            req.prompt, None)
+                    # 016 (FR-146): do NOT capture streamed prompts. The streamed output isn't logged
+                    # (prediction=None), so join_window excludes these as champion-unscorable — but a
+                    # capture would still consume the per-modality ring-buffer cap, evicting replayable
+                    # REST inputs before their labels arrive and starving shadow-replay. Capture only
+                    # where the prediction is logged (the /infer path).
 
                 try:
                     asyncio.ensure_future(_log())
