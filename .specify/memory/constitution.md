@@ -16,7 +16,9 @@ At most ONE GPU tenant may be resident in GPU VRAM at any instant — any GPU-re
 vision, ASR, …) **or** a training run — enforced by a **single, race-free GPU lease**: a
 single-slot admission mechanism with no time-of-check/time-of-use window, so two callers can never both
 proceed onto the GPU. CPU-only models (e.g. embeddings, tabular) hold no lease and are exempt. Tenants load on
-request and release VRAM after use (idle-release); workers are not always-on. Admission is checked
+request and release VRAM after use (idle-release); a **serving** tenant may additionally be released by an
+**operator-confirmed preemptive swap** (evict the holder → free → load the target, strictly sequential — still
+one tenant at a time), while a **running training/HPO/batch job is never preempted**; workers are not always-on. Admission is checked
 against **live free VRAM** and no feature may assume more VRAM than the host GPU provides (`VRAM_GB` in
 [hardware-profile.md](./hardware-profile.md)). This single-tenant GPU lease is the core constraint that
 separates this platform from production cluster designs — violating it defeats the project's purpose.
@@ -92,7 +94,7 @@ lifecycle stage — requires a documented amendment with explicit justification 
 implementation. Complexity must always be justified against Principles II and III. All plans
 and task lists are reviewed for compliance with these principles.
 
-**Version**: 1.4.0 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-06-28
+**Version**: 1.4.1 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-01
 
 <!-- v1.1.0: genericized — machine-specific values extracted to hardware-profile.md; constraints
      now expressed relative to VRAM_GB / RAM_GB / FREE_DISK_GB.
@@ -107,5 +109,10 @@ and task lists are reviewed for compliance with these principles.
      v1.4.0: Principle II generalized from "one LLM model in VRAM + serving<->training mutex" to "one GPU
      tenant under a single race-free lease — any GPU-resident modality OR a training run; live-VRAM
      admission; CPU-only models exempt." A strengthening generalization; the rule stays NON-NEGOTIABLE.
-     On-demand load + idle-release + VRAM budget retained. -->
+     On-demand load + idle-release + VRAM budget retained.
+     v1.4.1 (017-swap-on-demand): Principle II wording clarified — a *serving* tenant may also be released by
+     an OPERATOR-CONFIRMED PREEMPTIVE SWAP (evict→free→load, strictly sequential), in addition to idle-release;
+     a running training/HPO/batch job is NEVER preempted. This is a PATCH-level clarification, not a rule
+     change: at most one GPU tenant resident at any instant is unchanged and still NON-NEGOTIABLE (008's
+     earlier "cooperative, no swap/evict" *description* is superseded; the one-tenant invariant is not). -->
 

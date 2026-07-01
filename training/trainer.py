@@ -61,6 +61,8 @@ _studies: dict = {}                # study_id -> study record (012 HPO)
 _batches: dict = {}                # batch_id -> batch record (014 batch inference)
 _shadows: dict = {}                # shadow_id -> shadow-replay record (016)
 _active: str | None = None         # the run/study/batch/shadow id currently holding the daemon slot
+_batch_gpu_active: bool = False    # a GPU-modality batch is running (drives serving; never preemptable, 017)
+GPU_BATCH_MODALITIES = {"llm", "vision", "asr"}  # batch modalities that drive a serving supervisor's GPU
 
 
 def _gpu_free_mib():
@@ -170,14 +172,20 @@ def _batch_worker(batch_id: str, req: dict):
     single one-model-in-VRAM lease tenant (so an online /infer is serialized by that same lease and no
     second model is pinned); a tabular batch scores off-lease. The `_active` gate still serializes batch
     against train/study so the daemon runs one job at a time."""
-    global _active
+    global _active, _batch_gpu_active
     rec = _batches[batch_id]
+    modality = req.get("modality", "llm")
+    # A GPU-modality batch drives a serving supervisor (which holds the lease as llm/vision/asr), so the
+    # swap broker can't tell it from interactive serving by the lease alone — flag it here so a preempt
+    # swap refuses to evict a batch-driven holder (017 FR-155). A tabular batch is off-GPU (no flag).
+    with _lock:
+        _batch_gpu_active = modality in GPU_BATCH_MODALITIES
     try:
         rec["status"] = "running"
         from flows.batch_infer import batch_infer_flow
         out = batch_infer_flow(
             req["dataset_name"], req["dataset_version"], req["model"],
-            modality=req.get("modality", "llm"), registry_version=req.get("registry_version"),
+            modality=modality, registry_version=req.get("registry_version"),
             abort_threshold=float(req.get("abort_threshold", 0.5)))
         rec.update(status="succeeded", result=out)
     except Exception as e:
@@ -185,6 +193,7 @@ def _batch_worker(batch_id: str, req: dict):
     finally:
         with _lock:
             _active = None  # release the daemon slot (no GPU lease was held — serving owns VRAM)
+            _batch_gpu_active = False
 
 
 def _shadow_worker(shadow_id: str, req: dict):
@@ -268,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self._send(200, {
                 "ok": True, "busy": _active is not None, "active": _active,
+                "gpu_batch_active": _batch_gpu_active,  # 017: a GPU batch runs → serving holder not preemptable
                 "gpu_free_mib": _gpu_free_mib(), "vram_budget_gb": VRAM_GB,
             })
         if self.path == "/metrics":

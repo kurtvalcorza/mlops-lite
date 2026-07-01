@@ -10,7 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter, Histogram
 from pydantic import BaseModel
 
-from .. import quality, registry, tracing
+from .. import quality, registry, swap, tracing
 from ..serving import (
     SERVING_MODEL,
     ModelTooLargeError,
@@ -31,6 +31,7 @@ class InferRequest(BaseModel):
     prompt: str
     max_tokens: int = 256
     temperature: float = 0.7
+    preempt: bool = False  # 017: opt-in swap — evict a resident *serving* model first (default 008 refuse)
 
 
 async def _resolve_serving_version() -> str | None:
@@ -77,6 +78,9 @@ async def infer(req: InferRequest):
             INFER_REQUESTS.labels(status="unavailable").inc()
             trace_status, outcome = "ERROR", "unavailable"
             raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
+        if req.preempt:
+            # 017: evict a resident *serving* model so the LLM can load (a training holder → 409).
+            await swap.preempt_or_409("llm")
         try:
             result = await run_inference(req.prompt, req.max_tokens, req.temperature)
         except ModelTooLargeError as e:

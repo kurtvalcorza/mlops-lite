@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import platform_health, quality, registry, serving, tracing
+from .. import platform_health, quality, registry, serving, swap, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -33,6 +33,7 @@ class StreamRequest(BaseModel):
     prompt: str
     max_tokens: int = 256
     temperature: float = 0.7
+    preempt: bool = False  # 017: opt-in swap — evict a resident *serving* model first (default 008 refuse)
 
 
 def _sse(event: dict) -> bytes:
@@ -54,6 +55,11 @@ async def infer_stream(req: StreamRequest):
             start_ns=route_start_ns, end_ns=time.time_ns(), status="ERROR",
         )
         raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
+
+    if req.preempt:
+        # 017: evict a resident *serving* model so the LLM can load (a training holder → 409). Done
+        # before the SSE stream opens, so a refusal is a clean 409 (not an error mid-stream).
+        await swap.preempt_or_409("llm")
 
     async def gen():
         # 006/FR-050: trace timing captured OUTSIDE the GPU lock (export never coincides with the

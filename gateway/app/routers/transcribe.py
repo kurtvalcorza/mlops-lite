@@ -17,7 +17,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import quality, registry
+from .. import quality, registry, swap
 
 router = APIRouter()
 
@@ -39,15 +39,21 @@ class TranscribeRequest(BaseModel):
     audio_b64: str
     filename: str = "audio.wav"
     language: str = "auto"
+    preempt: bool = False  # 017: opt-in swap — evict a resident *serving* model first (default 008 refuse)
 
 
 @router.post("/transcribe")
 async def transcribe(req: TranscribeRequest):
-    """Transcribe an audio clip (base64 in, text out) via the whisper.cpp GPU-lease daemon."""
+    """Transcribe an audio clip (base64 in, text out) via the whisper.cpp GPU-lease daemon.
+
+    017: with `preempt=true` and a different *serving* model resident, the gateway evicts it first so the
+    ASR model can load (a **training** holder is never evicted → 409). Default is byte-for-byte 008."""
     try:
         base64.b64decode(req.audio_b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="audio_b64 is not valid base64")
+    if req.preempt:
+        await swap.preempt_or_409("asr")
     # Resolve the serving ASR version at request ARRIVAL, not in the post-serve detached task (016): if an
     # operator promotes a different asr version before that task runs, the old transcription would be
     # logged under the NEW version and its labels joined into the wrong champion window during shadow

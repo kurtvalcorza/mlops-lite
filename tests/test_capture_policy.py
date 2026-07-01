@@ -9,9 +9,21 @@ on → a recoverable input is stored under `inputs/<modality>/`; capture off (or
 import io
 import os
 import sys
+import threading as _real_threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _quality import FakeS3, load_quality  # noqa: E402
+
+
+class _ThreadingShim:
+    """A `threading` stand-in: SyncThread for Thread, everything else delegates to the real module. Set as
+    the loaded quality module's `threading` so capture runs synchronously WITHOUT mutating the process-wide
+    `threading.Thread` (which would leak into other tests — e.g. 017's unload-now drain uses real threads)."""
+
+    Thread = None  # set to SyncThread once it's defined below
+
+    def __getattr__(self, name):
+        return getattr(_real_threading, name)
 
 
 class FakeS3Del(FakeS3):
@@ -33,9 +45,12 @@ class SyncThread:
             self._target()
 
 
+_ThreadingShim.Thread = SyncThread
+
+
 def _wire(mod, s3, **flags):
     mod._s3 = lambda: s3
-    mod.threading.Thread = SyncThread
+    mod.threading = _ThreadingShim()  # rebind the module's ref — do NOT mutate global threading.Thread
     mod.QUALITY_LOGGING_ENABLED = flags.get("logging", True)
     mod.QUALITY_CAPTURE_IO = flags.get("capture", True)
     mod.SHADOW_CAPTURE_SAMPLE = flags.get("sample", 1.0)
