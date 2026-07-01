@@ -151,6 +151,20 @@ def test_asr_holder_evicted_via_asr_url():
     assert "8095" in post.calls[0][0]  # the ASR supervisor URL
 
 
+def test_non_llm_holder_swaps_even_though_llm_resident_is_false():
+    # Regression: gpu_state()'s `resident` is the LLM supervisor's OWN /health residency, so when a
+    # vision/asr tenant genuinely holds the lease it reports {holder: "vision"/"asr", resident: False}
+    # (Principle II → the llama-server child isn't resident). The swap must key on `holder` alone and
+    # still evict — gating on `resident` here would silently no-op every non-LLM swap (back to 008).
+    for holder, port in (("vision", "8092"), ("asr", "8095")):
+        state = StateSeq({"holder": holder, "resident": False},   # the real gpu_state() shape
+                         {"holder": None, "resident": False})       # lease freed after unload-now
+        post = PostRecorder()
+        res = run(m.preempt_if_needed("llm", state_fn=state, http_post=post, sleep=_nosleep))
+        assert res["swapped"] is True and res["evicted"] == holder
+        assert len(post.calls) == 1 and port in post.calls[0][0]
+
+
 if __name__ == "__main__":
     import sys
     import pytest

@@ -67,8 +67,14 @@ async def preempt_if_needed(target_label: str, *, state_fn=None, http_post=None,
 
     state = await state_fn()
     holder = state.get("holder")
-    if not holder or not state.get("resident"):
-        return {"swapped": False, "evicted": None, "reason": "no resident holder"}
+    # Gate solely on `holder` (the global lease holder, from gpu_lease.current_holder — which already
+    # filters out dead holders, so a non-null holder IS a live, evictable tenant; matches data-model.md).
+    # Do NOT also require `state["resident"]`: that flag is the LLM supervisor's own /health residency and
+    # tracks only whether the *llama-server child* is alive — it is False whenever a vision/asr tenant
+    # holds the lease (Principle II → the LLM child isn't resident then), which would wrongly skip the swap
+    # for every non-LLM holder and silently fall back to 008 refuse-if-held.
+    if not holder:
+        return {"swapped": False, "evicted": None, "reason": "no holder"}
     if holder == target_label:
         return {"swapped": False, "evicted": None, "reason": "holder is already the target"}
     if holder in NON_PREEMPTABLE:
@@ -125,7 +131,11 @@ async def _wait_for_free(target_label: str, state_fn, sleep, free_wait_s: float)
     while waited <= free_wait_s:
         state = await state_fn()
         holder = state.get("holder")
-        if not holder or not state.get("resident") or holder == target_label:
+        # Free ⇔ the holder cleared (lease released) or the target already holds it. Gate on `holder`
+        # only — same reason as preempt_if_needed: the LLM-specific `resident` flag is False for a live
+        # vision/asr holder, which would falsely report "free" before that holder finishes releasing and
+        # race the target's forward acquire().
+        if not holder or holder == target_label:
             return
         await sleep(step)
         waited += step
