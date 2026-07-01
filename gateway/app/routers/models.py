@@ -10,6 +10,7 @@ from typing import Dict, Optional
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from prometheus_client import Counter
 from pydantic import BaseModel
 
@@ -191,9 +192,11 @@ async def shadow_replay(name: str, req: ShadowReplayRequest):
         raise HTTPException(status_code=502, detail=f"registry error: {e}")
 
     if prep["status"] != "ready":
-        # no_corpus / inputs_not_captured / insufficient_data → a structured 409 (no job dispatched, FR-152).
+        # no_corpus / inputs_not_captured / insufficient_data → a structured 409 with the guard fields at
+        # top level (contracts/shadow-replay-endpoint.md), no job dispatched (FR-152).
         REGISTRY_OPS.labels(op="shadow", status=prep["status"]).inc()
-        raise HTTPException(status_code=409, detail={k: v for k, v in prep.items() if k != "pairs"})
+        return JSONResponse(status_code=409,
+                            content={k: v for k, v in prep.items() if k not in ("pairs", "shadow_id")})
 
     payload = {"shadow_id": prep["shadow_id"], "name": name, "challenger": req.challenger,
                "champion_version": prep["champion_version"], "modality": prep["modality"],
