@@ -6,9 +6,9 @@ contracts/unload-now-endpoint.md, contracts/preempt-flag.md, quickstart.md).
 > **Status (2026-06-30):** **BUILT (offline) — on-hardware SCs + T342 governance pending the operator.**
 > All code + offline unit tests landed and green (no regression). On-hardware SCs (SC-100/102/103/104, the
 > real GPU swap / `nvidia-smi` one-model checks / live drain / UI end-to-end) and the `tsc`/`next build`
-> UI check run on the RTX 5070 Ti box. **T342 (constitution wording) is NOT done** — it needs operator
-> confirmation (research.md D6); the code is constitution-compliant as-is (Principle II preserved). IDs
-> continue the shared space (T324+). **Independent of 015/016.**
+> UI check run on the RTX 5070 Ti box. **T342 (constitution wording) RESOLVED (2026-07-01): v1.4.1** — the
+> operator chose to refresh; Principle II now names operator-confirmed serving preemption as a release
+> trigger (one-tenant rule unchanged). IDs continue the shared space (T324+). **Independent of 015/016.**
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -108,9 +108,11 @@ past the timeout) before unload.
 
 - [x] **T341** [P] Docs: README (the `preempt` flag + Swap & classify) + update the 008 GPU-lease section
   (cooperative + operator-confirmed preemptive serving); flip spec/plan/tasks Status → BUILT.
-- [ ] **T342** **Constitution**: resolve the v1.4.x wording question (research.md D6) — refresh the "no
-  swap/evict" line to note operator-confirmed serving preemption (rule unchanged) **or** leave historical;
-  if refreshing, run the constitution flow + re-ratify. **Confirm with the operator first.**
+- [x] **T342** **Constitution**: RESOLVED (operator chose to refresh, 2026-07-01) — **v1.4.0 → v1.4.1**
+  (patch-level clarification). Principle II now notes a *serving* tenant may also be released by an
+  operator-confirmed preemptive swap (training never preempted); the one-tenant-in-VRAM rule is unchanged
+  and stays NON-NEGOTIABLE. Amendment note added to the version history. Templates use placeholders (no sync
+  needed).
 - [x] **T343** No-regression: full **001–016** suite green (GPU-tenant tests in isolation); confirm the
   **default (non-preempt) path is byte-for-byte 008** (**SC-105 / SC-101**).
 - [x] **T344** [P] Confirm **no new dependency / service** (reuses each supervisor's `_unload` + the 008
