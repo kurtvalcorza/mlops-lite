@@ -95,6 +95,23 @@ def test_build_challenger_predict_fn_dispatches_per_modality():
     assert calls["asr"] == "s3://models/m/5/art"
 
 
+def test_build_challenger_predict_fn_rejects_kind_mismatch_before_dispatch():
+    # A registered version whose artifact `kind` doesn't match the requested modality (e.g. a vision
+    # model.pt asked to replay as an LLM) is refused BEFORE any per-modality builder runs — no fetch, no
+    # GPU load, no lease taken. Guards a registered name that carries versions of different tasks.
+    m._version_source_and_tags = lambda name, version: (
+        f"s3://models/{name}/{version}/model.pt", {"kind": "vision-classifier"})
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no builder may run on a kind mismatch"))
+    m._vision_predict_fn = m._llm_predict_fn = boom
+    m._asr_predict_fn = boom
+    try:
+        m.build_challenger_predict_fn("m", "1", "llm")
+    except ValueError as e:
+        assert "cannot shadow-replay" in str(e)
+    else:
+        raise AssertionError("expected ValueError on a kind/modality mismatch")
+
+
 def _fake_shadow(status):
     """A stand-in for the gateway's shadow orchestration: `run_replay` mirrors the real guard — it calls
     `scorer` only when the window is `ready`, and returns early (no scoring) otherwise."""

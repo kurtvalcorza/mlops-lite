@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import evaluation, quality, registry, shadow
 
@@ -142,7 +142,10 @@ async def compare(name: str, req: CompareRequest):
 
 class ShadowReplayRequest(BaseModel):
     challenger: str                       # version to replay against the champion's logged traffic
-    window_n: Optional[int] = None        # newest-N captured∩labeled pairs (default QUALITY_WINDOW_N)
+    # newest-N captured∩labeled pairs (default QUALITY_WINDOW_N). Must be > 0 when given — join_window
+    # treats a nonpositive limit as "no limit" (all pairs), so reject 0/negative here rather than
+    # silently scoring the whole corpus (mirrors the monitor endpoint's window_n validation).
+    window_n: Optional[int] = Field(default=None, gt=0)
     modality: Optional[str] = None        # auto-resolved from the @serving version's task tag if omitted
 
 

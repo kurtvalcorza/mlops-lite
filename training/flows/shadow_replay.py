@@ -104,11 +104,32 @@ def build_challenger_predict_fn(name: str, version: str, modality: str):
             f"shadow-replay does not support modality {modality!r} — labeled-prediction modalities only "
             f"(text-generation / image-classification / asr)")
     source, tags = _version_source_and_tags(name, version)  # network only after the modality is valid
+    # Like-for-like guard: a registered model can carry versions of different `task`/`kind` (e.g. a
+    # vision `model.pt` and an LLM LoRA under the same name). The scorer is chosen from the request
+    # modality, so verify the challenger version's own artifact kind matches BEFORE downloading it or
+    # taking the GPU lease — otherwise a mismatched artifact (e.g. a model.pt loaded as a LoRA adapter)
+    # fails deep in the scorer, after the fetch/load. `kind` is the per-flow discriminator
+    # (vision-classifier / lora-adapter / asr); only reject when it's present and wrong, so versions
+    # registered before the tag existed still replay.
+    kind = tags.get("kind")
+    if kind and kind != _EXPECTED_KIND[mod]:
+        raise ValueError(
+            f"challenger {name} v{version} is a {kind!r} artifact — cannot shadow-replay it as {mod!r} "
+            f"(expected kind {_EXPECTED_KIND[mod]!r}; like-for-like replay only)")
     if mod == "image-classification":
         return _vision_predict_fn(source, tags)
     if mod == "text-generation":
         return _llm_predict_fn(source, tags)
     return _asr_predict_fn(source)
+
+
+# The `kind` tag each 015 fine-tune flow stamps on its registered version, per modality — the reliable
+# discriminator for the like-for-like challenger guard above (vision_finetune / finetune / asr_finetune).
+_EXPECTED_KIND = {
+    "image-classification": "vision-classifier",
+    "text-generation": "lora-adapter",
+    "asr": "asr",
+}
 
 
 def _version_source_and_tags(name: str, version: str):
@@ -121,13 +142,19 @@ def _version_source_and_tags(name: str, version: str):
     return mv.source, dict(mv.tags or {})
 
 
-def _download_source(source: str) -> bytes:
-    """Fetch a registry `s3://bucket/key` artifact from MinIO → bytes (mirrors vision `_warm_start`)."""
-    from _common import s3_client
-
+def _s3_bucket_key(source: str):
+    """Split a registry `s3://bucket/key` URI into (bucket, key); raise on anything unexpected."""
     if not source or not source.startswith("s3://"):
         raise ValueError(f"unexpected registry source {source!r} — expected s3://bucket/key")
-    bucket, key = source[len("s3://"):].split("/", 1)
+    return source[len("s3://"):].split("/", 1)
+
+
+def _download_source(source: str) -> bytes:
+    """Fetch a registry `s3://bucket/key` artifact from MinIO → bytes (mirrors vision `_warm_start`).
+    Used for the small in-memory vision `model.pt`; disk-backed GGUF/ggml stream via `_fetch_to_tmp`."""
+    from _common import s3_client
+
+    bucket, key = _s3_bucket_key(source)
     return s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
@@ -188,15 +215,29 @@ def _asr_predict_fn(source: str):
 
 
 def _fetch_to_tmp(source: str, prefix: str, filename: str):
-    """Download `source` into a fresh temp dir under `filename`; return (tmpdir, filepath). The file must
+    """Stream `source` into a fresh temp dir under `filename`; return (tmpdir, filepath). The file must
     outlive `build_challenger_predict_fn` (llama.cpp/whisper.cpp read it at predict time), so the dir is
-    cleaned by `_cleanup_after` once the single scoring call completes."""
+    cleaned by `_cleanup_after` once the single scoring call completes.
+
+    Streams the S3 body straight to disk (`copyfileobj`) rather than materializing it in memory — a
+    served LLM/ASR GGUF/ggml can be hundreds of MB to several GB, so a `.read()` into the trainer
+    process could OOM before scoring even starts. If the fetch/write fails, the freshly-created temp dir
+    is removed before re-raising (it never reaches `_cleanup_after`, which only fires after scoring)."""
+    import shutil
     import tempfile
 
+    from _common import s3_client
+
+    bucket, key = _s3_bucket_key(source)  # validate before creating the temp dir
     tmp = tempfile.mkdtemp(prefix=prefix)
     path = os.path.join(tmp, filename)
-    with open(path, "wb") as f:
-        f.write(_download_source(source))
+    try:
+        body = s3_client().get_object(Bucket=bucket, Key=key)["Body"]
+        with open(path, "wb") as f:
+            shutil.copyfileobj(body, f)  # stream to disk — never hold the whole artifact in RAM
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)  # don't leave a temp dir behind on a failed fetch
+        raise
     return tmp, path
 
 
