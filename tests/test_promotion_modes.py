@@ -30,8 +30,10 @@ def _setup(*, mode, run_status="completed", version="9", gate="pass", shadow=Non
         store=policies, wall=lambda: 100.0,
         check_fn=lambda p, m: {"breached": False},
         launch_fn=lambda p, dn, dv: {"run_id": "run-x"},
+        # the trainer's REAL success record shape: top-level model.version (Codex review, 018)
         watch_fn=lambda rid: {"status": run_status,
-                              "result": ({"version": version} if version else {})},
+                              "model": ({"name": "qa-demo", "version": version}
+                                        if version else None)},
         gate_fn=lambda model, ver: {"verdict": gate, "candidate": {"version": ver}},
         shadow_fn=lambda model, ver, modality: shadow,
         promote_fn=lambda model, ver: promoted.append((model, ver)) or {"promoted": True},
@@ -93,6 +95,41 @@ def test_auto_falls_back_to_suggest_on_gate_warn_or_shadow_loss():
         assert any(a["action"] == "suggested" for a in acts), (gate, shadow)
         assert promoted == []                                      # never overrides the gate
         assert policies.list_suggestions(state="open")             # operator decides
+
+
+def test_auto_refused_by_the_gated_promote_falls_back_to_suggestion():
+    # Codex review (018): the gated choke-point can refuse (incumbent changed since our gate
+    # read) — never write an auto-promoted audit for an alias that did not move.
+    sched, promoted = _setup(mode="auto-on-green")
+    refusal = {"promoted": False, "verdict": {"verdict": "blocked", "reason": "incumbent moved"}}
+    sched.promote_fn = lambda model, ver: refusal
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "suggested" for a in acts)
+    assert policies.list_suggestions(state="auto-promoted") == []
+    (rec,) = policies.list_suggestions(state="open")           # operator decides, with the
+    assert rec["gate_verdict"]["verdict"] == "blocked"         # refusal's verdict attached
+
+
+def test_transient_failure_keeps_the_watch_for_retry():
+    # Codex review (018): the watch is cleared only after terminal handling succeeds — a
+    # transient gate failure must not lose the successful candidate.
+    sched, promoted = _setup(mode="suggest")
+    calls = {"n": 0}
+
+    def flaky_gate(model, ver):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("mlflow hiccup")
+        return {"verdict": "pass", "candidate": {"version": ver}}
+
+    sched.gate_fn = flaky_gate
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "policy_error" for a in acts)    # contained, not silent
+    assert "watch" in policies.get_status("qa-demo")           # candidate NOT lost
+    acts = sched.tick(now=100.0)                               # next tick retries and lands
+    assert any(a["action"] == "suggested" for a in acts)
+    assert "watch" not in policies.get_status("qa-demo")
+    assert policies.list_suggestions(state="open")
 
 
 def test_failed_run_and_versionless_result_drop_the_watch():

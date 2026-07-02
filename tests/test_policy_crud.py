@@ -57,9 +57,14 @@ def test_interval_and_monitors_rejected():
     assert "monitors[0].kind" in _errors(_doc(monitors=[{"kind": "vibes"}]))
 
 
-def test_input_drift_needs_a_reference():
-    errs = _errors(_doc(monitors=[{"kind": "input_drift"}]))
-    assert "monitors[0].reference" in errs
+def test_input_drift_needs_a_complete_reference():
+    assert "monitors[0].reference" in _errors(_doc(monitors=[{"kind": "input_drift"}]))
+    # Codex review (018): a truthy-but-incomplete reference must be rejected at declaration —
+    # the scheduler indexes reference["version"], so {name} alone would error on every tick.
+    assert "monitors[0].reference" in _errors(
+        _doc(monitors=[{"kind": "input_drift", "reference": {"name": "feat-baseline"}}]))
+    assert "monitors[0].reference" in _errors(
+        _doc(monitors=[{"kind": "input_drift", "reference": "feat-baseline@abc123"}]))
     ok = _doc(monitors=[{"kind": "input_drift",
                          "reference": {"name": "feat-baseline", "version": "abc123"}}])
     assert _errors(ok) == set()
@@ -129,6 +134,30 @@ def test_pending_and_status_do_not_pollute_the_policy_list():
     assert st["pending_retrain"]["attempts"] == 1
     policies.clear_pending("vision-mobilenet")
     assert policies.policy_status("vision-mobilenet")["pending_retrain"] is None
+
+
+def test_transient_store_failure_raises_not_none():
+    # Codex review (018): only a confirmed 404 may read as "absent" — a store outage must raise
+    # PolicyStoreError (502), never a false 404 / a silently-vanished PendingRetrain.
+    fake = _fake_store()
+    policies.put_policy("vision-mobilenet", _doc())
+
+    class Outage(Exception):
+        pass  # no .response attribute — NOT 404-shaped
+
+    def broken_get(Bucket, Key):
+        raise Outage("connection reset")
+
+    fake.get_object = broken_get
+    for call in (lambda: policies.get_policy("vision-mobilenet"),
+                 lambda: policies.get_pending("vision-mobilenet"),
+                 lambda: policies.get_suggestion("s1")):
+        try:
+            call()
+        except policies.PolicyStoreError:
+            pass
+        else:
+            raise AssertionError("expected PolicyStoreError on a transient store failure")
 
 
 def test_suggestion_lifecycle():

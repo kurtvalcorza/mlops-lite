@@ -144,6 +144,54 @@ def test_idle_reap_unloads_and_frees_the_slot():
     assert a.holder() is None and rt.state()["state"] == "cold"
 
 
+def test_drain_timeout_hard_cuts_instead_of_hanging():
+    # Codex review (018): a wedged in-flight request (the runtime lock held elsewhere) must not
+    # let unload() block past the drain bound — hard-cut, llama `_unload_now` parity.
+    import threading as _threading
+
+    rt, eng, a = _rt()
+    rt.ensure_loaded()
+    holder_ready = _threading.Event()
+    release = _threading.Event()
+
+    def in_flight():                       # models a stuck request holding the runtime lock
+        with rt.lock:
+            holder_ready.set()
+            release.wait(10)
+
+    t = _threading.Thread(target=in_flight)
+    t.start()
+    holder_ready.wait(5)
+    done = {}
+
+    def unloader():
+        done["res"] = rt.unload(drain_timeout_s=0.2)
+
+    u = _threading.Thread(target=unloader)
+    u.start()
+    u.join(5)                              # must return within the bound — never hang
+    assert not u.is_alive(), "unload() blocked past the drain bound"
+    assert done["res"]["status"] == "unloaded" and done["res"]["drained"] is False
+    assert a.holder() is None              # the hard cut freed the slot
+    release.set()
+    t.join(5)
+
+
+def test_cpu_failed_load_is_cleaned_up_not_wedged():
+    # Codex review (018): a CPU child that never becomes ready must be torn down like a GPU
+    # one — otherwise it stays resident with last_used unset, invisible to the idle reaper.
+    rt, eng, a = _rt(engine=FakeEngine(engine_id="embed", gpu=False), ready_wait_s=1.0)
+    eng.ready_state = False
+    try:
+        rt.ensure_loaded()
+    except lifecycle.EngineError:
+        pass
+    else:
+        raise AssertionError("expected EngineError for a never-ready child")
+    assert not eng.spawned[0].alive        # the failed child was actually torn down
+    assert rt.state()["state"] == "cold"   # not stuck resident-but-unready
+
+
 def test_cpu_engine_never_touches_admission():
     rt, eng, a = _rt(engine=FakeEngine(engine_id="embed", gpu=False))
     rt.ensure_loaded()

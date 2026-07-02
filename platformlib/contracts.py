@@ -176,10 +176,13 @@ class ModelPolicy(_Base):
             if not isinstance(mon, dict) or mon.get("kind") not in MONITOR_KINDS:
                 errors.append({"field": f"monitors[{i}].kind",
                                "reason": f"must be one of {MONITOR_KINDS}"})
-            elif mon["kind"] == "input_drift" and not mon.get("reference"):
-                errors.append({"field": f"monitors[{i}].reference",
-                               "reason": "input_drift needs a reference dataset "
-                                         "{name, version} and a current dataset name"})
+            elif mon["kind"] == "input_drift":
+                ref = mon.get("reference")
+                if (not isinstance(ref, dict) or not ref.get("name")
+                        or not ref.get("version")):
+                    errors.append({"field": f"monitors[{i}].reference",
+                                   "reason": "input_drift needs a reference dataset object "
+                                             "with both 'name' and 'version'"})
         if not isinstance(self.on_breach, dict) or self.on_breach.get("action") != "retrain":
             errors.append({"field": "on_breach.action", "reason": "must be 'retrain'"})
         elif not self.on_breach.get("dataset"):

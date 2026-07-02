@@ -181,6 +181,29 @@ def test_restart_resume_picks_up_the_parked_retrain():
     assert policies.get_pending("vision-mobilenet") is None
 
 
+def test_retry_nonbusy_failure_drops_park_and_releases_reservation():
+    # Codex review (018): a parked retrain whose retry fails for a NON-busy reason (trainer 500)
+    # must release the shared cooldown and clear the park — not re-error every tick while holding
+    # the reservation hostage platform-wide. The next due check re-detects the breach.
+    sched, launches, checks, state, cool = _setup(
+        check_results=[{"breached": True, "score": 0.42}], busy=True)
+    try:
+        _policy(interval=900)
+        sched.tick(now=1000.0)                             # parks; reservation held by the park
+        assert cool.reserved is True
+
+        def _explodes(policy, dataset_name, dataset_version):
+            raise RuntimeError("trainer 500")
+
+        sched.launch_fn = _explodes
+        acts = sched.tick(now=1061.0)                      # retry due → non-busy failure
+        assert any(a["action"] == "retry_failed" for a in acts)
+        assert policies.get_pending("vision-mobilenet") is None   # park dropped
+        assert cool.reserved is False                             # reservation released
+    finally:
+        _teardown(sched)
+
+
 def test_cooldown_blocks_a_second_model_breach():
     sched, launches, checks, state, cool = _setup(
         check_results=[{"breached": True, "score": 0.9}])

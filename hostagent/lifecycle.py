@@ -83,14 +83,16 @@ class EngineRuntime:
                 self.unload(drain_timeout_s=0)
                 if self.wedged_reason:
                     raise EngineError(f"{self.adapter.engine_id} is wedged: {self.wedged_reason}")
-            if not self.adapter.gpu:
-                return self._spawn_and_wait()  # CPU engines are admission-exempt (Principle II)
-            self.admission.acquire(self.adapter.engine_id, self.kind,
-                                   self.adapter.estimate_vram())
+            if self.adapter.gpu:
+                self.admission.acquire(self.adapter.engine_id, self.kind,
+                                       self.adapter.estimate_vram())
+            # CPU engines are admission-exempt (Principle II) but share the SAME failed-load
+            # cleanup (Codex review, 018): without it a never-ready CPU child stayed resident
+            # with last_used unset — invisible to the idle reaper, wedging its port until restart.
             try:
                 return self._spawn_and_wait()
             except BaseException:
-                self.unload(drain_timeout_s=0)  # never hold the slot after a failed load
+                self.unload(drain_timeout_s=0)  # never hold the slot/child after a failed load
                 raise
 
     def _spawn_and_wait(self) -> float:
@@ -115,36 +117,45 @@ class EngineRuntime:
 
     # -- unload / drain / wedge (FR-170; wedge semantics per spec edge case) ---------------------
     def unload(self, drain_timeout_s: float = 10.0) -> dict:
-        """Drain (bounded by the caller's timeout via `self.lock` acquisition), terminate the
+        """Drain (bounded: try to take `self.lock` for up to `drain_timeout_s`), terminate the
         child, wait for teardown, release admission. A child that survives SIGKILL leaves the
-        engine `wedged` WITH the slot still held — the GPU is not actually free."""
-        acquired = self.lock.acquire(timeout=drain_timeout_s) if drain_timeout_s else \
+        engine `wedged` WITH the slot still held — the GPU is not actually free.
+
+        On drain timeout the teardown proceeds WITHOUT the runtime lock — the llama supervisor's
+        hard-cut semantics (Codex review, 018): a wedged in-flight request must not let unload()
+        block past the advertised drain bound (a swap or reap would hang forever). The in-flight
+        request loses its child; the lock-free mutation window is the same one the legacy
+        `_unload_now` accepted."""
+        acquired = self.lock.acquire(timeout=drain_timeout_s) if drain_timeout_s > 0 else \
             self.lock.acquire(blocking=False)
-        drained = bool(acquired)
-        if not acquired:
-            self.lock.acquire()  # hard-cut: proceed anyway (in-flight request loses the child)
         try:
-            if not self._resident():
-                self.child = None
-                if self.adapter.gpu and not self.wedged_reason:
-                    self.admission.release(self.adapter.engine_id)
-                return {"status": "idle", "drained": drained}
-            child = self.child
-            child.terminate()
-            if not self._wait(child, 10):
-                child.kill()
-                if not self._wait(child, 10):
-                    self.wedged_reason = (f"child pid={child.pid} survived SIGKILL "
-                                          f"(uninterruptible) — GPU slot NOT released")
-                    return {"status": "busy", "drained": drained,
-                            "detail": self.wedged_reason}
-            self.child = None
-            self.wedged_reason = None
-            if self.adapter.gpu:
-                self.admission.release(self.adapter.engine_id)
-            return {"status": "unloaded", "drained": drained}
+            return self._teardown(drained=bool(acquired))
         finally:
-            self.lock.release()
+            if acquired:
+                self.lock.release()
+
+    def _teardown(self, drained: bool) -> dict:
+        """The terminate→kill→wedge→release sequence. Caller holds `self.lock` on a clean drain;
+        on a hard cut it runs lock-free (documented above)."""
+        if not self._resident():
+            self.child = None
+            if self.adapter.gpu and not self.wedged_reason:
+                self.admission.release(self.adapter.engine_id)
+            return {"status": "idle", "drained": drained}
+        child = self.child
+        child.terminate()
+        if not self._wait(child, 10):
+            child.kill()
+            if not self._wait(child, 10):
+                self.wedged_reason = (f"child pid={child.pid} survived SIGKILL "
+                                      f"(uninterruptible) — GPU slot NOT released")
+                return {"status": "busy", "drained": drained,
+                        "detail": self.wedged_reason}
+        self.child = None
+        self.wedged_reason = None
+        if self.adapter.gpu:
+            self.admission.release(self.adapter.engine_id)
+        return {"status": "unloaded", "drained": drained}
 
     @staticmethod
     def _wait(child, timeout_s: float) -> bool:

@@ -100,6 +100,12 @@ class PolicyScheduler:
             return [{"action": "retry_parked", "model": model,
                      "attempts": pending["attempts"]}]
         except Exception as e:
+            # Mirror the initial-launch failure path (Codex review, 018): drop the park and
+            # release the shared cooldown so other policies can breach; the next due check on
+            # this model re-detects and re-parks. Holding the reservation while re-erroring
+            # every tick would block every retrain platform-wide on one broken trainer call.
+            self.store.clear_pending(model)
+            self.release_fn()
             POLICY_RETRAINS.labels(signal=pending["breach"].get("signal", "?"),
                                    result="failed").inc()
             return [{"action": "retry_failed", "model": model, "error": str(e)}]
@@ -180,30 +186,46 @@ class PolicyScheduler:
         state = (rec or {}).get("status")
         if state in (None, "queued", "running", "pending"):
             return []
-        status.pop("watch", None)
-        self.store.save_status(model, status)
+
+        def _clear_watch():
+            # Cleared only AFTER terminal handling succeeds (Codex review, 018): a transient
+            # gate/shadow/store failure below propagates to the tick's per-policy catch with the
+            # watch intact, so the successful candidate is retried next tick — never lost.
+            status.pop("watch", None)
+            self.store.save_status(model, status)
+
         if state not in ("completed", "succeeded"):
+            _clear_watch()
             return [{"action": "watched_run_failed", "model": model, "run_status": state}]
         version = _extract_version(rec)
         if not version:
+            _clear_watch()
             return [{"action": "watched_run_no_version", "model": model}]
         mode = policy.get("promotion_mode", "manual")
         if mode == "manual":
+            _clear_watch()
             return [{"action": "run_succeeded_manual", "model": model, "version": version}]
         gate_verdict = self.gate_fn(model, version)
         shadow_verdict = self.shadow_fn(model, version, policy.get("modality"))
         green = gate_verdict.get("verdict") == "pass" and (
             shadow_verdict is None or shadow_verdict.get("winner") in ("challenger", "tie"))
         if mode == "auto-on-green" and green:
-            self.promote_fn(model, version)
-            self.store.create_suggestion(model, version, gate_verdict, shadow_verdict,
-                                         state="auto-promoted", actor=f"policy:{model}")
-            PROMOTIONS.labels(mode="auto").inc()
-            return [{"action": "auto_promoted", "model": model, "version": version}]
-        # `suggest`, or auto falling back on a non-green verdict — automation never overrides
-        # the gate (FR-183).
+            promoted = self.promote_fn(model, version)
+            if (promoted or {}).get("promoted"):
+                self.store.create_suggestion(model, version, gate_verdict, shadow_verdict,
+                                             state="auto-promoted", actor=f"policy:{model}")
+                PROMOTIONS.labels(mode="auto").inc()
+                _clear_watch()
+                return [{"action": "auto_promoted", "model": model, "version": version}]
+            # The gated choke-point refused (e.g. the incumbent changed since our gate read) —
+            # never write an auto-promoted audit for an alias that did not move (Codex review,
+            # 018). Fall through to an open suggestion carrying the refusal's verdict.
+            gate_verdict = (promoted or {}).get("verdict") or gate_verdict
+        # `suggest`, or auto falling back on a non-green/refused verdict — automation never
+        # overrides the gate (FR-183).
         self.store.create_suggestion(model, version, gate_verdict, shadow_verdict)
         PROMOTIONS.labels(mode="suggest").inc()
+        _clear_watch()
         return [{"action": "suggested", "model": model, "version": version,
                  "gate": gate_verdict.get("verdict")}]
 
@@ -225,8 +247,16 @@ class PolicyScheduler:
 # --- default seams (lazy imports; tests inject fakes) ----------------------------------------------
 
 def _extract_version(rec: dict):
+    """The trainer's GET /train/{id} success record carries the registered version at top-level
+    `model.version` (trainer.py rec: {status, model: {name, version, source}, metrics, ...});
+    `result.*` fallbacks cover the agent's journalled JobRecord shape (Codex review, 018)."""
+    model = (rec or {}).get("model") or {}
+    if isinstance(model, dict) and model.get("version"):
+        return str(model["version"])
     result = (rec or {}).get("result") or {}
+    inner = result.get("model") or {}
     return (result.get("version") or result.get("registered_version")
+            or (inner.get("version") if isinstance(inner, dict) else None)
             or (result.get("registry") or {}).get("version"))
 
 
@@ -285,15 +315,22 @@ def _default_gate(model: str, version: str) -> dict:
 
 
 def _default_shadow(model: str, version: str, modality: str):
-    """Newest stored shadow verdict whose challenger IS this candidate version (None if none —
-    a missing window never blocks, per FR-183's 'when one exists')."""
+    """Newest stored shadow verdict for THIS model whose challenger IS this candidate version
+    (None if none — a missing window never blocks, per FR-183's 'when one exists').
+
+    Versions are per-model in MLflow, so matching on the version string alone would let model
+    A's replay verdict gate model B's promotion (Codex review, 018). Verdicts carry `name`
+    since 018 (shadow.build_verdict); older name-less verdicts are skipped, never mis-attributed."""
     try:
         s3 = quality._s3()
         keys = quality._list_keys(s3, quality.SHADOW_PREFIX)
         best, best_id = None, ""
         for k in keys:
             v = quality._get_json(k)
-            if (v.get("winner") and str((v.get("challenger") or {}).get("version")) == str(version)
+            if (v.get("winner") and v.get("name") == model
+                    and str((v.get("challenger") or {}).get("version")) == str(version)
+                    and (modality is None or v.get("modality") is None
+                         or v.get("modality") == MODALITY_TASK.get(modality, modality))
                     and v.get("shadow_id", "") > best_id):
                 best, best_id = v, v.get("shadow_id", "")
         return best

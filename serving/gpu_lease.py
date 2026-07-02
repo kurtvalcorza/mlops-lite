@@ -176,23 +176,67 @@ def _lease_exists() -> bool:
     return os.path.exists(LEASE_PATH)
 
 
+#: The FIXED rendezvous pointer — deliberately independent of the (configurable)
+#: MLOPS_STATE_DIR/GPU_LEASE_PATH, so two daemons pointed at DIFFERENT state dirs on the same
+#: host still collide here (Codex review, 018: a private dir yields a self-consistent beacon,
+#: so the beacon alone can't catch a same-host override/typo). Captured at import like
+#: LEASE_PATH; env override exists for tests.
+_POINTER_PATH = os.getenv("MLOPS_STATE_POINTER",
+                          os.path.join(os.path.expanduser("~/.mlops-lite"),
+                                       "state-pointer.json"))
+
+
+def _pointer_path() -> str:
+    return _POINTER_PATH
+
+
+def _verify_pointer(component: str, coord_dir: str) -> None:
+    """First participant records the canonical coordination dir at the fixed pointer; every later
+    participant must resolve to the SAME dir or fail loud (with the fix in the message)."""
+    pointer = _pointer_path()
+    os.makedirs(os.path.dirname(pointer) or ".", exist_ok=True)
+    real = os.path.realpath(coord_dir)
+    try:
+        fd = os.open(pointer, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"state_dir": real, "created_by": component,
+                       "created_at": time.time()}, f)
+        return
+    except FileExistsError:
+        pass
+    try:
+        with open(pointer, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError) as e:
+        raise LeaseError(f"{component}: unreadable state pointer {pointer}: {e}") from e
+    recorded = rec.get("state_dir")
+    if recorded and os.path.realpath(recorded) != real:
+        raise LeaseError(
+            f"{component}: GPU coordination dir MISMATCH — this daemon uses {real} but "
+            f"{rec.get('created_by', 'a peer')} registered {recorded} at {pointer}. Two private "
+            f"lease files would allow two GPU tenants (Principle II). Point every daemon at ONE "
+            f"MLOPS_STATE_DIR; if the move is intentional, stop all GPU daemons and delete "
+            f"{pointer} first.")
+
+
 def verify_shared_state_dir(component: str) -> dict:
     """Startup invariant check (018 US1, FR-166): every GPU participant must observe the SAME
     coordination state as its peers — fail LOUD on divergence, never run with a private mutex.
 
-    Mechanism: a persistent beacon file beside the lease records, at first creation, the identity
-    of the filesystem view that created it — hostname + WSL distro + the beacon's own (st_dev,
-    st_ino). A later participant that reads a beacon recorded by a DIFFERENT host/distro, or whose
-    stat of the file disagrees with the recorded inode (a copied/recreated file — two views that
-    are not the same file), is seeing a divergent state dir: raises `LeaseError` so the daemon
-    exits at startup instead of silently co-residing on the GPU later.
-
-    (A participant with a fully private state dir creates its own self-consistent beacon — that
-    case is caught by the host/distro identity, the realistic divergence mode: the cross-distro
-    WSL setups that already force IP injection in serve_up.ps1.)
+    Two layers:
+      1. **Fixed rendezvous pointer** (`_verify_pointer`): catches two daemons on the same host
+         configured with DIFFERENT state dirs — the case a per-dir beacon cannot see, because a
+         private dir's beacon is self-consistent (Codex review, 018).
+      2. **Per-dir beacon**: records, at first creation, the identity of the filesystem view that
+         created it — hostname + WSL distro + the beacon's own (st_dev, st_ino). A participant
+         that reads a beacon recorded by a DIFFERENT host/distro, or whose stat of the file
+         disagrees with the recorded inode (a copied/recreated file — two views that are not the
+         same file), is seeing a divergent state dir. Either failure raises `LeaseError` so the
+         daemon exits at startup instead of silently co-residing on the GPU later.
     """
     import socket
 
+    _verify_pointer(component, os.path.dirname(_BEACON_PATH) or ".")
     ident = {"node": socket.gethostname(), "distro": os.getenv("WSL_DISTRO_NAME", "")}
     os.makedirs(os.path.dirname(_BEACON_PATH) or ".", exist_ok=True)
     try:

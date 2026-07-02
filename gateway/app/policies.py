@@ -45,13 +45,24 @@ def _put(key: str, obj: dict) -> None:
         raise PolicyStoreError(f"cannot write {key}: {e}") from e
 
 
+def _missing(e) -> bool:
+    """True only for a confirmed 404-shaped error (same discrimination quality.py uses)."""
+    resp = getattr(e, "response", None)
+    return isinstance(resp, dict) and resp.get("Error", {}).get("Code") in ("404", "NoSuchKey")
+
+
 def _get(key: str):
+    """None ONLY for a confirmed-missing key. A transient S3/MinIO failure must raise (Codex
+    review, 018): mapping it to None turned store outages into false 404s and could make the
+    scheduler believe a parked PendingRetrain vanished — losing the retry."""
     import json
 
     try:
         return json.loads(_s3().get_object(Bucket=RESULTS_BUCKET, Key=key)["Body"].read())
-    except Exception:
-        return None  # absent or unreadable — callers treat both as "not there"
+    except Exception as e:
+        if _missing(e):
+            return None
+        raise PolicyStoreError(f"cannot read {key}: {e}") from e
 
 
 def _delete(key: str) -> None:

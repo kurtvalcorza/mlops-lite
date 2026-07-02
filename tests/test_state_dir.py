@@ -17,9 +17,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEASE = os.path.join(REPO, "serving", "gpu_lease.py")
 
 
-def _load_lease(state_dir):
-    """A fresh gpu_lease module whose lease/beacon live under `state_dir`."""
+def _load_lease(state_dir, pointer=None):
+    """A fresh gpu_lease module whose lease/beacon live under `state_dir`. The fixed rendezvous
+    pointer is redirected per-test (default: inside `state_dir`) so tests never touch the real
+    ~/.mlops-lite pointer and never collide with each other."""
     os.environ["GPU_LEASE_PATH"] = os.path.join(state_dir, "gpu.lease")
+    os.environ["MLOPS_STATE_POINTER"] = pointer or os.path.join(state_dir, "state-pointer.json")
     try:
         spec = importlib.util.spec_from_file_location(f"gpu_lease_{os.path.basename(state_dir)}", LEASE)
         mod = importlib.util.module_from_spec(spec)
@@ -27,6 +30,7 @@ def _load_lease(state_dir):
         return mod
     finally:
         del os.environ["GPU_LEASE_PATH"]
+        del os.environ["MLOPS_STATE_POINTER"]
 
 
 def test_default_lease_path_is_not_under_tmp():
@@ -93,6 +97,26 @@ def test_beacon_copied_file_fails_loud():
             assert "identity changed" in str(e) or "DIVERGES" in str(e)
         else:
             raise AssertionError("expected LeaseError on a copied/recreated beacon")
+
+
+def test_same_host_divergent_state_dirs_fail_loud_at_the_pointer():
+    # Codex review (018): two daemons on ONE host pointed at DIFFERENT state dirs each create a
+    # self-consistent beacon in their private dir — the per-dir beacon cannot catch that. The
+    # fixed rendezvous pointer does: the second daemon must fail loud, not run a private mutex.
+    with tempfile.TemporaryDirectory() as pointer_home, \
+            tempfile.TemporaryDirectory() as dir_a, tempfile.TemporaryDirectory() as dir_b:
+        pointer = os.path.join(pointer_home, "state-pointer.json")
+        lease_a = _load_lease(dir_a, pointer=pointer)
+        lease_a.verify_shared_state_dir("llama-supervisor")     # registers dir_a at the pointer
+        lease_b = _load_lease(dir_b, pointer=pointer)           # a typo'd MLOPS_STATE_DIR
+        try:
+            lease_b.verify_shared_state_dir("trainer")
+        except lease_b.LeaseError as e:
+            assert "MISMATCH" in str(e) and pointer in str(e)
+        else:
+            raise AssertionError("expected LeaseError for a same-host private state dir")
+        # the honest participant still verifies cleanly against the same pointer
+        lease_a.verify_shared_state_dir("bento-vision")
 
 
 if __name__ == "__main__":

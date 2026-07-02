@@ -29,6 +29,10 @@ from hostagent.journal import Journal  # noqa: E402
 from hostagent.metrics import REGISTRY  # noqa: E402
 
 VRAM_GB = float(os.getenv("VRAM_GB", "12"))
+# Codex review (018): the gateway + Prometheus reach the agent via host.docker.internal / an
+# injected WSL IP — a loopback-only bind would make AGENT_URL unreachable from the containers the
+# moment a fold-in flips traffic here. Default matches the legacy daemons; override to tighten.
+AGENT_BIND = os.getenv("AGENT_BIND", "0.0.0.0")
 CONTROL_SECRET = os.getenv("AGENT_CONTROL_SECRET") or os.getenv("SWAP_CONTROL_SECRET", "")
 JOURNAL_PATH = os.path.join(STATE_DIR, "journal.jsonl")
 
@@ -141,7 +145,7 @@ def main() -> None:
     threading.Thread(target=manager.run_reaper, daemon=True).start()
     print(f"hostagent :{AGENT_PORT} | state={STATE_DIR} | engines={list(manager.runtimes)} "
           f"| vram_budget={VRAM_GB:.0f}GB", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", AGENT_PORT), make_handler(admission, journal, manager)) \
+    ThreadingHTTPServer((AGENT_BIND, AGENT_PORT), make_handler(admission, journal, manager)) \
         .serve_forever()
 
 
