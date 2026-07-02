@@ -97,7 +97,7 @@ train → register → score-at-registration (automatic) → **stop**. Specific 
   in-repo. The README's "automatically launch a retraining run" is conditional on an out-of-band
   trigger.
 - **Retrain is LLM-only.** `RetrainSpec` has no `modality` field (`routers/monitor.py:34-39`) and
-  the trainer defaults absent modality to `"llm"` (`training/flow_dispatch.py:26`). A vision or
+  the trainer defaults absent modality to `"llm"` (`training/trainer.py:329,375,452`). A vision or
   ASR quality breach launches an *LLM* fine-tune. The UI hardcodes LLM-shaped retrain params
   (`ui/app/monitor/page.tsx:60-67`).
 - **Retrain trains on pinned data.** The spec pins a fixed `dataset_version`, so the triggered
