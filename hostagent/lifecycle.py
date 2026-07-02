@@ -171,8 +171,15 @@ class EngineRuntime:
             return child.poll() is not None
 
     def idle_reap(self, now: float = None) -> bool:
-        """One tick of the shared idle-reaper: unload when resident and idle past the timeout."""
+        """One tick of the shared reaper: unload when resident and idle past the timeout, and
+        RECONCILE a child that exited on its own (Codex round 3, 018) — a crashed GPU child left
+        `_resident()` false with the admission slot still held, blocking every other GPU engine
+        until an operator unload or an agent restart. `_teardown` on the dead child releases the
+        slot and returns the engine to `cold`."""
         with self.lock:
+            if self.child is not None and not self._resident() and not self.wedged_reason:
+                self._teardown(drained=True)  # dead child — release admission, back to cold
+                return True
             if not self._resident() or self.last_used is None:
                 return False
             now = self.clock() if now is None else now

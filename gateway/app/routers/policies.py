@@ -95,7 +95,10 @@ async def accept_suggestion(suggestion_id: str):
     mark the suggestion accepted. A gate `blocked` verdict still refuses (promoted=False) — the
     suggestion stays open so the operator can act deliberately (override lives on /promote)."""
     POLICY_OPS.labels(op="accept").inc()
-    rec = await run_in_threadpool(policies.get_suggestion, suggestion_id)
+    try:
+        rec = await run_in_threadpool(policies.get_suggestion, suggestion_id)
+    except Exception as e:  # store outage → the documented 502, not an unstructured 500
+        _handle(e)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"unknown suggestion {suggestion_id!r}")
     if rec.get("state") != "open":

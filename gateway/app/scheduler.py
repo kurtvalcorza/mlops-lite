@@ -11,10 +11,13 @@ a fake clock (house style). Per enabled policy, one tick:
   3. **On breach** (FR-181): reserve the shared cooldown (T347's reserve-before-launch), resolve
      the dataset (`latest` → newest registered version), launch the **breached modality's**
      retrain; GPU busy → park exactly one PendingRetrain (durable, restart-resumable).
-  4. **Watches** (FR-183): a policy-launched run that succeeds is gate-checked; `suggest` opens a
-     PromotionSuggestion (gate + latest shadow verdict), `auto-on-green` promotes through the
-     SAME gated choke-point and writes an audit record; gate warn/blocked makes auto fall back to
-     suggest — automation never overrides the gate. `manual` does nothing (today's behavior).
+  4. **Watches** (FR-183): a policy-launched run that succeeds is gate-checked. Only a GREEN
+     candidate — gate pass AND (no shadow window OR shadow win/tie) — proceeds: `suggest` opens
+     the one-click PromotionSuggestion (gate + newest shadow verdict), `auto-on-green` promotes
+     through the SAME gated choke-point and writes an audit record. Any non-green outcome (gate
+     warn/blocked, shadow loss, or a promote-time refusal) is recorded on the policy status as
+     `last_candidate` — visible, but never one-click-promotable; a deliberate promote stays on
+     /models/{name}/promote. `manual` does nothing (today's behavior).
 """
 import asyncio
 import os
@@ -109,7 +112,18 @@ class PolicyScheduler:
             POLICY_RETRAINS.labels(signal=pending["breach"].get("signal", "?"),
                                    result="failed").inc()
             return [{"action": "retry_failed", "model": model, "error": str(e)}]
-        self.store.clear_pending(model)
+        # The clear is best-effort AFTER an accepted launch (Codex round 3, 018): if the store
+        # blips on the delete, neutralize the park (far-future retry) rather than bubbling — a
+        # still-due pending would re-launch the SAME breach once the trainer frees up.
+        try:
+            self.store.clear_pending(model)
+        except Exception:
+            try:
+                self.store.save_pending({**pending, "next_attempt_at": 10 ** 12,
+                                         "attempts": pending.get("attempts", 0)})
+            except Exception:
+                pass  # both writes down — the visible action below still records the launch
+            CHECKS.labels(result="pending_clear_error").inc()
         self.note_fn()  # the retry finally landed — refresh the shared cooldown stamp
         return [{"action": "retrain_launched", "model": model, "run": run, "retried": True}]
 
@@ -142,6 +156,11 @@ class PolicyScheduler:
 
     def _handle_breach(self, policy: dict, breach: dict, now: float) -> list:
         model = policy["model_name"]
+        # A watched run is still unresolved → defer (Codex round 3, 018): launching now would
+        # overwrite the watch's run_id before _poll_watch ever evaluated the finished candidate.
+        # The breach is not lost — the next due check re-detects it once the watch resolves.
+        if (self.store.get_status(model) or {}).get("watch"):
+            return [{"action": "breach_deferred_watch", "model": model}]
         pending = self.store.get_pending(model)
         if pending:  # queue-of-one: a newer breach supersedes the parked one (FR-182)
             pending["breach"] = breach
@@ -223,7 +242,24 @@ class PolicyScheduler:
         shadow_verdict = self.shadow_fn(model, version, policy.get("modality"))
         green = gate_verdict.get("verdict") == "pass" and (
             shadow_verdict is None or shadow_verdict.get("winner") in ("challenger", "tie"))
-        if mode == "auto-on-green" and green:
+
+        def _record_not_green(verdict, action):
+            # FR-183 (Codex round 3, 018): an OPEN one-click suggestion exists ONLY for a green
+            # candidate — gate pass AND (no shadow window OR shadow win/tie). A shadow-losing or
+            # gate-warn/blocked candidate must not get a one-click promote (accept re-runs only
+            # the gate, not the shadow comparison). The outcome stays visible on the policy
+            # status; a deliberate promote remains available via /models/{name}/promote.
+            status["last_candidate"] = {"version": version, "gate_verdict": verdict,
+                                        "shadow_verdict": shadow_verdict, "at": now}
+            PROMOTIONS.labels(mode="not_green").inc()
+            _clear_watch()
+            return [{"action": action, "model": model, "version": version,
+                     "gate": (verdict or {}).get("verdict"),
+                     "shadow": (shadow_verdict or {}).get("winner")}]
+
+        if not green:
+            return _record_not_green(gate_verdict, "candidate_not_green")
+        if mode == "auto-on-green":
             promoted = self.promote_fn(model, version)
             if (promoted or {}).get("promoted"):
                 self.store.create_suggestion(model, version, gate_verdict, shadow_verdict,
@@ -231,12 +267,12 @@ class PolicyScheduler:
                 PROMOTIONS.labels(mode="auto").inc()
                 _clear_watch()
                 return [{"action": "auto_promoted", "model": model, "version": version}]
-            # The gated choke-point refused (e.g. the incumbent changed since our gate read) —
-            # never write an auto-promoted audit for an alias that did not move (Codex review,
-            # 018). Fall through to an open suggestion carrying the refusal's verdict.
-            gate_verdict = (promoted or {}).get("verdict") or gate_verdict
-        # `suggest`, or auto falling back on a non-green/refused verdict — automation never
-        # overrides the gate (FR-183).
+            # The gated choke-point refused (the incumbent changed since our gate read) — the
+            # re-gate verdict is no longer green, so record it; never an audit for an alias
+            # that did not move, and never a one-click suggestion for a now-blocked candidate.
+            return _record_not_green((promoted or {}).get("verdict") or gate_verdict,
+                                     "auto_promote_refused")
+        # `suggest` + green: the one-click suggestion FR-183 mandates.
         self.store.create_suggestion(model, version, gate_verdict, shadow_verdict)
         PROMOTIONS.labels(mode="suggest").inc()
         _clear_watch()
@@ -304,7 +340,11 @@ def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> di
     body = {**((policy.get("on_breach") or {}).get("params") or {}),
             "modality": policy["modality"], "dataset_name": dataset_name,
             "dataset_version": dataset_version}
-    body.setdefault("output_name", f"{policy['model_name']}-auto")
+    # Register under the policy model itself (Codex round 3, 018): a "<model>-auto" default
+    # created versions of a DIFFERENT registered model, while gate/promotion consult
+    # policy.model_name + the returned version — per-model version numbers made that pair
+    # meaningless (blocked as missing, or promoting an unrelated version).
+    body.setdefault("output_name", policy["model_name"])
     with httpx.Client(timeout=15) as client:
         r = client.post(f"{trainer_url()}/train", json=body)
     if r.status_code == 409:
@@ -337,16 +377,28 @@ def _default_shadow(model: str, version: str, modality: str):
     since 018 (shadow.build_verdict); older name-less verdicts are skipped, never mis-attributed."""
     try:
         s3 = quality._s3()
-        keys = quality._list_keys(s3, quality.SHADOW_PREFIX)
-        best, best_id = None, ""
-        for k in keys:
-            v = quality._get_json(k)
+        # Page the listing ourselves to keep each object's LastModified: shadow_ids are random
+        # uuid hex, so "largest id" picked an effectively RANDOM verdict when several replays
+        # existed for the same candidate (Codex round 3, 018) — newest-by-time is the contract.
+        entries, token = [], None
+        while True:
+            kw = {"Bucket": quality.RESULTS_BUCKET, "Prefix": quality.SHADOW_PREFIX}
+            if token:
+                kw["ContinuationToken"] = token
+            page = s3.list_objects_v2(**kw)
+            entries.extend((o["Key"], o.get("LastModified")) for o in page.get("Contents", []))
+            token = page.get("NextContinuationToken") if page.get("IsTruncated") else None
+            if not token:
+                break
+        best, best_at = None, None
+        for key, modified in entries:
+            v = quality._get_json(key)
             if (v.get("winner") and v.get("name") == model
                     and str((v.get("challenger") or {}).get("version")) == str(version)
                     and (modality is None or v.get("modality") is None
                          or v.get("modality") == MODALITY_TASK.get(modality, modality))
-                    and v.get("shadow_id", "") > best_id):
-                best, best_id = v, v.get("shadow_id", "")
+                    and (best_at is None or (modified is not None and modified > best_at))):
+                best, best_at = v, modified
         return best
     except Exception:
         return None  # advisory input only — never fail promotion evaluation over it

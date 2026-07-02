@@ -87,27 +87,35 @@ def test_auto_with_no_shadow_window_is_still_green():
     assert promoted == [("qa-demo", "9")]
 
 
-def test_auto_falls_back_to_suggest_on_gate_warn_or_shadow_loss():
-    for gate, shadow in (("warn", None), ("blocked", None),
-                         ("pass", {"winner": "champion"})):        # challenger lost the window
-        sched, promoted = _setup(mode="auto-on-green", gate=gate, shadow=shadow)
-        acts = sched.tick(now=100.0)
-        assert any(a["action"] == "suggested" for a in acts), (gate, shadow)
-        assert promoted == []                                      # never overrides the gate
-        assert policies.list_suggestions(state="open")             # operator decides
+def test_non_green_candidates_get_no_one_click_suggestion():
+    # Codex round 3 (018) / FR-183: accept re-runs only the GATE — an open one-click suggestion
+    # for a gate-warn/blocked or shadow-LOSING candidate would bypass the shadow signal. The
+    # outcome is recorded on the policy status instead, in BOTH modes.
+    for mode in ("suggest", "auto-on-green"):
+        for gate, shadow in (("warn", None), ("blocked", None),
+                             ("pass", {"winner": "champion"})):    # challenger lost the window
+            sched, promoted = _setup(mode=mode, gate=gate, shadow=shadow)
+            acts = sched.tick(now=100.0)
+            assert any(a["action"] == "candidate_not_green" for a in acts), (mode, gate, shadow)
+            assert promoted == []                                  # never overrides the gate
+            assert policies.list_suggestions() == []               # nothing one-click-promotable
+            st = policies.get_status("qa-demo")
+            assert st["last_candidate"]["version"] == "9"          # still visible to the operator
+            assert "watch" not in st                               # candidate handled, not lost
 
 
-def test_auto_refused_by_the_gated_promote_falls_back_to_suggestion():
+def test_auto_refused_by_the_gated_promote_records_not_green():
     # Codex review (018): the gated choke-point can refuse (incumbent changed since our gate
-    # read) — never write an auto-promoted audit for an alias that did not move.
+    # read) — never an auto-promoted audit for an alias that did not move, and (round 3) never
+    # a one-click suggestion for a now-blocked candidate either.
     sched, promoted = _setup(mode="auto-on-green")
     refusal = {"promoted": False, "verdict": {"verdict": "blocked", "reason": "incumbent moved"}}
     sched.promote_fn = lambda model, ver: refusal
     acts = sched.tick(now=100.0)
-    assert any(a["action"] == "suggested" for a in acts)
-    assert policies.list_suggestions(state="auto-promoted") == []
-    (rec,) = policies.list_suggestions(state="open")           # operator decides, with the
-    assert rec["gate_verdict"]["verdict"] == "blocked"         # refusal's verdict attached
+    assert any(a["action"] == "auto_promote_refused" for a in acts)
+    assert policies.list_suggestions() == []
+    st = policies.get_status("qa-demo")
+    assert st["last_candidate"]["gate_verdict"]["verdict"] == "blocked"  # refusal verdict kept
 
 
 def test_transient_failure_keeps_the_watch_for_retry():
@@ -130,6 +138,45 @@ def test_transient_failure_keeps_the_watch_for_retry():
     assert any(a["action"] == "suggested" for a in acts)
     assert "watch" not in policies.get_status("qa-demo")
     assert policies.list_suggestions(state="open")
+
+
+def test_default_shadow_picks_newest_verdict_by_last_modified():
+    # Codex round 3 (018): shadow_ids are random uuid hex — "largest id" chose an effectively
+    # random verdict when several replays existed. Newest-by-LastModified is the contract.
+    import datetime as _dt
+
+    from app import quality as appq
+
+    class _ListingS3:
+        def __init__(self, objs):
+            self.objs = objs  # key -> (json_dict, last_modified)
+
+        def list_objects_v2(self, Bucket, Prefix="", **kw):
+            return {"Contents": [{"Key": k, "LastModified": lm}
+                                 for k, (_, lm) in sorted(self.objs.items())
+                                 if k.startswith(Prefix)]}
+
+        def get_object(self, Bucket, Key):
+            import io
+            import json as _json
+
+            return {"Body": io.BytesIO(_json.dumps(self.objs[Key][0]).encode())}
+
+    older = {"winner": "challenger", "name": "qa-demo", "modality": "text-generation",
+             "challenger": {"version": "9"}, "shadow_id": "zzzzzz"}   # id sorts LAST
+    newer = {"winner": "champion", "name": "qa-demo", "modality": "text-generation",
+             "challenger": {"version": "9"}, "shadow_id": "aaaaaa"}   # id sorts FIRST
+    fake = _ListingS3({
+        f"{appq.SHADOW_PREFIX}zzzzzz.json": (older, _dt.datetime(2026, 7, 1)),
+        f"{appq.SHADOW_PREFIX}aaaaaa.json": (newer, _dt.datetime(2026, 7, 2)),
+    })
+    orig = appq._s3
+    appq._s3 = lambda: fake
+    try:
+        best = scheduler._default_shadow("qa-demo", "9", "llm")
+    finally:
+        appq._s3 = orig
+    assert best["winner"] == "champion" and best["shadow_id"] == "aaaaaa"  # newest, not max-id
 
 
 def test_failed_run_and_versionless_result_drop_the_watch():

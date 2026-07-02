@@ -279,6 +279,56 @@ def test_unpollable_trainer_keeps_the_watch():
         _teardown(sched)
 
 
+def test_breach_defers_while_a_watch_is_unresolved():
+    # Codex round 3 (018): launching on a new breach while a watched run is unresolved would
+    # overwrite the watch's run_id before it was ever polled — the finished candidate vanishes.
+    sched, launches, checks, state, cool = _setup(
+        check_results=[{"breached": True, "score": 0.9}])
+    try:
+        _policy(interval=900)
+        policies.save_status("vision-mobilenet",
+                             {"last_check_at": 0.0,
+                              "watch": {"run_id": "run-unresolved", "launched_at": 0.0}})
+        acts = sched.tick(now=1000.0)
+        assert any(a["action"] == "breach_deferred_watch" for a in acts)
+        assert launches == [] and cool.reserved is False       # no launch, no reservation taken
+        st = policies.get_status("vision-mobilenet")
+        assert st["watch"]["run_id"] == "run-unresolved"       # the watch survived untouched
+    finally:
+        _teardown(sched)
+
+
+def test_accepted_retry_never_relaunches_when_clear_pending_blips():
+    # Codex round 3 (018): a store blip on clear_pending after an ACCEPTED retry launch must not
+    # leave a still-due park behind — later ticks would launch the same breach twice.
+    sched, launches, checks, state, cool = _setup(busy=False,
+                                                  check_results=[{"breached": False}])
+    try:
+        _policy(interval=10**9)
+        policies.save_pending({"model_name": "vision-mobilenet",
+                               "breach": {"signal": "quality", "score": 0.9, "at": 1.0},
+                               "attempts": 1, "next_attempt_at": 500.0})
+        orig_clear = policies.clear_pending
+
+        def broken_clear(model):
+            raise RuntimeError("store blip")
+
+        policies.clear_pending = broken_clear
+        try:
+            acts = sched.tick(now=1000.0)                      # retry due → launch accepted
+        finally:
+            policies.clear_pending = orig_clear
+        assert any(a["action"] == "retrain_launched" and a.get("retried") for a in acts)
+        assert len(launches) == 1
+        pending = policies.get_pending("vision-mobilenet")
+        assert pending["next_attempt_at"] >= 10 ** 12          # neutralized, not still-due
+        acts = sched.tick(now=2000.0)                          # a later tick must NOT relaunch
+        assert len(launches) == 1
+        assert not any(a["action"].startswith("retry") for a in acts)
+    finally:
+        _teardown(sched)
+
+
 def test_check_error_is_contained_and_recorded():
     sched, launches, checks, state, cool = _setup()
     try:

@@ -192,6 +192,21 @@ def test_cpu_failed_load_is_cleaned_up_not_wedged():
     assert rt.state()["state"] == "cold"   # not stuck resident-but-unready
 
 
+def test_crashed_child_is_reconciled_and_releases_the_slot():
+    # Codex round 3 (018): a GPU child that EXITS on its own left the admission holder set with
+    # _resident() false — every other GPU engine was blocked until an operator unload/restart.
+    # The reaper must reconcile: release the slot, engine back to cold.
+    rt, eng, a = _rt()
+    rt.ensure_loaded()
+    eng.spawned[0].alive = False              # the child crashed/exited on its own
+    assert a.holder() is not None             # the stale claim the bug left behind
+    assert rt.idle_reap() is True             # one reaper tick reconciles it
+    assert a.holder() is None                 # slot released — other engines unblocked
+    assert rt.state()["state"] == "cold"
+    a.acquire("other", "serving", est_gb=1.0)  # provably acquirable again
+    a.release("other")
+
+
 def test_state_is_lock_free_display_only():
     # Codex round 2 (018): /health calls state() for every engine — it must never block behind
     # a cold load or a long in-flight request holding the runtime lock.

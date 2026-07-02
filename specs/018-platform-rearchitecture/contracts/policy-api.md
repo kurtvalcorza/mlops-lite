@@ -29,13 +29,20 @@ On a policy-launched run reaching `succeeded` with a registered version: read it
 score-at-registration + `evaluation.gate` verdict; read the latest shadow verdict when one
 exists (FR-183):
 
+Only a GREEN candidate — gate `pass` AND (shadow window absent OR challenger wins/ties) —
+proceeds to a mode action (FR-183, tightened per Codex round 3: accept re-runs only the gate,
+so a one-click suggestion for a shadow-losing candidate would bypass the shadow signal):
+
 - `manual` → nothing (today's behavior, byte-for-byte).
-- `suggest` → create PromotionSuggestion (`open`); surfaces on Models page; operator
+- `suggest` + green → create PromotionSuggestion (`open`); surfaces on Models page; operator
   accept → existing gated `promote()` path (still runs the gate — suggestion never bypasses
   it); dismiss → recorded.
-- `auto-on-green` → gate pass AND (shadow window absent OR challenger wins) → call the same
-  gated `promote()`; write AuditRecord `actor=policy:<model>`. Gate warn/blocked → falls back
-  to `suggest` behavior (auto never overrides a gate).
+- `auto-on-green` + green → call the same gated `promote()`; write AuditRecord
+  `actor=policy:<model>`. A promote-time refusal (incumbent changed) is treated as non-green.
+- Any NON-green outcome (gate warn/blocked, shadow loss, promote-time refusal) → recorded on
+  the policy status as `last_candidate` {version, gate_verdict, shadow_verdict, at} — visible
+  via `GET /policies/{model}/status`, never one-click-promotable; a deliberate promote stays
+  available on `/models/{name}/promote` (with override).
 
 ## UI
 
