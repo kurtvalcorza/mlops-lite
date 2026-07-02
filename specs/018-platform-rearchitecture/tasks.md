@@ -78,24 +78,24 @@ SC-106..110 at completion.
 
 ### Skeleton
 
-- [ ] **T352** [US2] `hostagent/` skeleton: `main.py` (ThreadingHTTPServer on `AGENT_PORT`,
+- [x] **T352** [US2] `hostagent/` skeleton: `main.py` (ThreadingHTTPServer on `AGENT_PORT`,
   read surface per contracts/agent-api.md), `metrics.py` (/metrics), `hostagent/run.sh`;
   register daemon `agent` in `supervisor/supervise.py` (opt-in via `SUPERVISE_DAEMONS` during
   migration); add `hostagent` scrape job to `infra/prometheus/prometheus.yml`.
-- [ ] **T353** [US2] `hostagent/admission.py`: in-process single-slot admission (est-vs-live
+- [x] **T353** [US2] `hostagent/admission.py`: in-process single-slot admission (est-vs-live
   free VRAM, static-budget fallback), `pynvml` with ~1s TTL cache (R1; add to host
   requirements), **lockfile-interop shim** — acquire/release `serving/gpu_lease.py` for agent
   tenants while any legacy tenant remains (FR-166/168).
-- [ ] **T354** [US2] `hostagent/lifecycle.py`: shared tenant lifecycle (load → ready → drain →
+- [x] **T354** [US2] `hostagent/lifecycle.py`: shared tenant lifecycle (load → ready → drain →
   idle-release → unload; reap resident-but-unready; `wedged` surfaced and admission-blocking;
   `unavailable(reason)` for missing prerequisites, R7) + the adapter interface
   (`spawn/ready/forward/drain/estimate_vram`) per data-model.md (FR-170).
-- [ ] **T355** [US2] `hostagent/swap.py`: transactional evict→free→load under the admission
+- [x] **T355** [US2] `hostagent/swap.py`: transactional evict→free→load under the admission
   lock; holder kind `job` ⇒ structural refusal (FR-171/172); `POST /control/unload` with
   `X-Agent-Control` (R6).
-- [ ] **T356** [US2] `hostagent/journal.py`: append-only JSONL in `STATE_DIR`, replay on start,
+- [x] **T356** [US2] `hostagent/journal.py`: append-only JSONL in `STATE_DIR`, replay on start,
   `running` → `interrupted(reason)` + alert metric (FR-173, R9).
-- [ ] **T357** [P] [US2] Agent unit suites: `tests/test_agent_admission.py` (thread-hammer, no
+- [x] **T357** [P] [US2] Agent unit suites: `tests/test_agent_admission.py` (thread-hammer, no
   TOCTOU), `tests/test_agent_lifecycle.py` (fake engine incl. unavailable/wedged/reap),
   `tests/test_agent_swap_txn.py` (contender never wins mid-swap), `tests/test_agent_journal.py`
   (kill −9 replay), `tests/test_lockfile_interop.py` (agent vs legacy mutual exclusion).

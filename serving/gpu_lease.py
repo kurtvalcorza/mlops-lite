@@ -295,7 +295,13 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
                         holder.pop("vram_start", None)
                         _replace_holder(holder)
                     return holder
-                _unlink_quiet()  # same process, different tenant (shouldn't happen) — replace
+                # Same process, DIFFERENT tenant: refuse like any other live holder (018 US2).
+                # Pre-018 each daemon process carried exactly one tenant identity, so this branch
+                # "couldn't happen" and silently replaced the claim. The host agent is ONE process
+                # hosting several tenant identities via the interop shim — a silent replace here
+                # would evict tenant A's claim while its child still owns VRAM (co-residency with
+                # no error). Refusing is correct in both worlds.
+                raise LeaseHeld(holder)
             elif _holder_live(holder):
                 raise LeaseHeld(holder)
             else:

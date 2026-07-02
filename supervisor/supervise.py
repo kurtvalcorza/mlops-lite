@@ -74,6 +74,16 @@ _ALL = {
         "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
         "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
     },
+    # 018 US2 — the GPU host agent (hostagent/). **Opt-in during the strangler migration** (NOT in
+    # the default set below): it coexists with the legacy daemons via the lockfile interop shim and
+    # takes over one engine per fold-in phase (T358+). At lockfile retirement (T364) this becomes
+    # one of exactly two supervised daemons (agent + ui) and the entries above are deleted.
+    # Enable:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,ui,agent
+    "agent": {
+        "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
+        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/health"),
+        "grace_s": float(os.getenv("AGENT_GRACE", "30")),
+    },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).
     # First launch installs deps + builds, so the grace is generous; warm launches `next start` fast.
     "ui": {

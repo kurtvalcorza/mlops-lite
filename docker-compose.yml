@@ -151,6 +151,10 @@ services:
     image: prom/prometheus:v3.5.4  # 007 US2: pin (was :latest, captured T118)
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # 018 (FR-174): direct scrape of the native host agent (:8100) — same host-gateway mapping
+      # the gateway uses to reach the native daemons.
+      - "host.docker.internal:host-gateway"
     ports:
       # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
