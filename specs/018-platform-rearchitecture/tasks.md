@@ -222,7 +222,7 @@ runs against trainer *or* agent jobs surface.
   note on ratification.
 - [ ] **T379** [P] Docs refresh: `README.md` status paragraph (stale at "through 014") + the
   architecture mermaid diagram → agent topology; prune retired env vars from compose comments.
-- [ ] **T380** [P] SC-114 demonstration: stub-engine adapter test in
+- [x] **T380** [P] SC-114 demonstration: stub-engine adapter test in
   `tests/test_agent_adapters.py` proving a new engine = one adapter + one registry row (zero
   edits elsewhere).
 
