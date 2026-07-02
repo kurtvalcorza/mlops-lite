@@ -40,7 +40,10 @@ async def list_policies():
 
 @router.get("/policies/{model_name}")
 async def get_policy(model_name: str):
-    doc = await run_in_threadpool(policies.get_policy, model_name)
+    try:
+        doc = await run_in_threadpool(policies.get_policy, model_name)
+    except Exception as e:  # store outage → the documented 502, not an unstructured 500
+        _handle(e)
     if doc is None:
         raise HTTPException(status_code=404, detail=f"no policy for {model_name!r}")
     return doc

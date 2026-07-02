@@ -66,10 +66,14 @@ def _get(key: str):
 
 
 def _delete(key: str) -> None:
+    """Idempotent on a missing key; a transient failure RAISES (Codex round 2, 018) — a
+    swallowed delete let DELETE /policies return success while the policy (and its pending
+    retrain) survived the outage and kept scheduling."""
     try:
         _s3().delete_object(Bucket=RESULTS_BUCKET, Key=key)
-    except Exception:
-        pass  # idempotent
+    except Exception as e:
+        if not _missing(e):
+            raise PolicyStoreError(f"cannot delete {key}: {e}") from e
 
 
 # --- policy CRUD (FR-179) ---------------------------------------------------------------------
@@ -220,6 +224,9 @@ def resolve_dataset_version(name: str, version: str) -> str:
 
 
 def _manifest(name: str, version: str):
+    """None only for a confirmed-missing manifest; a transient read failure RAISES (Codex
+    round 2, 018) — treating it as missing could silently resolve `latest` to an OLDER version
+    and retrain on stale data while reporting success."""
     import json
 
     from . import datasets
@@ -228,5 +235,8 @@ def _manifest(name: str, version: str):
         raw = datasets._s3().get_object(Bucket=datasets.BUCKET,
                                         Key=f"{name}/{version}/manifest.json")["Body"].read()
         return json.loads(raw)
-    except Exception:
-        return None
+    except Exception as e:
+        if _missing(e):
+            return None
+        raise PolicyStoreError(
+            f"cannot read manifest {name}/{version} while resolving 'latest': {e}") from e

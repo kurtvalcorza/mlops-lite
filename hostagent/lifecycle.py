@@ -48,17 +48,22 @@ class EngineRuntime:
 
     # -- state reporting -------------------------------------------------------------------------
     def state(self) -> dict:
-        with self.lock:
-            if not self.enabled:
-                return {"state": "disabled"}
-            if self.wedged_reason:
-                return {"state": "wedged", "reason": self.wedged_reason}
-            ok, reason = self.adapter.available()
-            if not ok:
-                return {"state": "unavailable", "reason": reason}
-            if self.child is not None and self.child.poll() is None:
-                return {"state": "ready" if self.adapter.ready() else "loading"}
-            return {"state": "cold"}
+        """Display-only, deliberately LOCK-FREE (Codex round 2, 018): /health and /metrics call
+        this for every engine, and taking `self.lock` would block the read surface behind a cold
+        load or a long in-flight request — probes would mark the agent down exactly while an
+        engine is busy. A momentarily stale answer is fine for display (the same stale-tolerant
+        stance as the legacy lease's `current_holder`); admission decisions never read this."""
+        if not self.enabled:
+            return {"state": "disabled"}
+        if self.wedged_reason:
+            return {"state": "wedged", "reason": self.wedged_reason}
+        ok, reason = self.adapter.available()
+        if not ok:
+            return {"state": "unavailable", "reason": reason}
+        child = self.child  # local ref — the field may flip mid-read (lock-free by design)
+        if child is not None and child.poll() is None:
+            return {"state": "ready" if self.adapter.ready() else "loading"}
+        return {"state": "cold"}
 
     def _resident(self) -> bool:
         return self.child is not None and self.child.poll() is None

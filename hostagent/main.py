@@ -63,9 +63,15 @@ def _refresh_metrics(admission, journal, manager) -> None:
     REGISTRY.set_gauge("hostagent_slot_held", 1 if holder else 0)
     REGISTRY.set_gauge("hostagent_jobs_active", journal.active_count())
     wedged = 0
+    from platformlib.contracts import ENGINE_STATES
+
     for eid, state in manager.engine_states().items():
-        REGISTRY.set_gauge("hostagent_engine_state", 1,
-                           labels={"engine": eid, "state": state["state"]})
+        # Emit EVERY state series per engine, current=1 others=0 (Codex round 2, 018): setting
+        # only the current one left stale =1 series behind after a transition, so dashboards
+        # couldn't tell which state was actually live.
+        for name in ENGINE_STATES:
+            REGISTRY.set_gauge("hostagent_engine_state", 1 if name == state["state"] else 0,
+                               labels={"engine": eid, "state": name})
         if state["state"] == "wedged":
             wedged = 1
     REGISTRY.set_gauge("hostagent_wedged", wedged)

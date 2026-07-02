@@ -218,6 +218,67 @@ def test_cooldown_blocks_a_second_model_breach():
         _teardown(sched)
 
 
+def test_due_check_preserves_a_live_watch():
+    # Codex round 2 (018): saving check results replaced the whole status doc, deleting the
+    # watch of any run longer than one check interval — its candidate was never evaluated.
+    sched, launches, checks, state, cool = _setup()
+    try:
+        _policy(interval=900)
+        policies.save_status("vision-mobilenet",
+                             {"last_check_at": 0.0,
+                              "watch": {"run_id": "run-long", "launched_at": 0.0}})
+        sched.tick(now=1000.0)                             # a due check runs
+        st = policies.get_status("vision-mobilenet")
+        assert st["last_check_at"] == 1000.0
+        assert st.get("watch", {}).get("run_id") == "run-long"   # the watch survived the merge
+    finally:
+        _teardown(sched)
+
+
+def test_watch_persist_failure_never_reports_a_launched_run_as_failed():
+    # Codex round 2 (018): launch accepted + watch persist blips → must stay retrain_launched
+    # with the cooldown reservation INTACT (releasing it invited duplicate retrains).
+    sched, launches, checks, state, cool = _setup(
+        check_results=[{"breached": True, "score": 0.9}])
+    try:
+        _policy()
+        orig_save = policies.save_status
+
+        def flaky_save(model, status):
+            if "watch" in status:
+                raise RuntimeError("store blip")
+            return orig_save(model, status)
+
+        policies.save_status = flaky_save
+        try:
+            acts = sched.tick(now=1000.0)
+        finally:
+            policies.save_status = orig_save
+        launched = [a for a in acts if a["action"] == "retrain_launched"]
+        assert launched and launched[0]["run"].get("watch_persisted") is False
+        assert not any(a["action"] == "retrain_failed" for a in acts)
+        assert len(launches) == 1 and cool.reserved is True     # reservation intact
+    finally:
+        _teardown(sched)
+
+
+def test_unpollable_trainer_keeps_the_watch():
+    # Codex round 2 (018): a trainer 502/restart reads as status "unknown" — retryable, never a
+    # terminal failure that clears the watch and loses the candidate.
+    sched, launches, checks, state, cool = _setup()
+    try:
+        _policy(interval=10**9)                            # no due checks — isolate the watch
+        policies.save_status("vision-mobilenet",
+                             {"last_check_at": 0.0,
+                              "watch": {"run_id": "run-x", "launched_at": 0.0}})
+        sched.watch_fn = lambda rid: {"status": "unknown"}
+        acts = sched.tick(now=1000.0)
+        assert acts == []                                  # nothing terminal happened
+        assert "watch" in policies.get_status("vision-mobilenet")
+    finally:
+        _teardown(sched)
+
+
 def test_check_error_is_contained_and_recorded():
     sched, launches, checks, state, cool = _setup()
     try:

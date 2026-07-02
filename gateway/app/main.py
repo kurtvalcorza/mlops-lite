@@ -111,11 +111,13 @@ def root():
 # A lifespan asyncio task (research R5). Fail-open by construction: a tick with no policies is a
 # no-op, per-policy errors are contained inside tick(), and the whole loop is disable-able.
 _scheduler_stop = None
+_scheduler_task = None  # strong reference — a bare ensure_future task can be GC'd mid-flight
+# (Codex round 2, 018: the same weak-reference foot-gun background.spawn() was added to close).
 
 
 @app.on_event("startup")
 async def _start_policy_scheduler():
-    global _scheduler_stop
+    global _scheduler_stop, _scheduler_task
     if os.getenv("POLICY_SCHEDULER_ENABLED", "1").lower() in ("0", "false", "no"):
         return
     import asyncio
@@ -123,7 +125,7 @@ async def _start_policy_scheduler():
     from . import scheduler as _scheduler
 
     _scheduler_stop = asyncio.Event()
-    asyncio.ensure_future(_scheduler.PolicyScheduler().run(_scheduler_stop))
+    _scheduler_task = asyncio.ensure_future(_scheduler.PolicyScheduler().run(_scheduler_stop))
 
 
 @app.on_event("shutdown")

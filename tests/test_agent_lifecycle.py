@@ -192,6 +192,38 @@ def test_cpu_failed_load_is_cleaned_up_not_wedged():
     assert rt.state()["state"] == "cold"   # not stuck resident-but-unready
 
 
+def test_state_is_lock_free_display_only():
+    # Codex round 2 (018): /health calls state() for every engine — it must never block behind
+    # a cold load or a long in-flight request holding the runtime lock.
+    import threading as _threading
+
+    rt, eng, a = _rt()
+    rt.ensure_loaded()
+    holder_ready = _threading.Event()
+    release = _threading.Event()
+
+    def busy():
+        with rt.lock:
+            holder_ready.set()
+            release.wait(10)
+
+    t = _threading.Thread(target=busy)
+    t.start()
+    holder_ready.wait(5)
+    result = {}
+
+    def prober():
+        result["state"] = rt.state()
+
+    p2 = _threading.Thread(target=prober)
+    p2.start()
+    p2.join(2)                                # must answer promptly despite the held lock
+    release.set()
+    t.join(5)
+    assert not p2.is_alive(), "state() blocked behind the runtime lock"
+    assert result["state"]["state"] == "ready"
+
+
 def test_cpu_engine_never_touches_admission():
     rt, eng, a = _rt(engine=FakeEngine(engine_id="embed", gpu=False))
     rt.ensure_loaded()

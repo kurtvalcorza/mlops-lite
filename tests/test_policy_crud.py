@@ -160,6 +160,49 @@ def test_transient_store_failure_raises_not_none():
             raise AssertionError("expected PolicyStoreError on a transient store failure")
 
 
+def test_transient_delete_failure_raises_not_false_success():
+    # Codex round 2 (018): a swallowed delete let DELETE /policies succeed during an outage
+    # while the policy (and its pending retrain) survived and kept scheduling.
+    fake = _fake_store()
+    policies.put_policy("vision-mobilenet", _doc())
+
+    def broken_delete(Bucket, Key):
+        raise RuntimeError("connection reset")             # not 404-shaped
+
+    fake.delete_object = broken_delete
+    try:
+        policies.delete_policy("vision-mobilenet")
+    except policies.PolicyStoreError:
+        pass
+    else:
+        raise AssertionError("expected PolicyStoreError on a transient delete failure")
+
+
+def test_latest_resolution_aborts_on_transient_manifest_failure():
+    # Codex round 2 (018): a manifest read blip must abort the launch — treating it as missing
+    # could silently resolve `latest` to an OLDER version and retrain on stale data.
+    _fake_store()
+    from app import datasets as ds
+
+    orig_list, orig_s3 = ds.list_datasets, ds._s3
+    ds.list_datasets = lambda: [{"name": "d", "versions": [{"version": "v1"},
+                                                           {"version": "v2"}]}]
+
+    class BrokenS3:
+        def get_object(self, Bucket, Key):
+            raise RuntimeError("connection reset")         # not 404-shaped
+
+    ds._s3 = lambda: BrokenS3()
+    try:
+        policies.resolve_dataset_version("d", "latest")
+    except policies.PolicyStoreError as e:
+        assert "manifest" in str(e)
+    else:
+        raise AssertionError("expected PolicyStoreError on a transient manifest failure")
+    finally:
+        ds.list_datasets, ds._s3 = orig_list, orig_s3
+
+
 def test_suggestion_lifecycle():
     _fake_store()
     rec = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},

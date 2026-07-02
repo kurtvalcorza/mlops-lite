@@ -130,7 +130,10 @@ class PolicyScheduler:
             results.append({**res, "kind": monitor.get("kind")})
             if res.get("breached") and breach is None:
                 breach = {"signal": monitor.get("kind"), "score": res.get("score"), "at": now}
-        self.store.save_status(model, {"last_check_at": now, "results": results,
+        # MERGE into the existing status (Codex round 2, 018): a fresh dict here deleted a live
+        # `watch` whenever a policy-launched run outlasted one check interval — the completed
+        # candidate would then never be evaluated for suggestion/auto-promotion.
+        self.store.save_status(model, {**status, "last_check_at": now, "results": results,
                                        "next_due_at": now + policy["check_interval_s"]})
         if breach is None:
             return [{"action": "checked", "model": model, "breached": False}]
@@ -169,10 +172,19 @@ class PolicyScheduler:
         run = self.launch_fn(policy, dataset_name, version)
         POLICY_RETRAINS.labels(signal=breach.get("signal", "?"), result="launched").inc()
         run_id = (run or {}).get("run_id") or (run or {}).get("id")
+        # The watch persist is BEST-EFFORT after an accepted launch (Codex round 2, 018): a
+        # transient store error here must not bubble into the callers' failure paths — that
+        # released the cooldown while the run was actually queued (duplicate retrains) and
+        # mis-reported an accepted launch as failed. Degraded mode: the run proceeds, only the
+        # suggestion/auto step for it is skipped — visible via the metric + action flag.
         if run_id:
-            self.store.save_status(policy["model_name"], {
-                **(self.store.get_status(policy["model_name"]) or {}),
-                "watch": {"run_id": run_id, "launched_at": self.wall()}})
+            try:
+                self.store.save_status(policy["model_name"], {
+                    **(self.store.get_status(policy["model_name"]) or {}),
+                    "watch": {"run_id": run_id, "launched_at": self.wall()}})
+            except Exception:
+                CHECKS.labels(result="watch_persist_error").inc()
+                return {**(run or {}), "watch_persisted": False}
         return run
 
     # -- 4. post-run promotion evaluation (FR-183) --------------------------------------------------
@@ -184,7 +196,9 @@ class PolicyScheduler:
             return []
         rec = self.watch_fn(watch["run_id"])
         state = (rec or {}).get("status")
-        if state in (None, "queued", "running", "pending"):
+        # "unknown" = the trainer could not be polled (down/restarting) — retryable, never a
+        # terminal failure that clears the watch (Codex round 2, 018).
+        if state in (None, "unknown", "queued", "running", "pending"):
             return []
 
         def _clear_watch():
