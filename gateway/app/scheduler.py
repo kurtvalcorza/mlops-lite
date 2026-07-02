@@ -142,6 +142,12 @@ class PolicyScheduler:
             # release the shared cooldown so other policies can breach; the next due check on
             # this model re-detects and re-parks. Holding the reservation while re-erroring
             # every tick would block every retrain platform-wide on one broken trainer call.
+            # Deliberately TOKENLESS (Codex round 5, 018): the park owns the current stamp via
+            # its keep-alive refresh (note_fn on every busy retry), so the original reserve
+            # token is long stale — a token-guarded release here would no-op and leak the
+            # reservation for the full cooldown. While a park lives, nothing else can stamp
+            # (reserve fails during cooldown; both HTTP triggers reserve-first), so the
+            # unconditional clear can only ever clear the park's own stamp.
             self.store.clear_pending(model)
             self.release_fn()
             POLICY_RETRAINS.labels(signal=pending["breach"].get("signal", "?"),
@@ -210,7 +216,8 @@ class PolicyScheduler:
             pending["breach"] = breach
             self.store.save_pending(pending)
             return [{"action": "breach_superseded_pending", "model": model}]
-        if not self.reserve_fn():
+        token = self.reserve_fn()
+        if not token:
             POLICY_RETRAINS.labels(signal=breach["signal"], result="cooldown").inc()
             return [{"action": "breach_in_cooldown", "model": model}]
         try:
@@ -224,13 +231,17 @@ class PolicyScheduler:
                 # No park could be persisted, so nothing owns the reservation — hand it back or
                 # every retrain platform-wide waits out the full cooldown for a launch that never
                 # happened (internal review, 018). The next due check re-detects this breach.
-                self.release_fn()
+                self.release_fn(token)
                 POLICY_RETRAINS.labels(signal=breach["signal"], result="park_failed").inc()
                 return [{"action": "retrain_park_failed", "model": model, "error": str(e)}]
             POLICY_RETRAINS.labels(signal=breach["signal"], result="parked").inc()
             return [{"action": "retrain_parked", "model": model}]
         except Exception as e:
-            self.release_fn()  # a failed launch must not consume the cooldown (FR-163 semantics)
+            # A failed launch must not consume the cooldown (FR-163 semantics). Token-guarded
+            # (Codex round 5, 018): the cooldown is shared with the HTTP trigger routes, so if
+            # a newer reservation landed while our launch was failing, an unconditional release
+            # would clear THAT live window and invite duplicate retrains.
+            self.release_fn(token)
             POLICY_RETRAINS.labels(signal=breach["signal"], result="failed").inc()
             return [{"action": "retrain_failed", "model": model, "error": str(e)}]
         return [{"action": "retrain_launched", "model": model, "run": run}]
@@ -412,11 +423,13 @@ def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> di
     body = {**((policy.get("on_breach") or {}).get("params") or {}),
             "modality": policy["modality"], "dataset_name": dataset_name,
             "dataset_version": dataset_version}
-    # Register under the policy model itself (Codex round 3, 018): a "<model>-auto" default
-    # created versions of a DIFFERENT registered model, while gate/promotion consult
-    # policy.model_name + the returned version — per-model version numbers made that pair
-    # meaningless (blocked as missing, or promoting an unrelated version).
-    body.setdefault("output_name", policy["model_name"])
+    # FORCE registration under the policy model (Codex rounds 3+5, 018): setdefault still
+    # honored an explicitly different output_name in the stored params, while _poll_watch
+    # gates/promotes policy.model_name with only the returned version — per-model version
+    # numbers made that pair meaningless (blocked as missing, or promoting an unrelated
+    # version). Write-time validation now rejects a mismatch; this is the belt for policies
+    # stored before it existed.
+    body["output_name"] = policy["model_name"]
     with httpx.Client(timeout=15) as client:
         r = client.post(f"{trainer_url()}/train", json=body)
     if r.status_code == 409:

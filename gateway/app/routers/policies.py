@@ -105,6 +105,21 @@ async def accept_suggestion(suggestion_id: str):
         raise HTTPException(status_code=404, detail=f"unknown suggestion {suggestion_id!r}")
     if rec.get("state") != "open":
         raise HTTPException(status_code=409, detail=f"suggestion is already {rec.get('state')}")
+    # Already-serving short-circuit (Codex round 5, 018): a previous accept can move the alias
+    # and then blip on the state write, leaving an open suggestion for the CURRENT incumbent.
+    # Re-accepting just finishes the state transition — re-running the gate against itself
+    # would be noise. Best-effort: on a registry hiccup fall through to the normal gated path.
+    try:
+        serving = await run_in_threadpool(registry.get_serving, rec["model_name"])
+    except Exception:
+        serving = None
+    if serving and str(serving.get("version")) == str(rec["candidate_version"]):
+        try:
+            done = await run_in_threadpool(policies.resolve_suggestion, suggestion_id,
+                                           "accepted")
+        except Exception as e:
+            _handle(e)
+        return {"promoted": True, "already_serving": True, "suggestion": done}
     try:
         result = await run_in_threadpool(registry.promote, rec["model_name"],
                                          rec["candidate_version"])
@@ -122,6 +137,14 @@ async def accept_suggestion(suggestion_id: str):
         rec = await run_in_threadpool(policies.get_suggestion, suggestion_id)
         return {"promoted": True, "verdict": result.get("verdict"), "suggestion": rec,
                 "detail": "suggestion was resolved concurrently; promotion applied"}
+    except policies.PolicyStoreError as e:
+        # The alias HAS moved — a 502 here would read as "accept failed" while the promotion is
+        # live, and the suggestion stays open (Codex round 5, 018). Report the true state; a
+        # retried accept lands in the already-serving short-circuit above and finishes the
+        # transition once the store heals.
+        return {"promoted": True, "verdict": result.get("verdict"), "suggestion": rec,
+                "detail": f"promotion applied; marking the suggestion accepted failed ({e}) — "
+                          f"retry accept once the policy store recovers"}
     except Exception as e:
         _handle(e)
     return {"promoted": True, "verdict": result.get("verdict"), "suggestion": rec}

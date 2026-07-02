@@ -162,6 +162,43 @@ def test_second_swap_is_refused_while_one_is_in_flight():
     a.release("asr")
 
 
+def test_unavailable_target_is_refused_before_evicting_the_holder():
+    # Codex round 5 (018): an unavailable/disabled/wedged TARGET used to evict a working holder
+    # first and only then fail its own load — a bad swap request became an outage for the
+    # resident engine. The probe must refuse up front, holder untouched.
+    llm, vision = FakeEngine("llm"), FakeEngine("vision")
+    vision.available_state = (False, "vision CUDA build missing — run build.sh")
+    mgr, a = _manager([llm, vision])
+    mgr.runtimes["llm"].ensure_loaded()
+    try:
+        swap.preempt_for(mgr, "vision")
+    except swap.PreemptRefused as e:
+        assert "unavailable" in str(e)
+    else:
+        raise AssertionError("expected PreemptRefused for an unavailable target")
+    assert llm.spawned[0].alive               # the holder was never evicted
+    assert a.holder()["tenant"] == "llm"
+
+
+def test_failed_target_load_rolls_the_evicted_holder_back():
+    # Codex round 5 (018): a load failure the probe can't see (spawn ok, never becomes ready)
+    # happens AFTER eviction — best-effort rollback reloads the previously healthy holder
+    # instead of leaving the GPU empty.
+    llm, vision = FakeEngine("llm"), FakeEngine("vision")
+    vision.ready_state = False                # spawns but never readies → EngineError
+    mgr, a = _manager([llm, vision])
+    mgr.runtimes["llm"].ensure_loaded()
+    try:
+        swap.preempt_for(mgr, "vision", drain_timeout_s=1)
+    except lifecycle.EngineError:
+        pass
+    else:
+        raise AssertionError("expected EngineError for a never-ready target")
+    assert a.holder()["tenant"] == "llm"      # rolled back — the GPU is not left empty
+    assert len(llm.spawned) == 2 and llm.spawned[1].alive   # a fresh holder child is up
+    assert mgr.runtimes["llm"].state()["state"] == "ready"
+
+
 def test_wedged_holder_fails_the_swap_loudly():
     llm, vision = FakeEngine("llm"), FakeEngine("vision")
     llm.immortal_child = True                 # eviction will fail — child survives SIGKILL

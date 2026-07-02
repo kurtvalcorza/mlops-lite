@@ -21,19 +21,26 @@ from app import policies, scheduler  # noqa: E402
 
 
 class Cooldown:
-    """A fake of quality's shared reserve/release/note cooldown gate."""
+    """A fake of quality's shared reserve/release/note cooldown gate. Like the real
+    try_reserve_retrain (Codex round 5, 018), reserve() returns a truthy TOKEN and release()
+    records what token it was given — pinning WHICH releases are token-guarded (fresh
+    reserve→launch windows) vs deliberately unconditional (the park's owned stamp)."""
 
     def __init__(self):
         self.reserved = False
         self.notes = 0
+        self.stamp = 0
+        self.releases = []  # the token passed to each release (None = unconditional)
 
     def reserve(self):
         if self.reserved:
             return False
         self.reserved = True
-        return True
+        self.stamp += 1
+        return self.stamp
 
-    def release(self):
+    def release(self, token=None):
+        self.releases.append(token)
         self.reserved = False
 
     def note(self):
@@ -174,7 +181,7 @@ def test_restart_resume_picks_up_the_parked_retrain():
     fresh = scheduler.PolicyScheduler(                      # the "restarted" gateway
         store=policies, wall=lambda: 9000.0, check_fn=lambda p, m: {"breached": False},
         launch_fn=launch_ok, watch_fn=lambda rid: {"status": "running"},
-        reserve_fn=lambda: True, release_fn=lambda: None, note_fn=lambda: None)
+        reserve_fn=lambda: True, release_fn=lambda token=None: None, note_fn=lambda: None)
     orig = policies.resolve_dataset_version
     policies.resolve_dataset_version = lambda n, v: "LATESTVER"
     try:
@@ -205,6 +212,29 @@ def test_retry_nonbusy_failure_drops_park_and_releases_reservation():
         assert any(a["action"] == "retry_failed" for a in acts)
         assert policies.get_pending("vision-mobilenet") is None   # park dropped
         assert cool.reserved is False                             # reservation released
+        # deliberately TOKENLESS (Codex round 5, 018): the park owns the stamp via its
+        # keep-alive refresh, so the original token is stale — a guarded release would leak
+        assert cool.releases == [None]
+    finally:
+        _teardown(sched)
+
+
+def test_initial_launch_failure_releases_with_its_own_token():
+    # Codex round 5 (018): the fresh reserve→launch→release window passes the token so a failed
+    # launch can only undo ITS reservation — never a newer stamp another actor landed meanwhile.
+    sched, launches, checks, state, cool = _setup(
+        check_results=[{"breached": True, "score": 0.9}])
+    try:
+        _policy(interval=900)
+
+        def _explodes(policy, dataset_name, dataset_version):
+            raise RuntimeError("trainer 500")
+
+        sched.launch_fn = _explodes
+        acts = sched.tick(now=1000.0)
+        assert any(a["action"] == "retrain_failed" for a in acts)
+        assert cool.releases == [1]                        # the token from THIS reserve
+        assert cool.reserved is False
     finally:
         _teardown(sched)
 
@@ -409,6 +439,7 @@ def test_park_persist_failure_hands_the_reservation_back():
             policies.save_pending = orig_save
         assert any(a["action"] == "retrain_park_failed" for a in acts)
         assert cool.reserved is False                          # handed back, not leaked
+        assert cool.releases == [1]                            # token-guarded (Codex round 5)
         assert policies.get_pending("vision-mobilenet") is None
         acts = sched.tick(now=1901.0)                          # next due check parks normally
         assert any(a["action"] == "retrain_parked" for a in acts)

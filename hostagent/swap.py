@@ -54,10 +54,32 @@ def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0) -
         holder_rt = manager.runtimes.get(holder["tenant"])
         if holder_rt is None:
             raise PreemptRefused(f"holder {holder['tenant']!r} is not a swappable engine")
+        # Probe the target BEFORE evicting (Codex round 5, 018): an unavailable/disabled/wedged
+        # target would otherwise evict a working holder and then fail its own load — a bad swap
+        # request must not turn into an outage for the resident engine.
+        if not target.enabled:
+            raise PreemptRefused(f"target {target_engine_id} is disabled")
+        if target.wedged_reason:
+            raise PreemptRefused(f"target {target_engine_id} is wedged: {target.wedged_reason}")
+        ok, reason = target.adapter.available()
+        if not ok:
+            raise PreemptRefused(f"target {target_engine_id} unavailable: {reason}")
         result = holder_rt.unload(drain_timeout_s=drain_timeout_s)
         if result.get("status") not in ("unloaded", "idle"):
             raise SwapError(f"{holder['tenant']} did not unload: {result.get('detail') or result}")
-        load_ms = target.ensure_loaded()  # the reservation kept the freed slot ours to claim
+        try:
+            load_ms = target.ensure_loaded()  # the reservation kept the freed slot ours to claim
+        except BaseException:
+            # Best-effort ROLLBACK (Codex round 5, 018): the holder is already evicted, and a
+            # load failure the probe couldn't see (spawn/readiness) must not leave the GPU empty
+            # when the previous engine was healthy. End the reservation first — the rollback
+            # re-claims admission under the HOLDER's tenant (the finally's end_swap is a no-op).
+            admission.end_swap(target_engine_id)
+            try:
+                holder_rt.ensure_loaded()
+            except Exception:
+                pass  # GPU stays free; the next request cold-loads on demand
+            raise
         return {"swapped": True, "evicted": holder["tenant"], "load_ms": load_ms}
     finally:
         admission.end_swap(target_engine_id)

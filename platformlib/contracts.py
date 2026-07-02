@@ -176,21 +176,56 @@ class ModelPolicy(_Base):
             if not isinstance(mon, dict) or mon.get("kind") not in MONITOR_KINDS:
                 errors.append({"field": f"monitors[{i}].kind",
                                "reason": f"must be one of {MONITOR_KINDS}"})
-            elif mon["kind"] == "input_drift":
+                continue
+            if mon["kind"] == "input_drift":
                 ref = mon.get("reference")
                 if (not isinstance(ref, dict) or not ref.get("name")
                         or not ref.get("version")):
                     errors.append({"field": f"monitors[{i}].reference",
                                    "reason": "input_drift needs a reference dataset object "
                                              "with both 'name' and 'version'"})
+            # Numeric knobs are checked at WRITE time (Codex round 5, 018): the scheduler casts
+            # them with int()/float() at check time — a malformed value would fail every due
+            # tick as a "check error" and the policy would never evaluate or retrain, exactly
+            # the discovered-at-breach-time failure FR-179 exists to prevent.
+            for key, cast, ok_fn, want in (
+                    ("window_n", int, lambda v: v > 0, "a positive integer"),
+                    ("drop_pct", float, lambda v: v >= 0, "a number >= 0"),
+                    ("threshold", float, lambda v: v > 0, "a number > 0"),
+                    ("baseline", float, lambda v: True, "a number")):
+                if mon.get(key) is None:
+                    continue
+                try:
+                    ok = ok_fn(cast(mon[key]))
+                except (TypeError, ValueError):
+                    ok = False
+                if not ok:
+                    errors.append({"field": f"monitors[{i}].{key}",
+                                   "reason": f"must be {want}"})
         if not isinstance(self.on_breach, dict) or self.on_breach.get("action") != "retrain":
             errors.append({"field": "on_breach.action", "reason": "must be 'retrain'"})
         elif not self.on_breach.get("dataset"):
             errors.append({"field": "on_breach.dataset",
                            "reason": "required — 'latest' or a pinned dataset version; the "
                                      "dataset name comes from on_breach.params.dataset_name"})
-        elif not (self.on_breach.get("params") or {}).get("dataset_name"):
-            errors.append({"field": "on_breach.params.dataset_name", "reason": "required"})
+        else:
+            params = self.on_breach.get("params") or {}
+            if not isinstance(params, dict):
+                # Codex round 5 (018): a truthy non-object here crashed the .get() below with an
+                # AttributeError — an unstructured 500 where FR-179 promises a structured 400.
+                errors.append({"field": "on_breach.params",
+                               "reason": "must be an object of retrain parameters"})
+            elif not params.get("dataset_name"):
+                errors.append({"field": "on_breach.params.dataset_name", "reason": "required"})
+            elif (params.get("output_name") or self.model_name) != self.model_name:
+                # Codex round 5 (018): the loop gates and promotes policy.model_name with only
+                # the run's returned VERSION — versions are per-model, so registering under any
+                # other name makes that pair meaningless (blocked as missing, or promoting an
+                # unrelated version). The launch path also forces output_name, as the belt.
+                errors.append({"field": "on_breach.params.output_name",
+                               "reason": f"must equal the policy model ({self.model_name!r}) — "
+                                         f"the loop gates/promotes that model by returned "
+                                         f"version"})
         if self.promotion_mode not in PROMOTION_MODES:
             errors.append({"field": "promotion_mode",
                            "reason": f"must be one of {PROMOTION_MODES}"})

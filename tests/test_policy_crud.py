@@ -82,6 +82,46 @@ def test_promotion_mode_rejected():
     assert "promotion_mode" in _errors(_doc(promotion_mode="yolo"))
 
 
+def test_non_object_params_is_a_structured_error_not_a_crash():
+    # Codex round 5 (018): a truthy non-object params used to AttributeError inside validate() —
+    # an unstructured 500 where FR-179 promises a structured 400.
+    assert "on_breach.params" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest", "params": "dataset"}))
+    assert "on_breach.params" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest", "params": ["dataset_name"]}))
+
+
+def test_malformed_numeric_knobs_rejected_at_write_time():
+    # Codex round 5 (018): the scheduler casts these with int()/float() at check time — a bad
+    # value would fail EVERY due tick as a check error and the policy would never evaluate.
+    assert "monitors[0].window_n" in _errors(
+        _doc(monitors=[{"kind": "quality", "window_n": "bad"}]))
+    assert "monitors[0].window_n" in _errors(
+        _doc(monitors=[{"kind": "quality", "window_n": 0}]))
+    assert "monitors[0].drop_pct" in _errors(
+        _doc(monitors=[{"kind": "quality", "drop_pct": "lots"}]))
+    assert "monitors[0].threshold" in _errors(
+        _doc(monitors=[{"kind": "input_drift",
+                        "reference": {"name": "d", "version": "1"}, "threshold": "high"}]))
+    assert "monitors[0].baseline" in _errors(
+        _doc(monitors=[{"kind": "quality", "baseline": "good"}]))
+    # parseable strings stay fine — the scheduler's int()/float() casts accept them
+    assert _errors(_doc(monitors=[{"kind": "quality", "window_n": 50,
+                                   "drop_pct": "0.2"}])) == set()
+
+
+def test_output_name_must_match_the_policy_model():
+    # Codex round 5 (018): the loop gates/promotes policy.model_name with only the returned
+    # version — a different registered name makes that pair meaningless (versions are per-model).
+    assert "on_breach.params.output_name" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest",
+                        "params": {"dataset_name": "d", "output_name": "some-other-model"}}))
+    assert _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest",
+                        "params": {"dataset_name": "d",
+                                   "output_name": "vision-mobilenet"}})) == set()
+
+
 # --- the store, against a fake S3 -------------------------------------------------------------------
 
 from _quality import FakeS3  # noqa: E402 — the shared in-memory S3 fake

@@ -37,7 +37,7 @@ def _setup(*, mode, run_status="completed", version="9", gate="pass", shadow=Non
         gate_fn=lambda model, ver: {"verdict": gate, "candidate": {"version": ver}},
         shadow_fn=lambda model, ver, modality: shadow,
         promote_fn=lambda model, ver: promoted.append((model, ver)) or {"promoted": True},
-        reserve_fn=lambda: True, release_fn=lambda: None, note_fn=lambda: None)
+        reserve_fn=lambda: True, release_fn=lambda token=None: None, note_fn=lambda: None)
 
     policies.put_policy("qa-demo", {
         "modality": "llm",
