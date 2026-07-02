@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Badge } from '@/components/Badge';
 import { PageTitle, Panel } from '@/components/Panel';
-import { gwGet, gwPost } from '@/lib/gw';
+import { GwError, gwGet, gwPost } from '@/lib/gw';
 
 type DsVersion = { version: string };
 type Dataset = { name: string; versions: DsVersion[] };
@@ -161,14 +161,14 @@ export default function RunsPage() {
         ]);
         watchStudy(res.study_id);
       } catch (e) {
-        const msg = String(e);
-        if (msg.includes('-> 409')) {
+        // 018 (T371): branch on the structured status, not the error-message text.
+        if (e instanceof GwError && e.status === 409) {
           setRefusal(
             'Refused: one model in VRAM at a time (Principle II). A model is resident in serving, ' +
               'or another run/study is active. Let it release and retry.',
           );
         } else {
-          setErr(msg);
+          setErr(String(e));
         }
       } finally {
         setLaunching(false);
@@ -202,15 +202,14 @@ export default function RunsPage() {
       setLog([`[${new Date().toLocaleTimeString()}] launched ${res.run_id} (${res.status})`]);
       watch(res.run_id);
     } catch (e) {
-      const msg = String(e);
       // Principle II: the trainer refuses to start while the serving model is resident (409).
-      if (msg.includes('-> 409')) {
+      if (e instanceof GwError && e.status === 409) {
         setRefusal(
           'Refused: one model in VRAM at a time (Principle II). A model is resident in serving, ' +
             'or another run is active. Let it release (idle timeout) and retry.',
         );
       } else {
-        setErr(msg);
+        setErr(String(e));
       }
     } finally {
       setLaunching(false);
@@ -464,8 +463,8 @@ function BatchLauncher({ datasets }: { datasets: Dataset[] }) {
       setRec({ batch_id: res.batch_id, status: res.status });
       watch(res.batch_id);
     } catch (e) {
-      const msg = String(e);
-      setErr(msg.includes('-> 409') ? 'Refused: the daemon is busy (a run/study/batch is active).' : msg);
+      setErr(e instanceof GwError && e.status === 409
+        ? 'Refused: the daemon is busy (a run/study/batch is active).' : String(e));
     } finally {
       setBusy(false);
     }

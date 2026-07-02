@@ -31,6 +31,19 @@ type Verdict = {
 };
 type PromoteResult = { promoted: boolean; serving_version: string | null; verdict: Verdict };
 
+// 018 US3 (FR-183): promotion suggestions — gate-passing policy-retrained candidates awaiting the
+// operator (mode `suggest`), plus the audit trail of auto-promotions.
+type Suggestion = {
+  id: string;
+  model_name: string;
+  candidate_version: string;
+  gate_verdict: { verdict?: string };
+  shadow_verdict: { winner?: string; metric?: string } | null;
+  state: string;
+  created_at: number;
+  actor?: string | null;
+};
+
 // 011: a version's logged eval metric lives in its registry tags (written by the harness).
 function evalOf(tags: Record<string, string>): string | null {
   if (!tags?.eval_metric || tags?.eval_value === undefined) return null;
@@ -73,6 +86,7 @@ export default function ModelsPage() {
         <p className="mb-4 text-caption-md st-danger">[x] {err}</p>
       )}
       {loading && <p className="text-caption-md text-mute">[~] loading…</p>}
+      <Suggestions onPromote={load} />
       <div className="space-y-3">
         {models.map((m) => (
           <ModelCard key={m.name} model={m} onPromote={load} />
@@ -82,6 +96,93 @@ export default function ModelsPage() {
         )}
       </div>
     </>
+  );
+}
+
+// --- 018 US3 (T371): promotion suggestions — accept routes through the gated promote ----------------
+
+function Suggestions({ onPromote }: { onPromote: () => void }) {
+  const [rows, setRows] = useState<Suggestion[]>([]);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+
+  const refresh = useCallback(async () => {
+    try {
+      const d = await gwGet<{ suggestions: Suggestion[] }>('suggestions?state=open');
+      setRows(d.suggestions || []);
+    } catch {
+      setRows([]); // pre-018 gateways have no /suggestions — the panel just stays empty
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 8000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  const act = async (id: string, action: 'accept' | 'dismiss') => {
+    setBusy(id);
+    setErr('');
+    try {
+      const res = await gwPost<{ promoted?: boolean; detail?: string }>(
+        `suggestions/${id}/${action}`,
+        {},
+      );
+      if (action === 'accept' && res.promoted === false) {
+        setErr(res.detail || 'gate blocked the promotion — suggestion stays open');
+      }
+      await refresh();
+      if (action === 'accept' && res.promoted) onPromote();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  if (rows.length === 0 && !err) return null;
+
+  return (
+    <div className="mb-4">
+      <Panel
+        title="promotion suggestions"
+        hint="policy-retrained candidates that passed the gate — accept promotes via the gated path"
+      >
+        {err && <p className="mb-2 text-caption-md st-danger">[x] {err}</p>}
+        <ul className="divide-y divide-hairline">
+          {rows.map((sug) => (
+            <li key={sug.id} className="flex items-center justify-between gap-3 py-2 text-body-md">
+              <span className="text-ink">
+                <span className="st-accent">[→]</span> {sug.model_name} v{sug.candidate_version}
+                <span className="text-mute">
+                  {' '}· gate {sug.gate_verdict?.verdict ?? '?'}
+                  {sug.shadow_verdict
+                    ? ` · shadow ${sug.shadow_verdict.winner}`
+                    : ' · no shadow window'}
+                </span>
+              </span>
+              <span className="flex gap-2 text-caption-md">
+                <button
+                  onClick={() => act(sug.id, 'accept')}
+                  disabled={busy === sug.id}
+                  className="rounded-sm bg-ink px-3 py-0.5 text-canvas disabled:opacity-40"
+                >
+                  {busy === sug.id ? '[~]' : 'promote'}
+                </button>
+                <button
+                  onClick={() => act(sug.id, 'dismiss')}
+                  disabled={busy === sug.id}
+                  className="underline text-mute"
+                >
+                  dismiss
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Panel>
+    </div>
   );
 }
 

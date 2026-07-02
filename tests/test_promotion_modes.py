@@ -1,0 +1,112 @@
+"""018 US3 — promotion modes (T370, FR-183).
+
+Offline, GPU-free: the scheduler's post-run evaluation with every seam injected. Pins:
+`manual` = no-op (today's behavior, byte-for-byte); `suggest` opens a PromotionSuggestion
+carrying gate + shadow verdicts; `auto-on-green` promotes through the gated choke-point and
+writes an `auto-promoted` audit record; gate warn/blocked (or a shadow loss) makes auto FALL
+BACK to suggest — automation never overrides the gate; failed runs and versionless results
+drop the watch without inventing promotions.
+"""
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (REPO, os.path.join(REPO, "gateway")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from _quality import FakeS3  # noqa: E402
+
+from app import policies, scheduler  # noqa: E402
+
+
+def _setup(*, mode, run_status="completed", version="9", gate="pass", shadow=None):
+    fake = FakeS3()
+    fake.delete_object = lambda Bucket, Key: fake.objs.pop(Key, None)
+    policies._s3 = lambda: fake
+
+    promoted = []
+    sched = scheduler.PolicyScheduler(
+        store=policies, wall=lambda: 100.0,
+        check_fn=lambda p, m: {"breached": False},
+        launch_fn=lambda p, dn, dv: {"run_id": "run-x"},
+        watch_fn=lambda rid: {"status": run_status,
+                              "result": ({"version": version} if version else {})},
+        gate_fn=lambda model, ver: {"verdict": gate, "candidate": {"version": ver}},
+        shadow_fn=lambda model, ver, modality: shadow,
+        promote_fn=lambda model, ver: promoted.append((model, ver)) or {"promoted": True},
+        reserve_fn=lambda: True, release_fn=lambda: None, note_fn=lambda: None)
+
+    policies.put_policy("qa-demo", {
+        "modality": "llm",
+        "monitors": [{"kind": "quality"}],
+        "check_interval_s": 900,
+        "on_breach": {"action": "retrain", "dataset": "latest",
+                      "params": {"dataset_name": "qa-live"}},
+        "promotion_mode": mode,
+    })
+    policies.save_status("qa-demo", {"last_check_at": 100.0,
+                                     "watch": {"run_id": "run-x", "launched_at": 50.0}})
+    return sched, promoted
+
+
+def test_manual_mode_does_nothing():
+    sched, promoted = _setup(mode="manual")
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "run_succeeded_manual" for a in acts)
+    assert promoted == [] and policies.list_suggestions() == []
+    assert "watch" not in (policies.get_status("qa-demo") or {})   # watch consumed
+
+
+def test_suggest_opens_a_suggestion_with_both_verdicts():
+    sched, promoted = _setup(mode="suggest", shadow={"winner": "challenger",
+                                                     "challenger": {"version": "9"}})
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "suggested" for a in acts)
+    assert promoted == []                                          # suggest never promotes
+    (rec,) = policies.list_suggestions(state="open")
+    assert rec["candidate_version"] == "9"
+    assert rec["gate_verdict"]["verdict"] == "pass"
+    assert rec["shadow_verdict"]["winner"] == "challenger"
+
+
+def test_auto_on_green_promotes_via_the_gate_and_audits():
+    sched, promoted = _setup(mode="auto-on-green", shadow={"winner": "tie"})
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "auto_promoted" for a in acts)
+    assert promoted == [("qa-demo", "9")]                          # the gated choke-point ran
+    (rec,) = policies.list_suggestions(state="auto-promoted")
+    assert rec["actor"] == "policy:qa-demo" and rec["resolved_at"] is not None
+
+
+def test_auto_with_no_shadow_window_is_still_green():
+    sched, promoted = _setup(mode="auto-on-green", shadow=None)    # "when one exists" (FR-183)
+    sched.tick(now=100.0)
+    assert promoted == [("qa-demo", "9")]
+
+
+def test_auto_falls_back_to_suggest_on_gate_warn_or_shadow_loss():
+    for gate, shadow in (("warn", None), ("blocked", None),
+                         ("pass", {"winner": "champion"})):        # challenger lost the window
+        sched, promoted = _setup(mode="auto-on-green", gate=gate, shadow=shadow)
+        acts = sched.tick(now=100.0)
+        assert any(a["action"] == "suggested" for a in acts), (gate, shadow)
+        assert promoted == []                                      # never overrides the gate
+        assert policies.list_suggestions(state="open")             # operator decides
+
+
+def test_failed_run_and_versionless_result_drop_the_watch():
+    sched, promoted = _setup(mode="auto-on-green", run_status="failed")
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "watched_run_failed" for a in acts)
+    assert promoted == [] and policies.list_suggestions() == []
+
+    sched, promoted = _setup(mode="auto-on-green", version=None)
+    acts = sched.tick(now=100.0)
+    assert any(a["action"] == "watched_run_no_version" for a in acts)
+    assert promoted == []
+
+
+if __name__ == "__main__":
+    import pytest
+    sys.exit(pytest.main([__file__, "-q"]))

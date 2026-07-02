@@ -151,29 +151,29 @@ runs against trainer *or* agent jobs surface.
 
 **Independent Test**: quickstart.md §US3 — offline scheduler/promotion suites; [HW] SC-112 drill.
 
-- [ ] **T366** [P] [US3] Policy contracts: `ModelPolicy`, `PendingRetrain`,
+- [x] **T366** [P] [US3] Policy contracts: `ModelPolicy`, `PendingRetrain`,
   `PromotionSuggestion`, `AuditRecord` in `platformlib/contracts.py` with write-time validation
   (known modality with a fine-tune flow, interval ≥60s, ≥1 monitor);
   `tests/test_policy_crud.py` (validation core).
-- [ ] **T367** [US3] Policy CRUD: `gateway/app/policies.py` + `gateway/app/routers/policies.py`
+- [x] **T367** [US3] Policy CRUD: `gateway/app/policies.py` + `gateway/app/routers/policies.py`
   (`GET/PUT/DELETE /policies[/{model}]`, `GET /policies/{model}/status`), MinIO-backed pre-US4;
   BFF entries in `ui/lib/gw-allowlist.ts`.
-- [ ] **T368** [US3] Scheduler: `gateway/app/scheduler.py` lifespan task per
+- [x] **T368** [US3] Scheduler: `gateway/app/scheduler.py` lifespan task per
   contracts/policy-api.md — interval ticks through existing `monitoring`/`quality` checks;
   breach → reserve → launch retrain with the policy's `modality` + `latest` dataset resolution;
   busy ⇒ queue-of-one `PendingRetrain` with backoff/supersede (FR-181/182), persisted beside
   the policies (MinIO pre-US4, `platformlib.store`) so a gateway restart resumes the parked
   retrain (R5); tick metrics; `tests/test_policy_scheduler.py` (fake clock + restart-resume
   case).
-- [ ] **T369** [P] [US3] Modality-aware direct retrain parity: `RetrainSpec` in
+- [x] **T369** [P] [US3] Modality-aware direct retrain parity: `RetrainSpec` in
   `gateway/app/routers/monitor.py` (+ `monitoring/drift.py` CLI) gains `modality` +
   `dataset_version: "latest"` so the manual path matches policy behavior (closes review §4.1);
   extend `tests/test_drift_loop.py`.
-- [ ] **T370** [US3] Promotion modes: post-run evaluation (gate + latest shadow verdict) →
+- [x] **T370** [US3] Promotion modes: post-run evaluation (gate + latest shadow verdict) →
   `manual` no-op / `suggest` creates suggestion + accept/dismiss endpoints (accept routes
   through the existing gated `promote()`) / `auto-on-green` promotes + `AuditRecord`; gate
   warn/blocked ⇒ auto falls back to suggest (FR-183); `tests/test_promotion_modes.py`.
-- [ ] **T371** [US3] UI: policy editor + status strip on `ui/app/monitor/page.tsx`; suggestions
+- [x] **T371** [US3] UI: policy editor + status strip on `ui/app/monitor/page.tsx`; suggestions
   (gate + shadow verdicts, accept/dismiss) + audit rows on `ui/app/models/page.tsx`; `ui/lib/
   gw.ts` returns structured `{status, body}` errors (retiring the `'-> 409'` string-match in
   `ui/app/runs/page.tsx`); allowlist additions.

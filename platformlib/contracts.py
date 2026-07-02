@@ -137,6 +137,98 @@ class JobSubmit(_Base):
             raise ContractError(f"JobSubmit.kind {self.kind!r} not in {JOB_KINDS}")
 
 
+MONITOR_KINDS = ("input_drift", "quality")
+PROMOTION_MODES = ("manual", "suggest", "auto-on-green")
+SUGGESTION_STATES = ("open", "accepted", "dismissed", "auto-promoted")
+
+
+@dataclass
+class ModelPolicy(_Base):
+    """Per-model loop declaration (018 US3, FR-179; data-model.md §ModelPolicy). Validated at
+    write time — an invalid declaration is rejected with a structured error, never stored, and
+    never discovered at breach time (spec edge case)."""
+    model_name: str = ""
+    modality: str = ""
+    monitors: list = field(default_factory=list)   # [{"kind": ..., **params}]
+    check_interval_s: int = 900
+    on_breach: dict = field(default_factory=lambda: {"action": "retrain", "dataset": "latest",
+                                                     "params": {}})
+    promotion_mode: str = "manual"
+    enabled: bool = True
+    updated_at: float = 0.0
+    updated_by: str = ""
+
+    def validate(self):
+        from .topology import TRAINABLE_MODALITIES
+
+        errors = []
+        if not self.model_name:
+            errors.append({"field": "model_name", "reason": "required"})
+        if self.modality not in TRAINABLE_MODALITIES:
+            errors.append({"field": "modality",
+                           "reason": f"must be one of {TRAINABLE_MODALITIES} "
+                                     f"(a modality with a fine-tune flow)"})
+        if not isinstance(self.check_interval_s, int) or self.check_interval_s < 60:
+            errors.append({"field": "check_interval_s", "reason": "must be an integer >= 60"})
+        if not self.monitors:
+            errors.append({"field": "monitors", "reason": "at least one monitor is required"})
+        for i, mon in enumerate(self.monitors):
+            if not isinstance(mon, dict) or mon.get("kind") not in MONITOR_KINDS:
+                errors.append({"field": f"monitors[{i}].kind",
+                               "reason": f"must be one of {MONITOR_KINDS}"})
+            elif mon["kind"] == "input_drift" and not mon.get("reference"):
+                errors.append({"field": f"monitors[{i}].reference",
+                               "reason": "input_drift needs a reference dataset "
+                                         "{name, version} and a current dataset name"})
+        if not isinstance(self.on_breach, dict) or self.on_breach.get("action") != "retrain":
+            errors.append({"field": "on_breach.action", "reason": "must be 'retrain'"})
+        elif not self.on_breach.get("dataset"):
+            errors.append({"field": "on_breach.dataset",
+                           "reason": "required — 'latest' or a pinned dataset version; the "
+                                     "dataset name comes from on_breach.params.dataset_name"})
+        elif not (self.on_breach.get("params") or {}).get("dataset_name"):
+            errors.append({"field": "on_breach.params.dataset_name", "reason": "required"})
+        if self.promotion_mode not in PROMOTION_MODES:
+            errors.append({"field": "promotion_mode",
+                           "reason": f"must be one of {PROMOTION_MODES}"})
+        if errors:
+            raise ContractError(json.dumps({"errors": errors}))
+
+
+@dataclass
+class PendingRetrain(_Base):
+    """The queue-of-one parked retrain per model (FR-182; data-model.md). Durable beside the
+    policies so a gateway restart resumes the retry (clarify Q2 remediation U2)."""
+    model_name: str = ""
+    breach: dict = field(default_factory=dict)     # {"signal", "score", "at"}
+    attempts: int = 0
+    next_attempt_at: float = 0.0
+
+    def validate(self):
+        self._require("model_name")
+
+
+@dataclass
+class PromotionSuggestion(_Base):
+    """A gate-passing candidate awaiting the operator (mode `suggest`), or the audit record of an
+    automatic promotion (mode `auto-on-green`) — data-model.md §PromotionSuggestion."""
+    id: str = ""
+    model_name: str = ""
+    candidate_version: str = ""
+    gate_verdict: dict = field(default_factory=dict)
+    shadow_verdict: Optional[dict] = None
+    state: str = "open"
+    created_at: float = 0.0
+    resolved_at: Optional[float] = None
+    actor: Optional[str] = None
+
+    def validate(self):
+        self._require("id", "model_name", "candidate_version")
+        if self.state not in SUGGESTION_STATES:
+            raise ContractError(f"PromotionSuggestion.state {self.state!r} "
+                                f"not in {SUGGESTION_STATES}")
+
+
 @dataclass
 class JobRecord(_Base):
     """Durable job state (data-model.md §JobRecord; journal pre-US4, `jobs` table after)."""

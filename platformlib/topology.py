@@ -35,6 +35,10 @@ ENGINES = {
     "tabular": {"gpu": False, "optional": False},
 }
 
+#: Modalities with a fine-tune flow (the on-breach retrain targets, FR-181). The canonical shared
+#: definition — `training/flow_dispatch.VALID_MODALITIES` mirrors it until the jobs fold-in (T362).
+TRAINABLE_MODALITIES = ("llm", "vision", "embeddings", "asr")
+
 #: The host agent's single stable endpoint (research R3). Legacy daemon ports 8090–8095/8099 are
 #: retired per fold-in phase and deleted from here at lockfile retirement (T364).
 AGENT_PORT = 8100

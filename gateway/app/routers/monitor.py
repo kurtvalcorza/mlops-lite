@@ -11,9 +11,11 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from .. import monitoring, quality
+from platformlib.topology import TRAINABLE_MODALITIES
+
+from .. import monitoring, policies, quality
 from ..settings import TRAINER_URL
 
 router = APIRouter()
@@ -31,11 +33,23 @@ class DatasetRef(BaseModel):
 
 
 class RetrainSpec(BaseModel):
+    """018 US3 (T369, FR-181 — closes review §4.1): the trigger can retrain ANY trainable
+    modality (pre-018 the absent field made every drift-triggered retrain an LLM run), and
+    `dataset_version: "latest"` resolves to the newest registered version at launch time so the
+    retrain consumes the drifted data, not a pinned snapshot."""
     dataset_name: str
-    dataset_version: str
+    dataset_version: str                   # a pinned version, or "latest"
     output_name: str
+    modality: str = "llm"                  # any TRAINABLE_MODALITIES member (422 otherwise)
     steps: int = 10
     lora_r: int = 8
+
+    @field_validator("modality")
+    @classmethod
+    def _known_modality(cls, v):
+        if v not in TRAINABLE_MODALITIES:
+            raise ValueError(f"modality must be one of {TRAINABLE_MODALITIES}")
+        return v
 
 
 class DriftCheck(BaseModel):
@@ -46,9 +60,13 @@ class DriftCheck(BaseModel):
 
 
 def _launch_retrain(spec: RetrainSpec) -> dict:
-    """Fire a fine-tune run on the training daemon (the drift->retrain trigger)."""
+    """Fire a fine-tune run on the training daemon (the drift->retrain trigger). `latest` is
+    resolved HERE, at launch time (FR-181)."""
+    body = spec.model_dump()
+    body["dataset_version"] = policies.resolve_dataset_version(
+        spec.dataset_name, spec.dataset_version)
     with httpx.Client(timeout=15) as client:
-        r = client.post(f"{TRAINER_URL}/train", json=spec.model_dump())
+        r = client.post(f"{TRAINER_URL}/train", json=body)
     if r.status_code not in (200, 202):
         raise RuntimeError(f"trainer returned {r.status_code}: {r.text[:200]}")
     return r.json()
