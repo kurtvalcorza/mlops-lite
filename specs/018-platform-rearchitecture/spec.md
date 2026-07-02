@@ -81,6 +81,28 @@ on the already-resident database, and **declarative per-model policies** that cl
 > (consumed by promotion policies) · the 2026-07 architecture review (findings §4.1–§4.7, target
 > architecture §5–§6).
 
+## Clarifications
+
+### Session 2026-07-02
+
+- Q: Under the host agent, how does inference traffic reach the engine children — through the
+  agent, or direct-to-child via discovery? → A: **All traffic via the agent**: one stable agent
+  endpoint; the gateway sends all inference (including streams) to it and the agent forwards to
+  its children on internal dynamic ports. Child ports never appear in any external contract.
+- Q: Who restarts a crashed agent, and what happens to an active training/HPO run? → A:
+  **Auto-restart + journal**: the babysitter (shrunk to agent + UI) always auto-restarts the
+  agent with backoff; on restart the journal marks interrupted jobs failed-with-reason and the
+  loss is surfaced as a visible alert. supervise.py shrinks — it is not retired, and no OS-level
+  service manager is introduced.
+- Q: How does the operator author per-model policies? → A: **Gateway API + UI editor**: full
+  CRUD via authenticated gateway endpoints with an editor on the Monitor page — UI-first, like
+  every other operator action on this platform; no repo/file edits required to change a policy.
+- Q: When durable state lands (US4), how does the agent persist job records — direct to
+  Postgres or via the gateway? → A: **Both runtimes write directly**: the shared contracts
+  package ships one storage client used by gateway and agent alike; the agent writes job records
+  straight to the database on loopback — one source of truth, no sync protocol, symmetric with
+  how both runtimes already reach MinIO/MLflow directly.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — The platform stops dropping or duplicating lifecycle signals (Priority: P1)
@@ -239,9 +261,9 @@ storage and reports remain reproducible after the cutover.
   VRAM frees; on restart the journal shows the interrupted swap/job as failed with reason. At no
   point were two tenants resident.
 - **Agent crash mid-training**: today a trainer-daemon crash already loses the run's tracking (in-
-  memory state); under 018 the journal marks the run failed and the operator is told — strictly
-  better, though the child still dies with the agent. Restarting the agent is an operator action;
-  its supervisor backoff must not flap it while a long run is active.
+  memory state); under 018 the babysitter auto-restarts the agent with backoff, the journal marks
+  the run failed-with-reason, and the loss is raised as a visible alert — strictly better than
+  today, though the child still dies with the agent (unchanged blast radius).
 - **GPU telemetry unavailable** (driver hiccup): admission falls back to the static budget
   headroom check, as today — never fail-open into co-residency.
 - **Wedged child in uninterruptible sleep**: kill fails; the agent keeps the tenant marked
@@ -301,8 +323,8 @@ storage and reports remain reproducible after the cutover.
 - **FR-172**: A running training/HPO/batch job MUST never be preempted, enforced from the
   agent's own job state — no network probe, no fail-open path.
 - **FR-173**: Job records (runs, studies, batches, shadow replays) MUST be journaled durably as
-  they change state; an agent restart preserves history and marks interrupted jobs failed with a
-  reason.
+  they change state; an agent restart preserves history, marks interrupted jobs failed with a
+  reason, and surfaces the interruption as a visible alert (metric + health state), not silently.
 - **FR-174**: The agent MUST expose health and metrics (GPU free VRAM, holder, per-engine state,
   job states) scraped **directly** by the monitoring stack; loss of the gateway MUST NOT blind
   GPU/host observability.
@@ -311,21 +333,27 @@ storage and reports remain reproducible after the cutover.
 - **FR-176**: A single shared contracts package MUST define — exactly once, for both the gateway
   and the native host — tenant identities, the port/endpoint topology, typed schemas for
   health/job/admission payloads, and the storage client. Cross-runtime imports via path
-  manipulation MUST be eliminated; child ports are allocated dynamically by the agent.
+  manipulation MUST be eliminated. Child ports are allocated dynamically by the agent and are
+  **agent-internal**: all inference traffic — streaming included — enters through the agent's
+  single stable endpoint and is forwarded to the resident child; no child endpoint appears in
+  any contract outside the agent.
 - **FR-177**: The gateway's external API contract (routes, request/response shapes, status-code
   semantics including 409-busy and 507-too-large) and all UI behavior MUST be preserved
   throughout; each migration phase merges with the full existing test suite green. Tests that
   assert retired internals (the lockfile protocol) are rewritten against the agent's admission
   API in the same phase that retires them.
 - **FR-178**: On completion, resident native processes MUST be reduced to the agent and the UI;
-  the standalone process babysitter either retires or shrinks to supervising exactly those two;
-  the lockfile protocol and its `/tmp` state are deleted.
+  the standalone process babysitter shrinks to supervising exactly those two, auto-restarting
+  the agent with backoff unconditionally (interrupted work is surfaced via FR-173, never by
+  withholding restart); the lockfile protocol and its `/tmp` state are deleted.
 
 **Declarative policies (User Story 3)**
 
 - **FR-179**: The operator MUST be able to declare, per monitored model: monitors to run, check
   interval, on-breach action, and promotion mode (`manual` default / `suggest` /
-  `auto-on-green`); declarations are validated at write time and visible in the UI.
+  `auto-on-green`) — authored via full CRUD on authenticated gateway endpoints with an editor on
+  the UI's Monitor page; declarations are validated at write time, and invalid declarations are
+  rejected with a structured error.
 - **FR-180**: A scheduler in the always-on control plane MUST execute policy checks on their
   declared intervals with no external trigger; every check is observable (metrics + report).
 - **FR-181**: An on-breach retrain MUST target the **breached model's modality** and resolve the
@@ -344,8 +372,10 @@ storage and reports remain reproducible after the cutover.
 
 - **FR-184**: Prediction logs, ground-truth labels, the capture index, and job records MUST move
   to the platform's already-resident relational database (the provisioned `gateway` database);
-  blobs (datasets, artifacts, captured payloads, reports) remain on object storage. No new
-  resident service.
+  blobs (datasets, artifacts, captured payloads, reports) remain on object storage. Both
+  runtimes access the store directly through the contracts package's shared storage client (the
+  agent writes job records to the database itself — no mirror/sync path through the gateway).
+  No new resident service.
 - **FR-185**: Label attachment MUST be write-once enforced by a store constraint — correct under
   concurrent writers across processes.
 - **FR-186**: Quality and shadow windows MUST resolve via store-side filtering and joins with
@@ -421,11 +451,12 @@ storage and reports remain reproducible after the cutover.
 - **BentoML embed/tabular/vision services fold in as child processes first** (least churn — the
   agent adopts their run scripts); replacing BentoML with plain adapters is optional later work,
   not required by this spec.
-- **The UI keeps its own process** (Node runtime, per the v1.3.0 amendment); the surviving
-  babysitter (or the agent) restarts it on crash. Restart backoff must respect active training
-  (edge case above).
-- **Policy storage** rides the durable-state layer when present (User Story 4) and a versioned
-  file/config surface before that — the declaration UX is identical either way.
+- **The UI keeps its own process** (Node runtime, per the v1.3.0 amendment); the shrunken
+  babysitter supervises agent + UI and auto-restarts both with backoff (Clarifications,
+  2026-07-02).
+- **Policy storage** rides the durable-state layer when present (User Story 4) and a durable
+  gateway-writable store (object storage) before that — the authoring surface (gateway API + UI
+  editor, per Clarifications) is identical either way.
 - **Existing S3 prediction/label objects are backfilled once** into the relational store at
   cutover; object-store reports remain readable in place; no dual-write period is required at
   single-operator scale.

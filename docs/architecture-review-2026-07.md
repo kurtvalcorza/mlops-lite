@@ -125,8 +125,8 @@ train → register → score-at-registration (automatic) → **stop**. Specific 
   restarted supervisor into an EADDRINUSE → 507 loop. A lease-protocol fix must currently be
   hand-applied in two supervisors plus the trainer's copy of the vram-owner dance
   (`trainer.py:101-108`).
-- **Tenant identity and topology as scattered string literals.** Holder-label and holder→URL maps
-  are duplicated across `gateway/app/serving.py:24` and `gateway/app/swap.py:53-67`; tenant names
+- **Tenant identity and topology as scattered string literals.** Overlapping holder-label and
+  holder→URL maps live in `gateway/app/serving.py:24` and `gateway/app/swap.py:53-67`; tenant names
   (`llm-serving`, `asr`, `vision`, `training`) are raw strings in every lease caller. No shared
   enum/registry module.
 - **Flows never converged on `_common.py`.** The LLM flow keeps verbatim copies of the Prefect
