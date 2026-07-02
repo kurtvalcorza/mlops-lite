@@ -23,7 +23,13 @@ class Tenant:
 #: Serving-tenant labels (preemptable by an operator-confirmed swap). `training` is intentionally
 #: absent — a running training/HPO/batch job is never preempted (FR-172, constitution Principle II).
 SERVING_TENANTS = (Tenant.LLM, Tenant.ASR, Tenant.VISION)
-NON_PREEMPTABLE = {Tenant.TRAINING}
+NON_PREEMPTABLE = {Tenant.TRAINING}  # legacy tenant-label form (gateway swap path; retires T364)
+
+#: The SINGLE definition the agent's swap logic consults (contracts/platformlib.md, FR-172): an
+#: admission holder whose `kind` is listed here structurally refuses preemption — no network
+#: probe, no fail-open path. Kind-based (not tenant-based) so a batch/HPO job under a serving
+#: tenant id is protected too.
+NON_PREEMPTABLE_KINDS = {"job"}
 
 #: Engine registry (data-model.md §EngineAdapter). `gpu=False` engines never touch admission;
 #: `optional=True` engines are excluded from platform-health's `all_healthy` (research R7).

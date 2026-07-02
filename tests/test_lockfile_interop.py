@@ -43,8 +43,11 @@ def test_legacy_tenant_blocks_agent_admission():
         a = _agent(lease)
         try:
             a.acquire("llm", "serving", est_gb=1.0)
-        except lease.LeaseHeld:
-            pass
+        except adm.Held as e:
+            # Mapped to the AGENT'S exception type (internal review, 018): the raw
+            # gpu_lease.LeaseHeld is a foreign class the HTTP surface doesn't map — it would
+            # surface as a 500 instead of the contracted 409. The holder details survive.
+            assert e.holder.get("tenant") == "training"
         else:
             raise AssertionError("agent admission must respect a legacy lockfile holder")
         assert a.holder() is None            # the failed interop claim left no agent-side state

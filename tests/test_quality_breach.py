@@ -60,11 +60,12 @@ def test_cooldown_debounces_a_recent_retrain():
 
 
 def test_try_reserve_retrain_is_atomic_one_winner():
-    # two concurrent quality checks must not both launch: the first reserve wins, the second is debounced.
+    # two concurrent quality checks must not both launch: the first reserve wins, the second is
+    # debounced. Since 018 the winner gets a truthy TOKEN (the stamp) for a guarded release.
     q.reset_cooldown()
-    assert q.try_reserve_retrain(now=1000.0, cooldown_sec=3600) is True   # first call reserves
-    assert q.try_reserve_retrain(now=1001.0, cooldown_sec=3600) is False  # second is inside cooldown
-    assert q.try_reserve_retrain(now=5000.0, cooldown_sec=3600) is True   # window elapsed → free again
+    assert q.try_reserve_retrain(now=1000.0, cooldown_sec=3600) == 1000.0  # reserves → token
+    assert q.try_reserve_retrain(now=1001.0, cooldown_sec=3600) is False   # inside cooldown
+    assert q.try_reserve_retrain(now=5000.0, cooldown_sec=3600) == 5000.0  # elapsed → free again
     q.reset_cooldown()
 
 
@@ -72,9 +73,25 @@ def test_release_retrain_frees_a_reservation_for_retry():
     # if a launch fails, releasing the reservation must let the NEXT genuine breach retry (a trainer-down
     # shouldn't consume the cooldown) — symmetric with the PSI path's note-after-success.
     q.reset_cooldown()
-    assert q.try_reserve_retrain(now=1000.0, cooldown_sec=3600) is True   # reserve
-    q.release_retrain()                                                   # launch failed → release
-    assert q.try_reserve_retrain(now=1001.0, cooldown_sec=3600) is True   # free again, retry allowed
+    token = q.try_reserve_retrain(now=1000.0, cooldown_sec=3600)
+    assert token                                                          # reserve
+    q.release_retrain(token)                                              # launch failed → release
+    assert q.try_reserve_retrain(now=1001.0, cooldown_sec=3600)           # free again, retry allowed
+    q.reset_cooldown()
+
+
+def test_release_with_a_stale_token_never_clears_a_newer_stamp():
+    # Internal review (018): an unconditional release could clear a stamp SOMEONE ELSE now owns —
+    # e.g. the policy scheduler's parked-retrain keep-alive refreshed the window between our
+    # reserve and our failed launch's release. The token guard makes that release a no-op;
+    # a tokenless release keeps the legacy unconditional behavior.
+    q.reset_cooldown()
+    token = q.try_reserve_retrain(now=1000.0, cooldown_sec=3600)
+    q.note_retrain(now=2000.0)                                 # a newer stamp landed in between
+    q.release_retrain(token)                                   # stale token → must NOT clear it
+    assert q.try_reserve_retrain(now=2001.0, cooldown_sec=3600) is False  # window still live
+    q.release_retrain()                                        # tokenless → unconditional
+    assert q.try_reserve_retrain(now=2002.0, cooldown_sec=3600)
     q.reset_cooldown()
 
 

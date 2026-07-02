@@ -1,0 +1,9 @@
+# The gateway image builds from the REPO ROOT (so it can COPY platformlib — see
+# gateway/Dockerfile). Send Docker only what that build needs; everything else (models, datasets,
+# node_modules, specs, .git) stays out of the build context.
+*
+!gateway
+!platformlib
+gateway/__pycache__
+**/__pycache__
+**/*.pyc

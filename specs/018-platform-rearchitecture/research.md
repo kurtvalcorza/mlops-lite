@@ -30,7 +30,8 @@ constitution wording question. Each entry: Decision / Rationale / Alternatives c
 
 ## R3. Agent port strategy during migration: `:8100`, per-engine URL flips
 
-- **Decision**: The agent binds one new stable port `:8100` (localhost). Each fold-in phase
+- **Decision**: The agent binds one new stable port `:8100` (`AGENT_BIND`, default `0.0.0.0`
+  like the legacy daemons — the containers reach it via host-gateway). Each fold-in phase
   flips only that engine's gateway env (`SERVING_URL` → `http://…:8100/engines/llm`, etc.).
   At completion a single `AGENT_URL` replaces the six daemon URLs; 8090–8095/8099 are freed and
   the legacy entries deleted from `platformlib.topology`.
@@ -70,7 +71,9 @@ constitution wording question. Each entry: Decision / Rationale / Alternatives c
 
 ## R6. Agent control-surface auth (clarify-deferred)
 
-- **Decision**: House posture unchanged: the agent binds localhost; state-changing control
+- **Decision**: House posture unchanged: the agent binds like the legacy daemons it replaces
+  (`AGENT_BIND`, default `0.0.0.0` — the gateway/Prometheus containers must reach :8100 via
+  host-gateway; loopback-only broke that, Codex review); state-changing control
   routes (unload/swap, job submit/cancel) honor the existing opt-in shared-secret header
   (`X-Swap-Control` generalizes to `X-Agent-Control`); read routes (health, metrics, engine
   list) stay open like today's probes. The gateway forwards the secret exactly as 017 does.

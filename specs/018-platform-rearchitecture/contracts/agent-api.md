@@ -1,6 +1,8 @@
 # Contract: GPU Host Agent API (single stable endpoint)
 
-Base: `http://127.0.0.1:8100` (R3). All inference traffic flows through here (clarify Q1);
+Base: `http://<host>:8100` (R3; binds `AGENT_BIND`, default `0.0.0.0` so the gateway/Prometheus
+containers reach it via host-gateway — from the WSL host itself it's `127.0.0.1:8100`). All
+inference traffic flows through here (clarify Q1);
 child endpoints never leak. Error vocabulary preserved from 008–017: 400 bad input, 409
 busy/refused, 502 engine failure, 503 engine unavailable/unreachable, 507 VRAM exceeded.
 

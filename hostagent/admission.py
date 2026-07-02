@@ -33,7 +33,11 @@ class Held(Exception):
     def __init__(self, holder: dict):
         self.holder = dict(holder or {})
         tenant = self.holder.get("tenant", "another tenant")
-        super().__init__(f"GPU busy: {tenant} holds the slot (one GPU tenant, Principle II)")
+        if self.holder.get("kind") == "swap-reservation":
+            super().__init__(f"GPU busy: a swap transaction for {tenant} is in flight "
+                             f"(one GPU tenant, Principle II)")
+        else:
+            super().__init__(f"GPU busy: {tenant} holds the slot (one GPU tenant, Principle II)")
 
 
 class VramExceeded(Exception):
@@ -98,6 +102,27 @@ class Admission:
         self._clock = clock
         self._budget = vram_budget_gb
         self._holder = None  # {"tenant","kind","est_gb","child_pid","acquired_at"}
+        self._swap_target = None  # tenant a swap transaction has reserved the slot for (FR-171)
+
+    # -- swap reservation (FR-171) ---------------------------------------------------------------
+    # The evict→free→load transaction must leave no window where a third tenant can be admitted.
+    # Holding `self.lock` across the whole transaction (the first design) deadlocked ABBA with
+    # every path that takes an engine's runtime lock before this one (ensure_loaded, the reaper's
+    # idle_reap → release) — internal review, 018. Instead the swap RESERVES the slot: while a
+    # reservation is up, acquire() admits only the reserved target; the swap itself never holds
+    # this lock across engine operations, so no lock-order cycle exists.
+    def begin_swap(self, target: str) -> None:
+        """Reserve the slot for `target` for the duration of a swap. Raises Held if another swap
+        is already in flight (one transaction at a time)."""
+        with self.lock:
+            if self._swap_target is not None and self._swap_target != target:
+                raise Held({"tenant": self._swap_target, "kind": "swap-reservation"})
+            self._swap_target = target
+
+    def end_swap(self, target: str) -> None:
+        with self.lock:
+            if self._swap_target == target:
+                self._swap_target = None
 
     # -- queries (stale-tolerant, display + gating) --------------------------------------------
     def holder(self):
@@ -117,6 +142,9 @@ class Admission:
                 if self._holder["tenant"] == tenant:
                     return dict(self._holder)
                 raise Held(self._holder)
+            if self._swap_target is not None and self._swap_target != tenant:
+                # a swap transaction owns the freed slot — only its target may claim it (FR-171)
+                raise Held({"tenant": self._swap_target, "kind": "swap-reservation"})
             free = self.gpu.free_gb(fresh=True)  # a fresh read only for a real admission
             if free is not None:
                 if est_gb > free:
@@ -127,8 +155,21 @@ class Admission:
                     f"{tenant} needs ~{est_gb:.1f}GB, over the {self._budget:.0f}GB budget "
                     f"(GPU unreadable — static check)")
             if self._lease is not None:  # migration interop: also claim the legacy file lease
-                self._lease.acquire(LEGACY_TENANT.get(tenant, tenant), est_gb=est_gb,
-                                    vram_budget_gb=self._budget)
+                try:
+                    self._lease.acquire(LEGACY_TENANT.get(tenant, tenant), est_gb=est_gb,
+                                        vram_budget_gb=self._budget)
+                except Exception as e:
+                    # Map the legacy lease's refusals onto OUR types (internal review, 018): the
+                    # lease module is loaded separately, so its LeaseHeld/VramExceeded are foreign
+                    # classes — unmapped they'd surface as a 500 instead of the 409/507 the agent
+                    # surface derives from Held/VramExceeded. Matching by name keeps this module
+                    # free of a hard import on the (retiring, T364) serving/gpu_lease.
+                    name = type(e).__name__
+                    if name == "LeaseHeld":
+                        raise Held(getattr(e, "holder", None) or {}) from e
+                    if name == "VramExceeded":
+                        raise VramExceeded(str(e)) from e
+                    raise
             self._holder = {"tenant": tenant, "kind": kind, "est_gb": est_gb,
                             "child_pid": None, "acquired_at": self._clock()}
             return dict(self._holder)

@@ -64,6 +64,14 @@ LEASE_PATH = os.getenv("GPU_LEASE_PATH", os.path.join(STATE_DIR, "gpu.lease"))
 _COORD_PATH = LEASE_PATH + ".lock"
 _BEACON_PATH = os.path.join(os.path.dirname(LEASE_PATH) or ".", "state-dir.beacon")
 
+#: The pre-018 default lease location. During a mixed-version upgrade window an OLD daemon may
+#: still arbitrate via this file (it knows nothing of MLOPS_STATE_DIR or the beacon), so a fresh
+#: claim here also honors a LIVE holder there (internal review, 018) — otherwise the old and new
+#: lease domains would each admit a tenant. The old side cannot see OUR lease, so this closes
+#: only the new-side half of the window; it retires with the lockfile at T364. Env override is
+#: a test seam.
+_LEGACY_TMP_LEASE = os.getenv("MLOPS_LEGACY_LEASE_PATH", "/tmp/mlops-lite-gpu.lease")
+
 # VRAM admission safety margin when falling back to the static budget (matches supervisor._fits()).
 _BUDGET_SAFETY = 0.95
 
@@ -176,6 +184,32 @@ def _lease_exists() -> bool:
     return os.path.exists(LEASE_PATH)
 
 
+def _ours(holder) -> bool:
+    """True when the recorded owner is THIS live process — PID plus start-time when recorded.
+
+    The same-pid branch previously trusted the PID alone (internal review, 018): a stale record
+    whose PID got recycled to US would be treated as "already ours" and returned as a live claim,
+    while peers — seeing the start-time mismatch — would reclaim the file. Two tenants. A record
+    with no `pid_start` (pre-018 format) keeps the old PID-only behavior.
+    """
+    if holder.get("pid") != os.getpid():
+        return False
+    start = holder.get("pid_start")
+    return start is None or start == _proc_start(os.getpid())
+
+
+def _legacy_tmp_holder():
+    """A LIVE holder found at the pre-018 /tmp lease path, or None (see _LEGACY_TMP_LEASE)."""
+    try:
+        if os.path.realpath(_LEGACY_TMP_LEASE) == os.path.realpath(LEASE_PATH):
+            return None  # explicitly pointed at the legacy path — one domain, nothing to shadow
+        with open(_LEGACY_TMP_LEASE, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return rec if _holder_live(rec) else None
+
+
 #: The FIXED rendezvous pointer — deliberately independent of the (configurable)
 #: MLOPS_STATE_DIR/GPU_LEASE_PATH, so two daemons pointed at DIFFERENT state dirs on the same
 #: host still collide here (Codex review, 018: a private dir yields a self-consistent beacon,
@@ -196,14 +230,23 @@ def _verify_pointer(component: str, coord_dir: str) -> None:
     pointer = _pointer_path()
     os.makedirs(os.path.dirname(pointer) or ".", exist_ok=True)
     real = os.path.realpath(coord_dir)
+    # Write-temp + hard-link claim (Codex round 4, 018): O_EXCL-create + json.dump left a window
+    # where a concurrently-starting peer read a partial/empty pointer and aborted a NORMAL
+    # parallel launch. The link is atomic and only publishes a COMPLETE file; the loser of the
+    # link falls through to the read-and-compare path below.
+    tmp = f"{pointer}.tmp.{os.getpid()}"
     try:
-        fd = os.open(pointer, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"state_dir": real, "created_by": component,
                        "created_at": time.time()}, f)
-        return
-    except FileExistsError:
-        pass
+        try:
+            os.link(tmp, pointer)
+            return
+        except FileExistsError:
+            pass
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
     try:
         with open(pointer, encoding="utf-8") as f:
             rec = json.load(f)
@@ -239,16 +282,9 @@ def verify_shared_state_dir(component: str) -> dict:
     _verify_pointer(component, os.path.dirname(_BEACON_PATH) or ".")
     ident = {"node": socket.gethostname(), "distro": os.getenv("WSL_DISTRO_NAME", "")}
     os.makedirs(os.path.dirname(_BEACON_PATH) or ".", exist_ok=True)
-    try:
-        fd = os.open(_BEACON_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        st = os.fstat(fd)
-        rec = {**ident, "dev": st.st_dev, "ino": st.st_ino,
-               "created_by": component, "created_at": time.time()}
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(rec, f)
-        return rec
-    except FileExistsError:
-        pass
+    written = _write_beacon(component, ident, claim=True)  # atomic first-creation claim
+    if written is not None:
+        return written
     try:
         with open(_BEACON_PATH, encoding="utf-8") as f:
             rec = json.load(f)
@@ -263,12 +299,47 @@ def verify_shared_state_dir(component: str) -> dict:
         problems.append("beacon file identity changed (copied/recreated — not the same file "
                         "the recording participant saw)")
     if problems:
+        # Self-heal when the GPU is IDLE (internal review, 018): a reboot/hostname change or a
+        # restored state dir tripped this check on every daemon at once — a permanent brick until
+        # an operator deleted the beacon by hand. With NO live lease holder there is no
+        # co-residency to protect, so re-stamping under the current identity is safe. With a live
+        # holder we still refuse: divergence while the GPU is occupied is exactly the split-brain
+        # this beacon exists to catch.
+        if not _holder_live(_read_holder()):
+            return _write_beacon(component, ident, claim=False, healed_from=problems)
         raise LeaseError(
             f"{component}: GPU coordination state dir DIVERGES from peers "
             f"({'; '.join(problems)}). All GPU daemons must share one filesystem view of "
             f"{os.path.dirname(_BEACON_PATH)} (MLOPS_STATE_DIR) — refusing to start rather than "
             f"risk two GPU tenants with private leases (Principle II).")
     return rec
+
+
+def _write_beacon(component: str, ident: dict, *, claim: bool, healed_from=None):
+    """Publish the beacon atomically (write-temp + link/replace — a peer never reads a partial
+    file, Codex round 4). `claim=True` only creates (None if one already exists); `claim=False`
+    overwrites (the idle self-heal path). link/rename preserve the inode, so the recorded
+    (dev, ino) identity stays true for the published file."""
+    tmp = f"{_BEACON_PATH}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            st = os.fstat(f.fileno())
+            rec = {**ident, "dev": st.st_dev, "ino": st.st_ino,
+                   "created_by": component, "created_at": time.time()}
+            if healed_from:
+                rec["healed_from"] = healed_from
+            json.dump(rec, f)
+        if claim:
+            try:
+                os.link(tmp, _BEACON_PATH)
+            except FileExistsError:
+                return None
+        else:
+            os.replace(tmp, _BEACON_PATH)
+        return rec
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
 
 
 @contextlib.contextmanager
@@ -323,7 +394,7 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
     with _coord():
         holder = _read_holder()
         if holder is not None:
-            if holder.get("pid") == os.getpid():
+            if _ours(holder):  # pid AND start-time — a recycled-PID stale record is NOT ours
                 if holder.get("tenant") == tenant:
                     # Already ours — idempotent re-acquire. Return the on-disk record WITHOUT deleting
                     # the claim or re-running admission (Codex #3): re-running VRAM admission while our
@@ -355,6 +426,13 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
             # json.dump) — reclaim it, else the O_EXCL write below would FileExistsError and every
             # tenant would fail instead of self-healing (Codex P1 #2).
             _unlink_quiet()
+
+        # Mixed-version upgrade guard (internal review, 018): an OLD daemon still on the pre-018
+        # /tmp lease path can't see our lease at all — the least we can do is honor a live holder
+        # in ITS domain before claiming ours, so the NEW side never co-resides with it.
+        legacy = _legacy_tmp_holder()
+        if legacy is not None:
+            raise LeaseHeld({**legacy, "domain": f"legacy lease {_LEGACY_TMP_LEASE}"})
 
         # Admission against the live GPU. Only a FRESH claim reaches here (a same-tenant re-acquire
         # returned above), so if this raises, no valid lease is lost — the slot is genuinely empty.

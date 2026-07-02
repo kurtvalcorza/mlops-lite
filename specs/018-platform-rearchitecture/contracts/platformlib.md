@@ -1,7 +1,10 @@
 # Contract: `platformlib/` shared package
 
-Stdlib-only (R2). Imported by the gateway image (Dockerfile `COPY platformlib/ …`) and the
-host venv (repo path). Never imports gateway, hostagent, torch, or pydantic.
+Stdlib-only for `topology`/`contracts` (R2); `store`'s object side lazily imports boto3 inside
+its functions (already a gateway dependency — the host venv needs it only if it calls those
+helpers, so the no-new-host-deps intent of R2 holds). Imported by the gateway image (Dockerfile
+`COPY platformlib …`, build context = repo root) and the host venv (repo path). Never imports
+gateway, hostagent, torch, or pydantic.
 
 ## `platformlib.topology`
 
@@ -12,7 +15,9 @@ host venv (repo path). Never imports gateway, hostagent, torch, or pydantic.
   data-model.md §EngineAdapter.
 - `AGENT_PORT = 8100`, `AGENT_URL` resolution (env override → default), legacy `*_URL`
   resolution helpers used by the gateway settings module during migration phases.
-- `NON_PREEMPTABLE_KINDS = {"job"}` — the single definition swap logic consults.
+- `NON_PREEMPTABLE_KINDS = {"job"}` — the single definition the agent's swap logic consults.
+  (`NON_PREEMPTABLE = {training}` also exists as the tenant-label form the legacy gateway swap
+  path checks during migration; it retires with the lockfile at T364.)
 - `STATE_DIR` — the fixed non-`/tmp` host state dir (FR-166): lease interop file, journal,
   agent logs.
 

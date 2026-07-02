@@ -91,7 +91,9 @@ async def check(body: DriftCheck):
         # two concurrent checks (PSI+PSI or PSI+quality) could both launch; reserve-first closes it —
         # at most one retrain across both signals; a failed launch releases the reservation so the next
         # genuine breach can retry.
-        if not quality.try_reserve_retrain():
+        token = quality.try_reserve_retrain()
+        if not token:
+            RETRAIN_SIGNAL.labels(signal="psi", result="cooldown").inc()  # observable, not silent
             retrain = {"skipped": "cooldown"}  # OR+cooldown debounce — a retrain fired too recently
         else:
             try:
@@ -99,7 +101,9 @@ async def check(body: DriftCheck):
                 RETRAINS.labels(result="launched").inc()
                 RETRAIN_SIGNAL.labels(signal="psi", result="launched").inc()
             except Exception as e:
-                quality.release_retrain()  # a trainer-down must not consume the cooldown
+                # a trainer-down must not consume the cooldown; token-guarded so this can only
+                # undo OUR reservation, never a newer stamp (internal review, 018)
+                quality.release_retrain(token)
                 RETRAINS.labels(result="failed").inc()
                 RETRAIN_SIGNAL.labels(signal="psi", result="failed").inc()
                 retrain = {"error": str(e)}  # surface, but the drift report still stands
@@ -161,10 +165,13 @@ async def quality_check(body: QualityCheck):
 
     retrain = None
     if report["breach"] and body.retrain is not None:
-        # OR + cooldown (asymmetric by design): the input-PSI breach is the *leading* signal and fires
-        # unconditionally (above); the quality breach is the *confirming* signal and debounces against a
-        # retrain from EITHER signal so the two don't storm retrains together (FR-126).
-        if not quality.try_reserve_retrain():  # atomic: reserve the cooldown before launching (no race)
+        # OR + cooldown, SYMMETRIC since 018 (FR-163): both breach signals — input-PSI above and
+        # this output-quality one — reserve the shared cooldown atomically before launching, so at
+        # most one retrain fires across the two and neither can double-fire in a race (FR-126).
+        # (Pre-018 the PSI side fired unconditionally; this comment used to say so — stale.)
+        token = quality.try_reserve_retrain()  # atomic: reserve the cooldown before launching
+        if not token:
+            RETRAIN_SIGNAL.labels(signal="quality", result="cooldown").inc()
             retrain = {"skipped": "cooldown"}  # OR+cooldown debounce — a retrain fired too recently
         else:
             # the cooldown is already reserved (try_reserve_retrain) — launching now, fail-soft.
@@ -173,9 +180,9 @@ async def quality_check(body: QualityCheck):
                 RETRAINS.labels(result="launched").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="launched").inc()
             except Exception as e:  # fail-soft — the quality report still stands (FR-125)
-                # release the reservation: a trainer-down must NOT consume the cooldown (so the next
-                # genuine breach can retry) — symmetric with the PSI path's note-after-success.
-                quality.release_retrain()
+                # release the reservation: a trainer-down must NOT consume the cooldown (so the
+                # next genuine breach can retry); token-guarded — only OUR reservation is undone.
+                quality.release_retrain(token)
                 RETRAINS.labels(result="failed").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="failed").inc()
                 retrain = {"error": str(e)}

@@ -45,6 +45,7 @@ class EngineRuntime:
         self.last_used = None
         self.wedged_reason = None
         self.enabled = enabled
+        self._loading = False  # a load owns the admission slot before self.child exists
 
     # -- state reporting -------------------------------------------------------------------------
     def state(self) -> dict:
@@ -73,32 +74,39 @@ class EngineRuntime:
         """Load on demand; returns cold-start ms (0.0 when already resident+ready). Raises
         `admission.Held`/`VramExceeded` (409/507) or `EngineError` (502/503)."""
         with self.lock:
-            if not self.enabled:
-                raise EngineError(f"{self.adapter.engine_id} is disabled")
-            if self.wedged_reason:
-                raise EngineError(f"{self.adapter.engine_id} is wedged: {self.wedged_reason}")
-            ok, reason = self.adapter.available()
-            if not ok:
-                raise EngineError(f"{self.adapter.engine_id} unavailable: {reason}")
-            if self._resident() and self.adapter.ready():
-                self.last_used = self.clock()
-                return 0.0
-            # Resident but NOT ready → reap before relaunch, uniformly (FR-167/T351, now shared).
-            if self._resident():
-                self.unload(drain_timeout_s=0)
+            # Flag the in-progress load FIRST (Codex round 4, 018): a concurrent unload whose
+            # drain times out must know a loader owns this runtime — see unload() below.
+            self._loading = True
+            try:
+                if not self.enabled:
+                    raise EngineError(f"{self.adapter.engine_id} is disabled")
                 if self.wedged_reason:
                     raise EngineError(f"{self.adapter.engine_id} is wedged: {self.wedged_reason}")
-            if self.adapter.gpu:
-                self.admission.acquire(self.adapter.engine_id, self.kind,
-                                       self.adapter.estimate_vram())
-            # CPU engines are admission-exempt (Principle II) but share the SAME failed-load
-            # cleanup (Codex review, 018): without it a never-ready CPU child stayed resident
-            # with last_used unset — invisible to the idle reaper, wedging its port until restart.
-            try:
-                return self._spawn_and_wait()
-            except BaseException:
-                self.unload(drain_timeout_s=0)  # never hold the slot/child after a failed load
-                raise
+                ok, reason = self.adapter.available()
+                if not ok:
+                    raise EngineError(f"{self.adapter.engine_id} unavailable: {reason}")
+                if self._resident() and self.adapter.ready():
+                    self.last_used = self.clock()
+                    return 0.0
+                # Resident but NOT ready → reap before relaunch, uniformly (FR-167/T351, shared).
+                if self._resident():
+                    self.unload(drain_timeout_s=0)
+                    if self.wedged_reason:
+                        raise EngineError(
+                            f"{self.adapter.engine_id} is wedged: {self.wedged_reason}")
+                if self.adapter.gpu:
+                    self.admission.acquire(self.adapter.engine_id, self.kind,
+                                           self.adapter.estimate_vram())
+                # CPU engines are admission-exempt (Principle II) but share the SAME failed-load
+                # cleanup (Codex review, 018): without it a never-ready CPU child stayed resident
+                # with last_used unset — invisible to the idle reaper, wedging its port.
+                try:
+                    return self._spawn_and_wait()
+                except BaseException:
+                    self.unload(drain_timeout_s=0)  # never hold the slot/child after a failed load
+                    raise
+            finally:
+                self._loading = False
 
     def _spawn_and_wait(self) -> float:
         t0 = self.clock()
@@ -133,6 +141,15 @@ class EngineRuntime:
         `_unload_now` accepted."""
         acquired = self.lock.acquire(timeout=drain_timeout_s) if drain_timeout_s > 0 else \
             self.lock.acquire(blocking=False)
+        if not acquired and self._loading:
+            # Codex round 4 (018, P1): a hard cut during an IN-PROGRESS load must not proceed
+            # lock-free — the loading thread owns the admission slot but may not have assigned
+            # self.child yet, so _teardown would see "not resident" and RELEASE the slot while
+            # the load continues; a second tenant could then be admitted alongside it
+            # (Principle II). Loads are bounded (ready_wait_s), so refusing here is temporary.
+            return {"status": "busy", "drained": False,
+                    "detail": f"{self.adapter.engine_id} load in progress — "
+                              f"retry once it settles (bounded by ready_wait_s)"}
         try:
             return self._teardown(drained=bool(acquired))
         finally:
@@ -143,8 +160,12 @@ class EngineRuntime:
         """The terminate→kill→wedge→release sequence. Caller holds `self.lock` on a clean drain;
         on a hard cut it runs lock-free (documented above)."""
         if not self._resident():
+            # A wedged child that has since EXITED no longer pins the GPU (internal review, 018):
+            # the kernel freed its VRAM at death, so clear the wedge and release the slot —
+            # keeping both set leaked the slot forever with the GPU actually free.
             self.child = None
-            if self.adapter.gpu and not self.wedged_reason:
+            self.wedged_reason = None
+            if self.adapter.gpu:
                 self.admission.release(self.adapter.engine_id)
             return {"status": "idle", "drained": drained}
         child = self.child
@@ -177,8 +198,10 @@ class EngineRuntime:
         until an operator unload or an agent restart. `_teardown` on the dead child releases the
         slot and returns the engine to `cold`."""
         with self.lock:
-            if self.child is not None and not self._resident() and not self.wedged_reason:
-                self._teardown(drained=True)  # dead child — release admission, back to cold
+            if self.child is not None and not self._resident():
+                # dead child — incl. a WEDGED one that finally exited (internal review, 018):
+                # _teardown clears the wedge and releases admission, back to cold
+                self._teardown(drained=True)
                 return True
             if not self._resident() or self.last_used is None:
                 return False

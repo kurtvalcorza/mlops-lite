@@ -19,6 +19,8 @@ POLICY_OPS = Counter("gateway_policy_ops_total", "Policy CRUD operations", ["op"
 
 
 def _handle(e: Exception):
+    if isinstance(e, policies.SuggestionConflict):  # lost accept/dismiss race → 409, never 400
+        raise HTTPException(status_code=409, detail=str(e))
     if isinstance(e, policies.PolicyError):
         try:
             detail = json.loads(str(e))  # the contract's structured {"errors": [...]} shape
@@ -113,6 +115,13 @@ async def accept_suggestion(suggestion_id: str):
                 "suggestion": rec, "detail": "gate blocked the promotion — suggestion stays open"}
     try:
         rec = await run_in_threadpool(policies.resolve_suggestion, suggestion_id, "accepted")
+    except policies.SuggestionConflict:
+        # A concurrent click resolved it between our open-check and this write (Codex round 4,
+        # 018) — but OUR promote already ran through the idempotent gated path, so report the
+        # true outcome instead of a 400 for a promotion that succeeded.
+        rec = await run_in_threadpool(policies.get_suggestion, suggestion_id)
+        return {"promoted": True, "verdict": result.get("verdict"), "suggestion": rec,
+                "detail": "suggestion was resolved concurrently; promotion applied"}
     except Exception as e:
         _handle(e)
     return {"promoted": True, "verdict": result.get("verdict"), "suggestion": rec}

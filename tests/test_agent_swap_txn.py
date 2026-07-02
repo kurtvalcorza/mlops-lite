@@ -101,6 +101,67 @@ def test_contender_can_never_acquire_between_evict_and_load():
     assert set(observed) <= {"llm", "vision"}, set(observed)
 
 
+def test_swap_never_deadlocks_against_a_concurrent_direct_load():
+    # Internal review (018): the first design held admission.lock across the WHOLE transaction
+    # while unload()/ensure_loaded() take the engine's runtime lock underneath it — but every
+    # other path (a direct ensure_loaded, the reaper's idle_reap→release) takes the runtime lock
+    # FIRST and the admission lock second. ABBA: a direct load of the swap TARGET while a swap
+    # was mid-eviction deadlocked both threads forever. The reservation design must let both
+    # finish (either order), with the target holding the slot at the end.
+    llm, vision = FakeEngine("llm"), FakeEngine("vision")
+    mgr, a = _manager([llm, vision])
+    mgr.runtimes["llm"].ensure_loaded()
+
+    in_swap = threading.Event()
+    real_unload = mgr.runtimes["llm"].unload
+
+    def slow_unload(**kw):                    # hold the swap mid-transaction deterministically
+        in_swap.set()
+        return real_unload(**kw)
+
+    mgr.runtimes["llm"].unload = slow_unload
+    results = {}
+
+    def direct_loader():                      # the ABBA counterpart: rt.lock → admission.lock
+        in_swap.wait(5)
+        try:
+            results["load"] = mgr.runtimes["vision"].ensure_loaded()
+        except Exception as e:                # Held/EngineError are fine — deadlock is not
+            results["load_err"] = type(e).__name__
+
+    t = threading.Thread(target=direct_loader)
+    t.start()
+    results["swap"] = swap.preempt_for(mgr, "vision", drain_timeout_s=2)
+    t.join(10)
+    assert not t.is_alive(), "swap deadlocked against a concurrent direct load (ABBA)"
+    assert a.holder()["tenant"] == "vision"   # the transaction still lands the target
+    assert results["swap"]["evicted"] == "llm"
+
+
+def test_second_swap_is_refused_while_one_is_in_flight():
+    llm, vision = FakeEngine("llm"), FakeEngine("vision")
+    mgr, a = _manager([llm, vision])
+    a.begin_swap("vision")                    # a swap transaction is mid-flight
+    try:
+        try:
+            swap.preempt_for(mgr, "llm")
+        except swap.PreemptRefused as e:
+            assert "swap" in str(e)
+        else:
+            raise AssertionError("expected PreemptRefused while another swap is in flight")
+        # and a plain contender is refused too — the freed window belongs to the target only
+        try:
+            a.acquire("asr", "serving", est_gb=1.0)
+        except adm.Held as e:
+            assert e.holder.get("kind") == "swap-reservation"
+        else:
+            raise AssertionError("expected Held during a swap reservation")
+    finally:
+        a.end_swap("vision")
+    a.acquire("asr", "serving", est_gb=1.0)   # reservation gone — admissions flow again
+    a.release("asr")
+
+
 def test_wedged_holder_fails_the_swap_loudly():
     llm, vision = FakeEngine("llm"), FakeEngine("vision")
     llm.immortal_child = True                 # eviction will fail — child survives SIGKILL

@@ -31,6 +31,12 @@ class PolicyStoreError(Exception):
     """The policy store is unreachable (maps to 502)."""
 
 
+class SuggestionConflict(Exception):
+    """The suggestion is already resolved — a lost accept/dismiss race (maps to 409, not 400).
+    Deliberately NOT a PolicyError subclass: 400 says "bad request", but the request was fine,
+    someone else just got there first (Codex round 4 / claude review, 018)."""
+
+
 def _s3():
     return store.s3_client()
 
@@ -160,6 +166,17 @@ def policy_status(model_name: str):
 
 def create_suggestion(model_name: str, candidate_version: str, gate_verdict: dict,
                       shadow_verdict=None, *, state: str = "open", actor=None) -> dict:
+    # Idempotent per (model, version, state) — Codex round 4 (018): the scheduler clears its
+    # watch only AFTER this write lands, so a status-store blip there re-runs the terminal
+    # handling next tick; that retry must not mint a second open suggestion (or a second
+    # auto-promoted audit row) for the same candidate.
+    try:
+        for s in list_suggestions(state=state):
+            if (s.get("model_name") == model_name
+                    and str(s.get("candidate_version")) == str(candidate_version)):
+                return s
+    except PolicyStoreError:
+        pass  # listing down — fall through to the write (worst case is the old duplicate risk)
     rec = PromotionSuggestion(
         id=uuid.uuid4().hex[:12], model_name=model_name, candidate_version=candidate_version,
         gate_verdict=gate_verdict or {}, shadow_verdict=shadow_verdict, state=state,
@@ -191,7 +208,7 @@ def resolve_suggestion(suggestion_id: str, state: str, actor: str = "operator"):
     if rec is None:
         return None
     if rec.get("state") != "open":
-        raise PolicyError(f"suggestion {suggestion_id} is already {rec.get('state')}")
+        raise SuggestionConflict(f"suggestion {suggestion_id} is already {rec.get('state')}")
     rec.update(state=state, resolved_at=time.time(), actor=actor)
     _put(f"{SUGGESTION_PREFIX}{suggestion_id}.json", rec)
     return rec

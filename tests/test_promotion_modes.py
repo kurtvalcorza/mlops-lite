@@ -179,6 +179,68 @@ def test_default_shadow_picks_newest_verdict_by_last_modified():
     assert best["winner"] == "champion" and best["shadow_id"] == "aaaaaa"  # newest, not max-id
 
 
+def test_default_shadow_listing_failure_raises_never_reads_as_green():
+    # Codex round 4 / internal review (018): the whole-scan try/except returned None on ANY
+    # failure, and None means "no shadow window exists" — GREEN. A transient store outage could
+    # auto-promote a shadow-LOSING candidate. A listing failure must RAISE so the tick's
+    # per-policy containment keeps the watch and retries next tick.
+    from app import quality as appq
+
+    class _BrokenS3:
+        def list_objects_v2(self, **kw):
+            raise RuntimeError("minio down")
+
+    orig = appq._s3
+    appq._s3 = lambda: _BrokenS3()
+    try:
+        scheduler._default_shadow("qa-demo", "9", "llm")
+    except Exception as e:
+        assert "minio down" in str(e)
+    else:
+        raise AssertionError("a listing failure must raise, not read as no-shadow-window")
+    finally:
+        appq._s3 = orig
+
+
+def test_default_shadow_skips_a_corrupt_key_without_vetoing_the_scan():
+    # Codex round 4 (018): one unreadable/corrupt UNRELATED key used to abort the whole scan
+    # (returning None → green). It must be skipped, keeping verdicts found around it.
+    import datetime as _dt
+
+    from app import quality as appq
+
+    class _PoisonedS3:
+        def __init__(self, objs, poisoned):
+            self.objs, self.poisoned = objs, poisoned
+
+        def list_objects_v2(self, Bucket, Prefix="", **kw):
+            keys = sorted(set(self.objs) | {self.poisoned})
+            newer = (None, _dt.datetime(2026, 7, 3))  # poisoned key lists NEWER than the good one
+            return {"Contents": [{"Key": k, "LastModified": self.objs.get(k, newer)[1]}
+                                 for k in keys if k.startswith(Prefix)]}
+
+        def get_object(self, Bucket, Key):
+            import io
+            import json as _json
+
+            if Key == self.poisoned:
+                raise RuntimeError("corrupt object")
+            return {"Body": io.BytesIO(_json.dumps(self.objs[Key][0]).encode())}
+
+    verdict = {"winner": "champion", "name": "qa-demo", "modality": "text-generation",
+               "challenger": {"version": "9"}, "shadow_id": "good01"}
+    fake = _PoisonedS3(
+        {f"{appq.SHADOW_PREFIX}good01.json": (verdict, _dt.datetime(2026, 7, 1))},
+        poisoned=f"{appq.SHADOW_PREFIX}zz-corrupt.json")
+    orig = appq._s3
+    appq._s3 = lambda: fake
+    try:
+        best = scheduler._default_shadow("qa-demo", "9", "llm")
+    finally:
+        appq._s3 = orig
+    assert best is not None and best["shadow_id"] == "good01"  # found DESPITE the corrupt key
+
+
 def test_failed_run_and_versionless_result_drop_the_watch():
     sched, promoted = _setup(mode="auto-on-green", run_status="failed")
     acts = sched.tick(now=100.0)

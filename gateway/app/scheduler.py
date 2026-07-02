@@ -32,6 +32,10 @@ from . import policies, quality
 TICK_S = float(os.getenv("POLICY_TICK_S", "30"))
 BACKOFF_BASE_S = float(os.getenv("POLICY_RETRY_BASE_S", "60"))
 BACKOFF_MAX_S = float(os.getenv("POLICY_RETRY_MAX_S", "1800"))
+# How long a watch may stay UNPOLLABLE (trainer down / run unknown) before the scheduler gives
+# up on it (internal review, 018): a run the trainer lost — a restart that wiped its table —
+# would otherwise pin the watch and defer every future breach on that policy forever.
+WATCH_UNKNOWN_TIMEOUT_S = float(os.getenv("POLICY_WATCH_UNKNOWN_S", "3600"))
 
 CHECKS = Counter("gateway_policy_checks_total", "Policy monitor checks", ["result"])
 POLICY_RETRAINS = Counter("gateway_policy_retrains_total", "Policy-launched retrains",
@@ -89,7 +93,18 @@ class PolicyScheduler:
     def _retry_pending(self, policy: dict, now: float) -> list:
         model = policy["model_name"]
         pending = self.store.get_pending(model)
-        if not pending or now < pending.get("next_attempt_at", 0):
+        if not pending:
+            return []
+        if pending.get("landed"):
+            # A neutralized park (its launch LANDED but clear_pending blipped) — retire it now
+            # that the store answers again; it must never retry and never block a new breach
+            # (internal review, 018: the bare far-future sentinel poisoned supersede forever).
+            try:
+                self.store.clear_pending(model)
+            except Exception:
+                pass  # still down — retried next tick; _handle_breach ignores landed parks
+            return []
+        if now < pending.get("next_attempt_at", 0):
             return []
         try:
             run = self._launch(policy, pending["breach"])
@@ -98,10 +113,30 @@ class PolicyScheduler:
             pending["next_attempt_at"] = now + min(
                 BACKOFF_BASE_S * (2 ** pending["attempts"]), BACKOFF_MAX_S)
             self.store.save_pending(pending)
+            # Refresh the shared cooldown stamp (Codex round 4, 018): the park owns the
+            # platform-wide reservation, but the stamp expires after RETRAIN_COOLDOWN_SEC — under
+            # long GPU contention another model's breach could reserve over a still-parked
+            # retrain. Each busy retry re-stamps so the park's ownership outlives the window.
+            self.note_fn()
             POLICY_RETRAINS.labels(signal=pending["breach"].get("signal", "?"),
                                    result="still_busy").inc()
             return [{"action": "retry_parked", "model": model,
                      "attempts": pending["attempts"]}]
+        except policies.PolicyStoreError as e:
+            # TRANSIENT store trouble (e.g. resolving `latest` mid-outage) is retryable — keep
+            # the park AND the reservation (internal review, 018: dropping both here turned a
+            # store blip into a lost retrain). Backoff like busy; the store may heal by then.
+            pending["attempts"] = pending.get("attempts", 0) + 1
+            pending["next_attempt_at"] = now + min(
+                BACKOFF_BASE_S * (2 ** pending["attempts"]), BACKOFF_MAX_S)
+            try:
+                self.store.save_pending(pending)
+            except Exception:
+                pass  # park unchanged on disk — still due next tick, which is also fine
+            self.note_fn()
+            POLICY_RETRAINS.labels(signal=pending["breach"].get("signal", "?"),
+                                   result="store_error").inc()
+            return [{"action": "retry_deferred_store_error", "model": model, "error": str(e)}]
         except Exception as e:
             # Mirror the initial-launch failure path (Codex review, 018): drop the park and
             # release the shared cooldown so other policies can breach; the next due check on
@@ -119,7 +154,12 @@ class PolicyScheduler:
             self.store.clear_pending(model)
         except Exception:
             try:
-                self.store.save_pending({**pending, "next_attempt_at": 10 ** 12,
+                # `landed` marks the park as CONSUMED (internal review, 018): the far-future
+                # retry time alone let a LATER breach "supersede" this record and inherit the
+                # 10**12 next_attempt_at — a retrain that never fired again. Landed parks are
+                # ignored by supersede and retired by the next successful retry pass.
+                self.store.save_pending({**pending, "landed": True,
+                                         "next_attempt_at": 10 ** 12,
                                          "attempts": pending.get("attempts", 0)})
             except Exception:
                 pass  # both writes down — the visible action below still records the launch
@@ -162,7 +202,11 @@ class PolicyScheduler:
         if (self.store.get_status(model) or {}).get("watch"):
             return [{"action": "breach_deferred_watch", "model": model}]
         pending = self.store.get_pending(model)
-        if pending:  # queue-of-one: a newer breach supersedes the parked one (FR-182)
+        if pending and not pending.get("landed"):
+            # queue-of-one: a newer breach supersedes the LIVE parked one (FR-182). A `landed`
+            # park is a consumed launch whose cleanup blipped — superseding it would inherit its
+            # neutralized far-future retry time and never fire (internal review, 018), so a
+            # landed park falls through to a normal reserve+launch instead.
             pending["breach"] = breach
             self.store.save_pending(pending)
             return [{"action": "breach_superseded_pending", "model": model}]
@@ -173,8 +217,16 @@ class PolicyScheduler:
             run = self._launch(policy, breach)
         except Busy:
             # keep the reservation — the park IS the reservation's owner until launch succeeds
-            self.store.save_pending({"model_name": model, "breach": breach, "attempts": 1,
-                                     "next_attempt_at": now + BACKOFF_BASE_S})
+            try:
+                self.store.save_pending({"model_name": model, "breach": breach, "attempts": 1,
+                                         "next_attempt_at": now + BACKOFF_BASE_S})
+            except Exception as e:
+                # No park could be persisted, so nothing owns the reservation — hand it back or
+                # every retrain platform-wide waits out the full cooldown for a launch that never
+                # happened (internal review, 018). The next due check re-detects this breach.
+                self.release_fn()
+                POLICY_RETRAINS.labels(signal=breach["signal"], result="park_failed").inc()
+                return [{"action": "retrain_park_failed", "model": model, "error": str(e)}]
             POLICY_RETRAINS.labels(signal=breach["signal"], result="parked").inc()
             return [{"action": "retrain_parked", "model": model}]
         except Exception as e:
@@ -216,8 +268,28 @@ class PolicyScheduler:
         rec = self.watch_fn(watch["run_id"])
         state = (rec or {}).get("status")
         # "unknown" = the trainer could not be polled (down/restarting) — retryable, never a
-        # terminal failure that clears the watch (Codex round 2, 018).
-        if state in (None, "unknown", "queued", "running", "pending"):
+        # terminal failure that clears the watch (Codex round 2, 018). But NOT retryable forever
+        # (internal review, 018): a run the trainer no longer knows would pin this watch and
+        # defer every future breach on the policy — bound it, then let breaches re-trigger.
+        if state in (None, "unknown"):
+            first = watch.get("unknown_since")
+            if first is None:
+                watch["unknown_since"] = now
+                status["watch"] = watch
+                self.store.save_status(model, status)
+                return [{"action": "watch_unpollable", "model": model,
+                         "run_id": watch["run_id"]}]
+            if now - first > WATCH_UNKNOWN_TIMEOUT_S:
+                status.pop("watch", None)
+                self.store.save_status(model, status)
+                CHECKS.labels(result="watch_expired").inc()
+                return [{"action": "watch_expired_unknown", "model": model,
+                         "run_id": watch["run_id"]}]
+            return []
+        if state in ("queued", "running", "pending"):
+            if watch.pop("unknown_since", None) is not None:
+                status["watch"] = watch
+                self.store.save_status(model, status)  # the trainer answered — reset the clock
             return []
 
         def _clear_watch():
@@ -374,34 +446,42 @@ def _default_shadow(model: str, version: str, modality: str):
 
     Versions are per-model in MLflow, so matching on the version string alone would let model
     A's replay verdict gate model B's promotion (Codex review, 018). Verdicts carry `name`
-    since 018 (shadow.build_verdict); older name-less verdicts are skipped, never mis-attributed."""
-    try:
-        s3 = quality._s3()
-        # Page the listing ourselves to keep each object's LastModified: shadow_ids are random
-        # uuid hex, so "largest id" picked an effectively RANDOM verdict when several replays
-        # existed for the same candidate (Codex round 3, 018) — newest-by-time is the contract.
-        entries, token = [], None
-        while True:
-            kw = {"Bucket": quality.RESULTS_BUCKET, "Prefix": quality.SHADOW_PREFIX}
-            if token:
-                kw["ContinuationToken"] = token
-            page = s3.list_objects_v2(**kw)
-            entries.extend((o["Key"], o.get("LastModified")) for o in page.get("Contents", []))
-            token = page.get("NextContinuationToken") if page.get("IsTruncated") else None
-            if not token:
-                break
-        best, best_at = None, None
-        for key, modified in entries:
+    since 018 (shadow.build_verdict); older name-less verdicts are skipped, never mis-attributed.
+
+    Failure discipline (Codex round 4 / internal review, 018): a LISTING failure RAISES — the
+    tick's per-policy containment keeps the watch for a retry next tick, exactly like a transient
+    gate failure. Returning None instead read as "no shadow window exists", which is GREEN — a
+    transient outage could auto-promote a shadow-LOSING candidate. A single unreadable verdict,
+    by contrast, is skipped-and-counted: one corrupt key must not veto the whole scan (or wedge
+    this candidate's promotion forever)."""
+    s3 = quality._s3()
+    # Page the listing ourselves to keep each object's LastModified: shadow_ids are random
+    # uuid hex, so "largest id" picked an effectively RANDOM verdict when several replays
+    # existed for the same candidate (Codex round 3, 018) — newest-by-time is the contract.
+    entries, token = [], None
+    while True:
+        kw = {"Bucket": quality.RESULTS_BUCKET, "Prefix": quality.SHADOW_PREFIX}
+        if token:
+            kw["ContinuationToken"] = token
+        page = s3.list_objects_v2(**kw)
+        entries.extend((o["Key"], o.get("LastModified")) for o in page.get("Contents", []))
+        token = page.get("NextContinuationToken") if page.get("IsTruncated") else None
+        if not token:
+            break
+    best, best_at = None, None
+    for key, modified in entries:
+        try:
             v = quality._get_json(key)
-            if (v.get("winner") and v.get("name") == model
-                    and str((v.get("challenger") or {}).get("version")) == str(version)
-                    and (modality is None or v.get("modality") is None
-                         or v.get("modality") == MODALITY_TASK.get(modality, modality))
-                    and (best_at is None or (modified is not None and modified > best_at))):
-                best, best_at = v, modified
-        return best
-    except Exception:
-        return None  # advisory input only — never fail promotion evaluation over it
+        except Exception:
+            CHECKS.labels(result="shadow_read_error").inc()
+            continue  # skip THIS key only — never discard verdicts already found
+        if (v and v.get("winner") and v.get("name") == model
+                and str((v.get("challenger") or {}).get("version")) == str(version)
+                and (modality is None or v.get("modality") is None
+                     or v.get("modality") == MODALITY_TASK.get(modality, modality))
+                and (best_at is None or (modified is not None and modified > best_at))):
+            best, best_at = v, modified
+    return best
 
 
 def _default_promote(model: str, version: str) -> dict:

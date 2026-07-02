@@ -33,8 +33,10 @@ promotion suggestions). No new runtime.
 **Primary Dependencies**: Existing FastAPI/httpx/pydantic/boto3/mlflow-skinny stack. **New:**
 `pynvml` (host only — replaces per-call `nvidia-smi` forks with in-process NVML reads) and
 `psycopg[binary]` (gateway + host, US4 only — the relational storage client). The shared
-`platformlib/` package is **stdlib-only** (dataclasses + validation helpers) to avoid version
-skew between the two runtimes. No broker, no scheduler framework, no ORM/migration tool.
+`platformlib/` package is **stdlib-only in `topology`/`contracts`** (dataclasses + validation
+helpers) to avoid version skew between the two runtimes; `store`'s object side lazily imports
+boto3 inside its functions (an existing gateway dependency — the host venv needs it only if it
+calls those helpers). No broker, no scheduler framework, no ORM/migration tool.
 
 **Storage**: MinIO unchanged (datasets, model artifacts, captured payloads, reports). US4 adopts
 the provisioned-but-unused `gateway` Postgres database for predictions / labels / capture index
@@ -177,8 +179,10 @@ stdlib; rationale: version-skew risk between container and host venv); agent por
 during migration (:8100 + per-engine URL flips); DDL bootstrap without a migration tool
 (idempotent `CREATE TABLE IF NOT EXISTS` at storage-client init, schema mirrored in
 `init.sql` for fresh installs); scheduler placement (gateway lifespan task — always-on,
-survives host restarts); **agent control-surface auth posture** (localhost bind + the existing
-opt-in shared-secret header for unload/job control — house posture, deferred clarify item);
+survives host restarts); **agent control-surface auth posture** (bind `AGENT_BIND`, default
+`0.0.0.0` like the legacy daemons — the gateway/Prometheus containers reach :8100 via
+host-gateway, so loopback-only would break them (Codex review); tighten via env + the existing
+opt-in shared-secret header for unload/job control — deferred clarify item);
 **absent-engine-binary state** (adapter reports `unavailable`; ASR stays opt-in; platform
 health continues to exclude optional engines from `all_healthy`); the constitution wording
 question (operator).

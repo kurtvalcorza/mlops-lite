@@ -245,6 +245,53 @@ def test_cpu_engine_never_touches_admission():
     assert a.holder() is None                 # off-lease by construction (Principle II exemption)
 
 
+def test_wedged_child_that_finally_exits_is_reconciled():
+    # Internal review (018): a wedged (SIGKILL-surviving) child that LATER exits — the D-state
+    # resolves, the process dies — left wedged_reason set forever, and both the reaper reconcile
+    # and _teardown's release skipped on it: the slot leaked with the GPU actually free.
+    rt, eng, a = _rt()
+    eng.immortal_child = True
+    rt.ensure_loaded()
+    rt.unload(drain_timeout_s=0)
+    assert rt.state()["state"] == "wedged" and a.holder() is not None
+    eng.spawned[0].alive = False              # the uninterruptible child finally died
+    assert rt.idle_reap() is True             # one reaper tick reconciles it
+    assert a.holder() is None                 # slot released — the GPU really is free
+    assert rt.state()["state"] == "cold"
+    eng.immortal_child = False
+    rt.ensure_loaded()                        # provably loadable again, no operator restart
+    assert a.holder()["tenant"] == "fake"
+
+
+def test_hard_cut_refuses_while_a_load_is_in_progress():
+    # Codex round 4 (018, P1): unload's drain-timeout hard cut during an IN-PROGRESS load ran
+    # _teardown before self.child existed — "not resident" → admission RELEASED while the loading
+    # thread carried on, and a second tenant could be admitted alongside it (Principle II).
+    import threading as _threading
+
+    rt, eng, a = _rt(ready_wait_s=30.0)
+    mid_load = _threading.Event()
+    finish_load = _threading.Event()
+
+    def gated_ready():
+        mid_load.set()                        # signal: admission acquired, child spawned
+        finish_load.wait(10)                  # hold the load in flight deterministically
+        return True
+
+    eng.ready = gated_ready
+    loader = _threading.Thread(target=rt.ensure_loaded)
+    loader.start()
+    assert mid_load.wait(5)
+    res = rt.unload(drain_timeout_s=0.1)      # hard cut attempt mid-load
+    assert res["status"] == "busy" and "load in progress" in res["detail"]
+    assert a.holder() is not None             # the loader still owns the slot — never released
+    finish_load.set()
+    loader.join(5)
+    assert not loader.is_alive() and rt.state()["state"] == "ready"
+    res = rt.unload(drain_timeout_s=5)        # after the load settles, unload works normally
+    assert res["status"] == "unloaded" and a.holder() is None
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

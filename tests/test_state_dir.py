@@ -58,34 +58,59 @@ def test_beacon_happy_path_two_participants_same_view():
         assert second == first
 
 
-def test_beacon_divergent_host_fails_loud():
+def _diverge_beacon_node(d):
+    """Rewrite the beacon as if a DIFFERENT host recorded it, keeping its inode self-consistent
+    so only the host/distro check trips."""
+    beacon = os.path.join(d, "state-dir.beacon")
+    rec = json.load(open(beacon))
+    rec["node"] = "some-other-distro-host"
+    with open(beacon, "w") as f:
+        json.dump(rec, f)
+    st = os.stat(beacon)
+    rec.update(dev=st.st_dev, ino=st.st_ino)
+    with open(beacon, "w") as f:
+        json.dump(rec, f)
+
+
+def test_beacon_divergent_host_fails_loud_while_gpu_held():
+    # With a LIVE lease holder, divergence is exactly the split-brain the beacon exists to catch
+    # — never self-heal over an occupied GPU.
     with tempfile.TemporaryDirectory() as d:
         lease = _load_lease(d)
         lease.verify_shared_state_dir("llama-supervisor")
-        beacon = os.path.join(d, "state-dir.beacon")
-        rec = json.load(open(beacon))
-        rec["node"] = "some-other-distro-host"                      # recorded by a different view
-        # rewrite preserves this file's OWN inode consistency, isolating the host/distro check
-        with open(beacon, "w") as f:
-            json.dump(rec, f)
-        st = os.stat(beacon)
-        rec.update(dev=st.st_dev, ino=st.st_ino)
-        with open(beacon, "w") as f:
-            json.dump(rec, f)
+        lease.acquire("training", est_gb=1.0, vram_budget_gb=12.0)   # the GPU is occupied
+        _diverge_beacon_node(d)
         try:
             lease.verify_shared_state_dir("trainer")
         except lease.LeaseError as e:
             assert "DIVERGES" in str(e)
         else:
             raise AssertionError("expected LeaseError on a beacon recorded by a different host")
+        finally:
+            lease.release("training")
+
+
+def test_beacon_self_heals_when_gpu_idle():
+    # Internal review (018): a reboot/hostname change tripped the identity check on EVERY daemon
+    # at once — a permanent brick until an operator deleted the beacon by hand. With NO live
+    # holder there is no co-residency to protect: re-stamp under the current identity and go.
+    with tempfile.TemporaryDirectory() as d:
+        lease = _load_lease(d)
+        lease.verify_shared_state_dir("llama-supervisor")
+        _diverge_beacon_node(d)                                      # "the host was renamed"
+        rec = lease.verify_shared_state_dir("trainer")               # idle → heals, no raise
+        assert rec.get("healed_from")                                # the heal is recorded
+        assert lease.verify_shared_state_dir("bento-vision")["node"] == rec["node"]  # stable now
 
 
 def test_beacon_copied_file_fails_loud():
     # A beacon whose recorded inode disagrees with the file on disk is not the same file the
-    # recording participant saw (copied/recreated) — two views, not one shared dir.
+    # recording participant saw (copied/recreated) — two views, not one shared dir. Pinned with
+    # the GPU held (idle would self-heal, above).
     with tempfile.TemporaryDirectory() as d:
         lease = _load_lease(d)
         rec = lease.verify_shared_state_dir("llama-supervisor")
+        lease.acquire("training", est_gb=1.0, vram_budget_gb=12.0)
         beacon = os.path.join(d, "state-dir.beacon")
         rec["ino"] = rec["ino"] + 1                                  # stale identity
         with open(beacon, "w") as f:
@@ -97,6 +122,62 @@ def test_beacon_copied_file_fails_loud():
             assert "identity changed" in str(e) or "DIVERGES" in str(e)
         else:
             raise AssertionError("expected LeaseError on a copied/recreated beacon")
+        finally:
+            lease.release("training")
+
+
+def test_recycled_pid_stale_record_is_reclaimed_not_adopted():
+    # Internal review (018): the same-pid branch trusted the PID alone. A stale record whose PID
+    # was recycled to THIS process was returned as "already ours" (same tenant) or refused as a
+    # live holder (different tenant) — while peers, seeing the start-time mismatch, would reclaim
+    # the file out from under us. The start-time check makes it what it is: a dead holder.
+    with tempfile.TemporaryDirectory() as d:
+        lease = _load_lease(d)
+        stale = {"tenant": "llm-serving", "pid": os.getpid(), "pid_start": 12345,  # not OUR start
+                 "acquired_at": 1.0}
+        with open(os.path.join(d, "gpu.lease"), "w") as f:
+            json.dump(stale, f)
+        rec = lease.acquire("training", est_gb=1.0, vram_budget_gb=12.0)  # reclaims, never Held
+        assert rec["tenant"] == "training" and rec["pid_start"] != 12345  # a FRESH claim
+        lease.release("training")
+        # same-tenant flavor: a stale same-pid record must yield a fresh claim too, not the
+        # stale record echoed back as if it were live
+        with open(os.path.join(d, "gpu.lease"), "w") as f:
+            json.dump(dict(stale, tenant="training"), f)
+        rec = lease.acquire("training", est_gb=1.0, vram_budget_gb=12.0)
+        assert rec["pid_start"] != 12345
+        lease.release("training")
+
+
+def test_live_legacy_tmp_holder_blocks_a_fresh_claim():
+    # Internal review (018): during a mixed-version upgrade an OLD daemon still arbitrates via
+    # the pre-018 /tmp lease file and cannot see ours — the new side must honor a LIVE holder
+    # there before claiming, or the two domains each admit a tenant.
+    with tempfile.TemporaryDirectory() as d:
+        lease = _load_lease(d)
+        legacy_path = lease._LEGACY_TMP_LEASE          # conftest points this at a temp file
+        os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+        live = {"tenant": "llm-serving", "pid": os.getpid(),
+                "pid_start": lease._proc_start(os.getpid()), "acquired_at": 1.0}
+        with open(legacy_path, "w") as f:
+            json.dump(live, f)
+        try:
+            lease.acquire("training", est_gb=1.0, vram_budget_gb=12.0)
+        except lease.LeaseHeld as e:
+            assert "legacy" in str(e.holder.get("domain", ""))
+        else:
+            raise AssertionError("a live legacy /tmp holder must block a fresh claim")
+        finally:
+            os.unlink(legacy_path)
+        # a DEAD legacy record never blocks (self-healing stays intact across the domains)
+        with open(legacy_path, "w") as f:
+            json.dump({"tenant": "llm-serving", "pid": 2 ** 22 + 12345, "pid_start": 1,
+                       "acquired_at": 1.0}, f)
+        try:
+            lease.acquire("training", est_gb=1.0, vram_budget_gb=12.0)
+            lease.release("training")
+        finally:
+            os.unlink(legacy_path)
 
 
 def test_same_host_divergent_state_dirs_fail_loud_at_the_pointer():

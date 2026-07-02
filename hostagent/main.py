@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
@@ -91,7 +92,12 @@ def make_handler(admission, journal, manager):
             self.wfile.write(data)
 
         def do_GET(self):
-            if self.path in ("/health", "/healthz"):
+            # Route on the PARSED path (Codex round 4, 018): self.path carries the query string,
+            # so `/jobs?kind=train` failed the exact match and a stray `/jobsxyz` fell into the
+            # jobs listing instead of 404.
+            url = urlparse(self.path)
+            path = url.path
+            if path in ("/health", "/healthz"):
                 holder = admission.holder()
                 self._send(200, {
                     "ok": True,
@@ -104,23 +110,24 @@ def make_handler(admission, journal, manager):
                     "interrupted_since_start": _interrupted_at_start,
                     "started_at": _started_at,
                 })
-            elif self.path == "/metrics":
+            elif path == "/metrics":
                 _refresh_metrics(admission, journal, manager)
                 self._send(200, REGISTRY.render().encode(), content_type="text/plain; version=0.0.4")
-            elif self.path == "/engines":
+            elif path == "/engines":
                 self._send(200, {"engines": manager.engine_states()})
-            elif self.path.startswith("/jobs"):
-                job_id = self.path[len("/jobs/"):] if self.path.startswith("/jobs/") else None
+            elif path == "/jobs" or path.startswith("/jobs/"):
+                job_id = path[len("/jobs/"):] if path.startswith("/jobs/") else None
                 if job_id:
                     rec = journal.get(job_id)
                     self._send(200, rec) if rec else self._send(404, {"error": "unknown job"})
                 else:
-                    self._send(200, {"jobs": journal.jobs()})
+                    kind = (parse_qs(url.query).get("kind") or [None])[0]
+                    self._send(200, {"jobs": journal.jobs(kind=kind)})
             else:
                 self._send(404, {"error": "unknown path"})
 
         def do_POST(self):
-            if self.path == "/control/unload":
+            if urlparse(self.path).path == "/control/unload":
                 if CONTROL_SECRET and self.headers.get("X-Agent-Control", "") != CONTROL_SECRET:
                     return self._send(403, {"error": "bad or missing X-Agent-Control"})
                 try:

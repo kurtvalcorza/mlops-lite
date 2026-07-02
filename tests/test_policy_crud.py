@@ -213,10 +213,30 @@ def test_suggestion_lifecycle():
     assert done["state"] == "accepted" and done["resolved_at"] is not None
     try:
         policies.resolve_suggestion(rec["id"], "dismissed")
-    except policies.PolicyError:
+    except policies.SuggestionConflict:
+        # its OWN type, not PolicyError (Codex round 4, 018): a lost accept/dismiss race is a
+        # 409 conflict at the router, never a 400 "bad request" for a well-formed click
         pass
     else:
         raise AssertionError("resolving twice must be refused")
+
+
+def test_create_suggestion_is_idempotent_per_candidate():
+    # Codex round 4 (018): the scheduler clears its watch only AFTER the suggestion write lands,
+    # so a status-store blip re-runs the terminal handling next tick — the retry must return the
+    # existing record, not mint a duplicate open suggestion (or a duplicate audit row).
+    _fake_store()
+    a = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"})
+    b = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"})
+    assert b["id"] == a["id"]
+    assert len(policies.list_suggestions(state="open")) == 1
+    c = policies.create_suggestion("qa-demo", "8", {"verdict": "pass"})   # a NEW candidate is new
+    assert c["id"] != a["id"]
+    audit1 = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},
+                                        state="auto-promoted", actor="policy:qa-demo")
+    audit2 = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},
+                                        state="auto-promoted", actor="policy:qa-demo")
+    assert audit2["id"] == audit1["id"]                                   # audit rows too
 
 
 if __name__ == "__main__":

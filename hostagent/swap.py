@@ -1,14 +1,24 @@
-"""Transactional preemptive swap (018 US2, FR-171/172) — evict → free → load under ONE lock.
+"""Transactional preemptive swap (018 US2, FR-171/172) — evict → free → load with no window.
 
 017's gateway-brokered swap released the lease and then raced everyone to re-acquire it — a
 third tenant could snipe the freed GPU between evict and target-load (review §4.6). Here the
-whole transaction runs while holding `admission.lock` (re-entrant): no admission decision can
-interleave, so between eviction and the target's claim there is by construction no window.
+swap holds an admission **reservation** for the whole transaction: while it is up, `acquire()`
+admits only the target, so between eviction and the target's claim there is by construction no
+window a contender can win.
+
+Why a reservation and not `admission.lock` held across the transaction (the first design):
+every other path takes an engine's runtime lock BEFORE the admission lock (`ensure_loaded`,
+the reaper's `idle_reap` → release), so a swap holding the admission lock while calling into
+`unload()`/`ensure_loaded()` inverted that order — an ABBA deadlock the moment the reaper
+ticked mid-swap (internal review, 018). The reservation closes the same window without ever
+holding the admission lock across an engine operation.
 
 Structural guards (FR-172): the holder's `kind` lives in the admission record the agent itself
 wrote — a `job` holder (training/HPO/batch) refuses preemption with no network probe and hence
 no fail-open path (the guard T346 hardened at the gateway becomes impossible to need here).
 """
+from platformlib.topology import NON_PREEMPTABLE_KINDS
+
 from . import admission as adm
 
 
@@ -28,12 +38,17 @@ def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0) -
     target = manager.runtimes.get(target_engine_id)
     if target is None:
         raise PreemptRefused(f"unknown engine {target_engine_id!r}")
-    with manager.admission.lock:  # ← the transaction: nothing else can admit until we return
-        holder = manager.admission.holder()
+    admission = manager.admission
+    try:
+        admission.begin_swap(target_engine_id)  # ← the transaction guard (one swap at a time)
+    except adm.Held as e:
+        raise PreemptRefused(str(e)) from e
+    try:
+        holder = admission.holder()
         if holder is None or holder["tenant"] == target_engine_id:
             load_ms = target.ensure_loaded()
             return {"swapped": False, "evicted": None, "load_ms": load_ms}
-        if holder["kind"] == "job":
+        if holder["kind"] in NON_PREEMPTABLE_KINDS:  # the shared single definition (FR-172)
             raise PreemptRefused(
                 f"{holder['tenant']} is running a job (training/HPO/batch) — never preempted")
         holder_rt = manager.runtimes.get(holder["tenant"])
@@ -42,5 +57,7 @@ def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0) -
         result = holder_rt.unload(drain_timeout_s=drain_timeout_s)
         if result.get("status") not in ("unloaded", "idle"):
             raise SwapError(f"{holder['tenant']} did not unload: {result.get('detail') or result}")
-        load_ms = target.ensure_loaded()  # the slot is provably free — we never released the lock
+        load_ms = target.ensure_loaded()  # the reservation kept the freed slot ours to claim
         return {"swapped": True, "evicted": holder["tenant"], "load_ms": load_ms}
+    finally:
+        admission.end_swap(target_engine_id)
