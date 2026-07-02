@@ -183,20 +183,45 @@ def test_unavailable_target_is_refused_before_evicting_the_holder():
 def test_failed_target_load_rolls_the_evicted_holder_back():
     # Codex round 5 (018): a load failure the probe can't see (spawn ok, never becomes ready)
     # happens AFTER eviction — best-effort rollback reloads the previously healthy holder
-    # instead of leaving the GPU empty.
+    # instead of leaving the GPU empty. Codex round 6: the reservation is RETARGETED at the
+    # holder for the rollback, never dropped first — a contender arriving in that gap must
+    # still be refused, or the snipe window the transaction closes would reopen.
     llm, vision = FakeEngine("llm"), FakeEngine("vision")
     vision.ready_state = False                # spawns but never readies → EngineError
     mgr, a = _manager([llm, vision])
     mgr.runtimes["llm"].ensure_loaded()
+
+    real_reload = mgr.runtimes["llm"].ensure_loaded
+    seen = {}
+
+    def contending_reload():                  # a contender at the worst possible moment
+        try:
+            a.acquire("asr", "serving", est_gb=1.0)
+            seen["sniped"] = True
+            a.release("asr")
+        except adm.Held as e:
+            seen["held"] = (e.holder.get("tenant"), e.holder.get("kind"))
+        return real_reload()
+
+    mgr.runtimes["llm"].ensure_loaded = contending_reload
     try:
         swap.preempt_for(mgr, "vision", drain_timeout_s=1)
     except lifecycle.EngineError:
         pass
     else:
         raise AssertionError("expected EngineError for a never-ready target")
+    assert "sniped" not in seen, "a contender acquired the slot mid-rollback"
+    assert seen["held"] == ("llm", "swap-reservation")   # the window belongs to the holder
     assert a.holder()["tenant"] == "llm"      # rolled back — the GPU is not left empty
     assert len(llm.spawned) == 2 and llm.spawned[1].alive   # a fresh holder child is up
     assert mgr.runtimes["llm"].state()["state"] == "ready"
+    try:                                      # and the reservation did not leak: refusals now
+        a.acquire("asr", "serving", est_gb=1.0)   # name the HOLDER, not a stale swap window
+    except adm.Held as e:
+        assert e.holder.get("kind") != "swap-reservation"
+    else:
+        raise AssertionError("expected Held — llm holds the slot after rollback")
+
 
 
 def test_wedged_holder_fails_the_swap_loudly():

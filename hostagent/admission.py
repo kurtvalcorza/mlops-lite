@@ -124,6 +124,15 @@ class Admission:
             if self._swap_target == target:
                 self._swap_target = None
 
+    def retarget_swap(self, old: str, new: str) -> None:
+        """Atomically re-point an in-flight reservation (Codex round 6, 018): the ROLLBACK path
+        — target failed to load after the holder was evicted — must hand the freed window to the
+        evicted holder without ever dropping it, or a contender could snipe the slot in the gap
+        between end_swap and the holder's re-acquire (the exact window swaps exist to close)."""
+        with self.lock:
+            if self._swap_target == old:
+                self._swap_target = new
+
     # -- queries (stale-tolerant, display + gating) --------------------------------------------
     def holder(self):
         with self.lock:

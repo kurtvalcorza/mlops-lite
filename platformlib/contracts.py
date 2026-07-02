@@ -170,6 +170,10 @@ class ModelPolicy(_Base):
                                      f"(a modality with a fine-tune flow)"})
         if not isinstance(self.check_interval_s, int) or self.check_interval_s < 60:
             errors.append({"field": "check_interval_s", "reason": "must be an integer >= 60"})
+        if not isinstance(self.enabled, bool):
+            # Codex round 6 (018): `enabled: "false"` stored as-is is TRUTHY in tick() — a policy
+            # the operator meant to pause would keep checking and retraining.
+            errors.append({"field": "enabled", "reason": "must be a boolean (true/false)"})
         if not self.monitors:
             errors.append({"field": "monitors", "reason": "at least one monitor is required"})
         for i, mon in enumerate(self.monitors):

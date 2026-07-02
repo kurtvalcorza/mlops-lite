@@ -82,6 +82,16 @@ def test_promotion_mode_rejected():
     assert "promotion_mode" in _errors(_doc(promotion_mode="yolo"))
 
 
+def test_enabled_must_be_a_real_boolean():
+    # Codex round 6 (018): `enabled: "false"` stored as-is is TRUTHY in tick() — a policy the
+    # operator meant to pause would keep checking and retraining.
+    assert "enabled" in _errors(_doc(enabled="false"))
+    assert "enabled" in _errors(_doc(enabled="0"))
+    assert "enabled" in _errors(_doc(enabled=1))
+    assert _errors(_doc(enabled=False)) == set()
+    assert _errors(_doc(enabled=True)) == set()
+
+
 def test_non_object_params_is_a_structured_error_not_a_crash():
     # Codex round 5 (018): a truthy non-object params used to AttributeError inside validate() —
     # an unstructured 500 where FR-179 promises a structured 400.

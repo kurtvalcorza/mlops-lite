@@ -476,6 +476,46 @@ def test_transient_store_error_on_retry_keeps_the_park_and_reservation():
         _teardown(sched)
 
 
+def test_default_check_casts_the_knobs_before_scoring():
+    # Codex round 6 (018): validation accepts anything int()/float() accepts, so the check path
+    # must CAST — an uncast "0.85" baseline reached is_breach's abs() and turned every due check
+    # into a check error; the policy never evaluated.
+    from app import quality as appq
+
+    captured = {}
+    orig_cur, orig_cq = scheduler._current_serving_version, appq.compute_quality
+    scheduler._current_serving_version = lambda model: "3"
+
+    def fake_compute(name, version, task, *, window_n, drop_pct, baseline):
+        captured.update(window_n=window_n, drop_pct=drop_pct, baseline=baseline)
+        return {"breach": False, "value": 0.9}
+
+    appq.compute_quality = fake_compute
+    try:
+        res = scheduler._default_check(
+            {"model_name": "m", "modality": "llm"},
+            {"kind": "quality", "window_n": "50", "drop_pct": "0.2", "baseline": "0.85"})
+    finally:
+        scheduler._current_serving_version, appq.compute_quality = orig_cur, orig_cq
+    assert res["breached"] is False
+    assert captured == {"window_n": 50, "drop_pct": 0.2, "baseline": 0.85}  # numbers, not strings
+
+
+def test_default_watch_maps_poll_failures_to_unknown():
+    # Codex round 6 (018): a connection error from the trainer poll used to ESCAPE _default_watch,
+    # bypassing the unknown_since/WATCH_UNKNOWN_TIMEOUT_S bound entirely — a trainer outage pinned
+    # the watch (and deferred every breach) until a gateway restart.
+    orig = os.environ.get("TRAINER_URL")
+    os.environ["TRAINER_URL"] = "http://127.0.0.1:9"     # nothing listens — refused instantly
+    try:
+        assert scheduler._default_watch("run-x") == {"status": "unknown"}
+    finally:
+        if orig is None:
+            os.environ.pop("TRAINER_URL", None)
+        else:
+            os.environ["TRAINER_URL"] = orig
+
+
 def test_check_error_is_contained_and_recorded():
     sched, launches, checks, state, cool = _setup()
     try:

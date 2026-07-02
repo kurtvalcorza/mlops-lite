@@ -70,16 +70,19 @@ def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0) -
         try:
             load_ms = target.ensure_loaded()  # the reservation kept the freed slot ours to claim
         except BaseException:
-            # Best-effort ROLLBACK (Codex round 5, 018): the holder is already evicted, and a
+            # Best-effort ROLLBACK (Codex rounds 5+6, 018): the holder is already evicted, and a
             # load failure the probe couldn't see (spawn/readiness) must not leave the GPU empty
-            # when the previous engine was healthy. End the reservation first — the rollback
-            # re-claims admission under the HOLDER's tenant (the finally's end_swap is a no-op).
-            admission.end_swap(target_engine_id)
+            # when the previous engine was healthy. RETARGET the reservation at the holder —
+            # never drop it first, or a contender could snipe the freed slot in the gap before
+            # the holder's re-acquire (the exact window this transaction exists to close).
+            admission.retarget_swap(target_engine_id, holder["tenant"])
             try:
                 holder_rt.ensure_loaded()
             except Exception:
                 pass  # GPU stays free; the next request cold-loads on demand
+            finally:
+                admission.end_swap(holder["tenant"])
             raise
         return {"swapped": True, "evicted": holder["tenant"], "load_ms": load_ms}
     finally:
-        admission.end_swap(target_engine_id)
+        admission.end_swap(target_engine_id)  # no-op after a rollback retarget

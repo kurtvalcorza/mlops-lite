@@ -140,27 +140,44 @@ def test_transient_failure_keeps_the_watch_for_retry():
     assert policies.list_suggestions(state="open")
 
 
+class _ListingS3:
+    """Fake S3 with per-key LastModified, for the _default_shadow scans."""
+
+    def __init__(self, objs):
+        self.objs = objs  # key -> (json_dict, last_modified)
+
+    def list_objects_v2(self, Bucket, Prefix="", **kw):
+        return {"Contents": [{"Key": k, "LastModified": lm}
+                             for k, (_, lm) in sorted(self.objs.items())
+                             if k.startswith(Prefix)]}
+
+    def get_object(self, Bucket, Key):
+        import io
+        import json as _json
+
+        return {"Body": io.BytesIO(_json.dumps(self.objs[Key][0]).encode())}
+
+
+def _with_shadow_env(fake_s3, incumbent, fn):
+    """Run fn() with the shadow store faked and the @serving incumbent pinned — _default_shadow
+    consults the registry for champion staleness since Codex round 6 (018)."""
+    from app import quality as appq
+
+    orig_s3, orig_cur = appq._s3, scheduler._current_serving_version
+    appq._s3 = lambda: fake_s3
+    scheduler._current_serving_version = lambda model: incumbent
+    try:
+        return fn()
+    finally:
+        appq._s3, scheduler._current_serving_version = orig_s3, orig_cur
+
+
 def test_default_shadow_picks_newest_verdict_by_last_modified():
     # Codex round 3 (018): shadow_ids are random uuid hex — "largest id" chose an effectively
     # random verdict when several replays existed. Newest-by-LastModified is the contract.
     import datetime as _dt
 
     from app import quality as appq
-
-    class _ListingS3:
-        def __init__(self, objs):
-            self.objs = objs  # key -> (json_dict, last_modified)
-
-        def list_objects_v2(self, Bucket, Prefix="", **kw):
-            return {"Contents": [{"Key": k, "LastModified": lm}
-                                 for k, (_, lm) in sorted(self.objs.items())
-                                 if k.startswith(Prefix)]}
-
-        def get_object(self, Bucket, Key):
-            import io
-            import json as _json
-
-            return {"Body": io.BytesIO(_json.dumps(self.objs[Key][0]).encode())}
 
     older = {"winner": "challenger", "name": "qa-demo", "modality": "text-generation",
              "challenger": {"version": "9"}, "shadow_id": "zzzzzz"}   # id sorts LAST
@@ -170,12 +187,8 @@ def test_default_shadow_picks_newest_verdict_by_last_modified():
         f"{appq.SHADOW_PREFIX}zzzzzz.json": (older, _dt.datetime(2026, 7, 1)),
         f"{appq.SHADOW_PREFIX}aaaaaa.json": (newer, _dt.datetime(2026, 7, 2)),
     })
-    orig = appq._s3
-    appq._s3 = lambda: fake
-    try:
-        best = scheduler._default_shadow("qa-demo", "9", "llm")
-    finally:
-        appq._s3 = orig
+    best = _with_shadow_env(fake, None,
+                            lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
     assert best["winner"] == "champion" and best["shadow_id"] == "aaaaaa"  # newest, not max-id
 
 
@@ -184,22 +197,17 @@ def test_default_shadow_listing_failure_raises_never_reads_as_green():
     # failure, and None means "no shadow window exists" — GREEN. A transient store outage could
     # auto-promote a shadow-LOSING candidate. A listing failure must RAISE so the tick's
     # per-policy containment keeps the watch and retries next tick.
-    from app import quality as appq
-
     class _BrokenS3:
         def list_objects_v2(self, **kw):
             raise RuntimeError("minio down")
 
-    orig = appq._s3
-    appq._s3 = lambda: _BrokenS3()
     try:
-        scheduler._default_shadow("qa-demo", "9", "llm")
+        _with_shadow_env(_BrokenS3(), None,
+                         lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
     except Exception as e:
         assert "minio down" in str(e)
     else:
         raise AssertionError("a listing failure must raise, not read as no-shadow-window")
-    finally:
-        appq._s3 = orig
 
 
 def test_default_shadow_skips_a_corrupt_key_without_vetoing_the_scan():
@@ -232,13 +240,36 @@ def test_default_shadow_skips_a_corrupt_key_without_vetoing_the_scan():
     fake = _PoisonedS3(
         {f"{appq.SHADOW_PREFIX}good01.json": (verdict, _dt.datetime(2026, 7, 1))},
         poisoned=f"{appq.SHADOW_PREFIX}zz-corrupt.json")
-    orig = appq._s3
-    appq._s3 = lambda: fake
-    try:
-        best = scheduler._default_shadow("qa-demo", "9", "llm")
-    finally:
-        appq._s3 = orig
+    best = _with_shadow_env(fake, None,
+                            lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
     assert best is not None and best["shadow_id"] == "good01"  # found DESPITE the corrupt key
+
+
+def test_default_shadow_ignores_windows_against_an_old_champion():
+    # Codex round 6 (018): the serving alias can move between a replay and this evaluation — a
+    # candidate that beat OLD v1 must never be green-lit over current v3 on that stale window.
+    # Only verdicts whose recorded champion IS the incumbent count as shadow evidence.
+    import datetime as _dt
+
+    from app import quality as appq
+
+    stale_win = {"winner": "challenger", "name": "qa-demo", "modality": "text-generation",
+                 "challenger": {"version": "9"}, "champion": {"version": "1"},
+                 "shadow_id": "stale1"}
+    current_loss = {"winner": "champion", "name": "qa-demo", "modality": "text-generation",
+                    "challenger": {"version": "9"}, "champion": {"version": "3"},
+                    "shadow_id": "cur001"}
+    fake = _ListingS3({
+        f"{appq.SHADOW_PREFIX}stale1.json": (stale_win, _dt.datetime(2026, 7, 2)),   # NEWER
+        f"{appq.SHADOW_PREFIX}cur001.json": (current_loss, _dt.datetime(2026, 7, 1)),
+    })
+    best = _with_shadow_env(fake, "3",
+                            lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
+    assert best["shadow_id"] == "cur001"     # the stale v1 win is ignored despite being newest
+    # with nothing serving there is no incumbent to compare — the newest verdict counts as before
+    best = _with_shadow_env(fake, None,
+                            lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
+    assert best["shadow_id"] == "stale1"
 
 
 def test_failed_run_and_versionless_result_drop_the_watch():

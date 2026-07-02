@@ -394,17 +394,21 @@ def _extract_version(rec: dict):
 
 
 def _default_check(policy: dict, monitor: dict) -> dict:
-    from . import monitoring, registry
+    from . import monitoring
 
     if monitor["kind"] == "quality":
-        served = registry.get_serving(policy["model_name"])
-        if not served:
+        served_version = _current_serving_version(policy["model_name"])
+        if not served_version:
             return {"breached": False, "detail": "no @serving version to monitor"}
+        # Cast baseline like the other knobs (Codex round 6, 018): validation accepts anything
+        # float() accepts, so an uncast "0.85" would reach is_breach's abs() and turn every due
+        # check into a check error — the policy would never evaluate.
+        baseline = monitor.get("baseline")
         report = quality.compute_quality(
-            policy["model_name"], served["version"], MODALITY_TASK[policy["modality"]],
+            policy["model_name"], served_version, MODALITY_TASK[policy["modality"]],
             window_n=int(monitor.get("window_n", quality.WINDOW_N)),
             drop_pct=float(monitor.get("drop_pct", quality.DROP_PCT)),
-            baseline=monitor.get("baseline"))
+            baseline=float(baseline) if baseline is not None else None)
         return {"breached": bool(report.get("breach")), "score": report.get("value"),
                 "report_id": report.get("report_id")}
     ref = monitor["reference"]
@@ -442,9 +446,16 @@ def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> di
 def _default_watch(run_id: str) -> dict:
     import httpx
 
-    with httpx.Client(timeout=10) as client:
-        r = client.get(f"{trainer_url()}/train/{run_id}")
-    return r.json() if r.status_code == 200 else {"status": "unknown"}
+    # ANY poll failure — connection refused, timeout, bad body — is "unknown" (Codex round 6,
+    # 018): an escaping exception here bypassed the unknown_since / WATCH_UNKNOWN_TIMEOUT_S
+    # bound entirely, so a trainer outage pinned the watch (and deferred every future breach)
+    # until a gateway restart.
+    try:
+        with httpx.Client(timeout=10) as client:
+            r = client.get(f"{trainer_url()}/train/{run_id}")
+        return r.json() if r.status_code == 200 else {"status": "unknown"}
+    except Exception:
+        return {"status": "unknown"}
 
 
 def _default_gate(model: str, version: str) -> dict:
@@ -466,7 +477,14 @@ def _default_shadow(model: str, version: str, modality: str):
     gate failure. Returning None instead read as "no shadow window exists", which is GREEN — a
     transient outage could auto-promote a shadow-LOSING candidate. A single unreadable verdict,
     by contrast, is skipped-and-counted: one corrupt key must not veto the whole scan (or wedge
-    this candidate's promotion forever)."""
+    this candidate's promotion forever).
+
+    Champion staleness (Codex round 6, 018): a verdict counts only when its recorded champion IS
+    the current incumbent — the alias can move between the replay and this evaluation, and a
+    candidate that beat OLD v1 must not be green-lit over current v3 on that stale window.
+    Verdicts with no recorded champion version (or when nothing serves) can't be checked and
+    count as before."""
+    incumbent = _current_serving_version(model)  # raises → per-policy containment retries
     s3 = quality._s3()
     # Page the listing ourselves to keep each object's LastModified: shadow_ids are random
     # uuid hex, so "largest id" picked an effectively RANDOM verdict when several replays
@@ -488,13 +506,23 @@ def _default_shadow(model: str, version: str, modality: str):
         except Exception:
             CHECKS.labels(result="shadow_read_error").inc()
             continue  # skip THIS key only — never discard verdicts already found
+        champ = str(((v or {}).get("champion") or {}).get("version") or "") or None
         if (v and v.get("winner") and v.get("name") == model
                 and str((v.get("challenger") or {}).get("version")) == str(version)
+                and (incumbent is None or champ is None or champ == incumbent)
                 and (modality is None or v.get("modality") is None
                      or v.get("modality") == MODALITY_TASK.get(modality, modality))
                 and (best_at is None or (modified is not None and modified > best_at))):
             best, best_at = v, modified
     return best
+
+
+def _current_serving_version(model: str):
+    """The @serving incumbent's version, or None when nothing serves (seam for offline tests)."""
+    from . import registry
+
+    serving = registry.get_serving(model)
+    return str(serving["version"]) if serving else None
 
 
 def _default_promote(model: str, version: str) -> dict:
