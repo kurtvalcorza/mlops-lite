@@ -487,6 +487,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    gpu_lease.verify_shared_state_dir("trainer")  # 018/FR-166: fail loud on divergence
     print(f"trainer :{TRAINER_PORT} | supervisor={SUPERVISOR_URL} | vram_budget={VRAM_GB}GB | "
           f"gpu_free={_gpu_free_mib()}MiB", flush=True)
     ThreadingHTTPServer(("0.0.0.0", TRAINER_PORT), Handler).serve_forever()

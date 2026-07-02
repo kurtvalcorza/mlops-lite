@@ -118,13 +118,18 @@ def compute_drift(ref_name: str, ref_ver: str, cur_name: str, cur_ver: str,
 
 
 def latest_reports(limit: int = 20) -> list:
-    """Recent drift reports from the results bucket, newest first."""
+    """Recent drift reports from the results bucket, newest first.
+
+    018 US1 (FR-165): paginated via `platformlib.store.list_keys` — a single `list_objects_v2`
+    page silently truncated past 1000 reports, and report ids don't sort by time, so the "latest"
+    view was an arbitrary slice once the prefix grew."""
+    from platformlib import store
+
     s3 = _s3()
     try:
-        page = s3.list_objects_v2(Bucket=RESULTS_BUCKET, Prefix="drift/")
+        keys = store.list_keys(s3, RESULTS_BUCKET, "drift/")
     except Exception as e:
         raise MonitorError(f"cannot list drift reports: {e}") from e
-    keys = [o["Key"] for o in page.get("Contents", [])]
     reports = []
     for k in keys:
         try:

@@ -4,17 +4,16 @@ The Docker gateway has no GPU, so a batch job runs as an **ephemeral Prefect flo
 (`training/flows/batch_infer.py`) where serving lives — this router is the launch/status proxy, mirroring
 the `/runs` ↔ trainer `/train` split. `POST /batch` submits, `GET /batch/{id}` polls.
 """
-import os
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
+from ..settings import TRAINER_URL
 
 router = APIRouter()
 
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 BATCH_OPS = Counter("gateway_batch_ops_total", "Batch-inference operations", ["op", "status"])
 
 

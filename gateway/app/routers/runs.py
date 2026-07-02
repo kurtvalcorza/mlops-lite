@@ -4,17 +4,16 @@ The gateway proxies to the native training daemon on the WSL GPU host (same hybr
 serving; `serve_up.ps1` injects its IP). The daemon enforces one-model-in-VRAM, so a launch may
 come back 409 if the serving model is resident.
 """
-import os
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
+from ..settings import TRAINER_URL
 
 router = APIRouter()
 
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 RUN_OPS = Counter("gateway_run_ops_total", "Training run operations", ["op", "status"])
 
 

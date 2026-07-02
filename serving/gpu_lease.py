@@ -42,10 +42,27 @@ import os
 import subprocess
 import time
 
-# Shared lockfile on the WSL filesystem — all three native daemons see the same path. The sidecar
-# is a persistent flock coordinator (never unlinked) that serializes the read-decide-claim window.
-LEASE_PATH = os.getenv("GPU_LEASE_PATH", "/tmp/mlops-lite-gpu.lease")
+# Shared lockfile on the WSL filesystem — every GPU daemon must see the SAME path. 018 US1
+# (FR-166): the default moved OFF /tmp into the fixed platform state dir. /tmp is wiped per
+# reboot and can silently differ across mount namespaces / WSL distros — two daemons with
+# different /tmp views would each "hold" their own lease file, voiding the single-GPU mutex with
+# no error anywhere. The canonical definition is `platformlib.topology.STATE_DIR` (env
+# `MLOPS_STATE_DIR`, default ~/.mlops-lite); the same env+default is computed inline as a
+# fallback so this module stays importable standalone (the offline tests and the daemons load it
+# with only serving/ on the path). `GPU_LEASE_PATH` remains an explicit override.
+try:
+    import sys as _sys
+
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in _sys.path:
+        _sys.path.insert(0, _repo_root)
+    from platformlib.topology import STATE_DIR  # noqa: E402
+except Exception:  # pragma: no cover — same contract as platformlib.topology.STATE_DIR
+    STATE_DIR = os.path.expanduser(os.getenv("MLOPS_STATE_DIR", "~/.mlops-lite"))
+
+LEASE_PATH = os.getenv("GPU_LEASE_PATH", os.path.join(STATE_DIR, "gpu.lease"))
 _COORD_PATH = LEASE_PATH + ".lock"
+_BEACON_PATH = os.path.join(os.path.dirname(LEASE_PATH) or ".", "state-dir.beacon")
 
 # VRAM admission safety margin when falling back to the static budget (matches supervisor._fits()).
 _BUDGET_SAFETY = 0.95
@@ -159,9 +176,61 @@ def _lease_exists() -> bool:
     return os.path.exists(LEASE_PATH)
 
 
+def verify_shared_state_dir(component: str) -> dict:
+    """Startup invariant check (018 US1, FR-166): every GPU participant must observe the SAME
+    coordination state as its peers — fail LOUD on divergence, never run with a private mutex.
+
+    Mechanism: a persistent beacon file beside the lease records, at first creation, the identity
+    of the filesystem view that created it — hostname + WSL distro + the beacon's own (st_dev,
+    st_ino). A later participant that reads a beacon recorded by a DIFFERENT host/distro, or whose
+    stat of the file disagrees with the recorded inode (a copied/recreated file — two views that
+    are not the same file), is seeing a divergent state dir: raises `LeaseError` so the daemon
+    exits at startup instead of silently co-residing on the GPU later.
+
+    (A participant with a fully private state dir creates its own self-consistent beacon — that
+    case is caught by the host/distro identity, the realistic divergence mode: the cross-distro
+    WSL setups that already force IP injection in serve_up.ps1.)
+    """
+    import socket
+
+    ident = {"node": socket.gethostname(), "distro": os.getenv("WSL_DISTRO_NAME", "")}
+    os.makedirs(os.path.dirname(_BEACON_PATH) or ".", exist_ok=True)
+    try:
+        fd = os.open(_BEACON_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        st = os.fstat(fd)
+        rec = {**ident, "dev": st.st_dev, "ino": st.st_ino,
+               "created_by": component, "created_at": time.time()}
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        return rec
+    except FileExistsError:
+        pass
+    try:
+        with open(_BEACON_PATH, encoding="utf-8") as f:
+            rec = json.load(f)
+        st = os.stat(_BEACON_PATH)
+    except (OSError, ValueError) as e:
+        raise LeaseError(f"{component}: unreadable state-dir beacon {_BEACON_PATH}: {e}") from e
+    problems = []
+    if rec.get("node") != ident["node"] or rec.get("distro") != ident["distro"]:
+        problems.append(f"beacon created on {rec.get('node')!r}/{rec.get('distro')!r}, "
+                        f"this daemon runs on {ident['node']!r}/{ident['distro']!r}")
+    if (st.st_dev, st.st_ino) != (rec.get("dev"), rec.get("ino")):
+        problems.append("beacon file identity changed (copied/recreated — not the same file "
+                        "the recording participant saw)")
+    if problems:
+        raise LeaseError(
+            f"{component}: GPU coordination state dir DIVERGES from peers "
+            f"({'; '.join(problems)}). All GPU daemons must share one filesystem view of "
+            f"{os.path.dirname(_BEACON_PATH)} (MLOPS_STATE_DIR) — refusing to start rather than "
+            f"risk two GPU tenants with private leases (Principle II).")
+    return rec
+
+
 @contextlib.contextmanager
 def _coord():
     """Serialize acquire/release/reclaim across the native daemons (flock; auto-released on death)."""
+    os.makedirs(os.path.dirname(_COORD_PATH) or ".", exist_ok=True)  # the state dir (FR-166)
     fd = os.open(_COORD_PATH, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -226,7 +295,13 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
                         holder.pop("vram_start", None)
                         _replace_holder(holder)
                     return holder
-                _unlink_quiet()  # same process, different tenant (shouldn't happen) — replace
+                # Same process, DIFFERENT tenant: refuse like any other live holder (018 US2).
+                # Pre-018 each daemon process carried exactly one tenant identity, so this branch
+                # "couldn't happen" and silently replaced the claim. The host agent is ONE process
+                # hosting several tenant identities via the interop shim — a silent replace here
+                # would evict tenant A's claim while its child still owns VRAM (co-residency with
+                # no error). Refusing is correct in both worlds.
+                raise LeaseHeld(holder)
             elif _holder_live(holder):
                 raise LeaseHeld(holder)
             else:

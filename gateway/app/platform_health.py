@@ -4,16 +4,17 @@ The supervisor (supervisor/supervise.py) keeps the native daemons alive; this le
 all three daemons' reachability via the gateway without knowing their injected WSL IPs. Reuses the
 same daemon URLs the gateway already proxies to. Open (no API key) — it's a probe, like /healthz.
 """
-import os
 
 import httpx
 
-SERVING_URL = os.getenv("SERVING_URL", "http://host.docker.internal:8090")
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
-BENTO_URL = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
-EMBED_URL = os.getenv("EMBED_URL", "http://host.docker.internal:8093")
-TABULAR_URL = os.getenv("TABULAR_URL", "http://host.docker.internal:8094")
-ASR_URL = os.getenv("ASR_URL", "http://host.docker.internal:8095")
+from . import settings
+
+SERVING_URL = settings.SERVING_URL
+TRAINER_URL = settings.TRAINER_URL
+BENTO_URL = settings.BENTO_URL
+EMBED_URL = settings.EMBED_URL
+TABULAR_URL = settings.TABULAR_URL
+ASR_URL = settings.ASR_URL
 
 # name -> health URL. Bento services expose /readyz; the supervised GPU daemons expose /health.
 # 009: each new modality is a per-modality reachability target (FR-085) — embeddings + tabular (CPU,

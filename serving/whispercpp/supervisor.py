@@ -333,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    gpu_lease.verify_shared_state_dir("whisper-supervisor")  # 018/FR-166: fail loud on divergence
     print(f"asr supervisor :{ASR_PORT} | model={os.path.basename(MODEL)} "
           f"| est_vram={_estimate_vram_gb():.1f}GB budget={VRAM_GB:.0f}GB fits={_fits()} "
           f"| idle_timeout={IDLE_TIMEOUT}s", flush=True)

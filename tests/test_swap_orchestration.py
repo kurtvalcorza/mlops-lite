@@ -243,6 +243,41 @@ def test_stale_idle_holder_is_reresolved():
     assert len(post.calls) == 2 and "8090" in post.calls[0] and "8092" in post.calls[1]
 
 
+# --- 018 US1 (FR-162): the batch guard fails CLOSED ------------------------------------------------
+
+def test_batch_state_unknown_refuses_with_reason():
+    # The seam may return a truthy *reason string* (the default probe's fail-closed contract): the
+    # swap must be refused with that reason and the holder never told to unload.
+    state = StateSeq({"holder": "llm", "resident": True})
+    post = PostRecorder()
+
+    async def _unknown():
+        return "batch state unknown (trainer unreachable: boom) — refusing preempt (fail-closed)"
+
+    try:
+        run(m.preempt_if_needed("vision", state_fn=state, http_post=post, sleep=_nosleep,
+                                target_probe_fn=_up, batch_active_fn=_unknown))
+    except m.PreemptRefused as e:
+        assert "batch state unknown" in str(e)
+    else:
+        raise AssertionError("expected PreemptRefused when the batch state is unknown")
+    assert post.calls == []  # never evicted blind
+
+
+def test_default_batch_probe_fails_closed_when_trainer_unreachable():
+    # Drive the REAL default probe against a guaranteed-closed local port: the pre-018 behavior
+    # returned False (fail-open — the one path that could evict a batch-driven serving holder);
+    # 018 returns a truthy "batch state unknown" reason instead (review §4.6, FR-162).
+    orig = m.TRAINER_URL
+    m.TRAINER_URL = "http://127.0.0.1:9"  # discard port — nothing listens; connect fails fast
+    try:
+        got = run(m._default_batch_active())
+    finally:
+        m.TRAINER_URL = orig
+    assert got, "unknown batch state must be truthy (refuse), not False (fail-open)"
+    assert "batch state unknown" in str(got)
+
+
 if __name__ == "__main__":
     import sys
     import pytest

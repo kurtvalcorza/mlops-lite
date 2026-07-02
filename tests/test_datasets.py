@@ -97,5 +97,74 @@ def test_datasets(require_gateway, require_key):
     assert main() == 0
 
 
+# --- 018 US1 (FR-165): listings paginate past the 1000-object page cap (offline) -------------------
+#
+# Pre-018 `list_datasets`/`_versions` and `monitoring.latest_reports` read a single
+# `list_objects_v2` page: past 1000 entries the platform silently showed an arbitrary slice.
+
+import importlib.util as _ilu
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+
+class _PagedS3:
+    """A fake S3 that truncates list_objects_v2 into pages of `page_size` (both Contents and
+    CommonPrefixes), like the real API past 1000 objects."""
+
+    def __init__(self, keys=(), prefixes=(), page_size=1000):
+        self.keys, self.prefixes, self.page_size = sorted(keys), sorted(prefixes), page_size
+
+    def list_objects_v2(self, Bucket, Prefix="", Delimiter=None, ContinuationToken=None, **kw):
+        if Delimiter:
+            rows = [p for p in self.prefixes if p.startswith(Prefix)]
+            label = "CommonPrefixes"
+            wrap = lambda v: {"Prefix": v}
+        else:
+            rows = [k for k in self.keys if k.startswith(Prefix)]
+            label = "Contents"
+            wrap = lambda v: {"Key": v}
+        start = int(ContinuationToken or 0)
+        page = rows[start:start + self.page_size]
+        out = {label: [wrap(v) for v in page]}
+        if start + self.page_size < len(rows):
+            out["IsTruncated"] = True
+            out["NextContinuationToken"] = str(start + self.page_size)
+        return out
+
+
+def _load_datasets_module():
+    spec = _ilu.spec_from_file_location(
+        "datasets_under_test", os.path.join(_REPO, "gateway", "app", "datasets.py"))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_store_list_keys_paginates_past_page_cap():
+    from platformlib import store
+    keys = [f"drift/report-{i:05d}.json" for i in range(2500)]
+    s3 = _PagedS3(keys=keys, page_size=1000)
+    got = store.list_keys(s3, "results", "drift/")
+    assert len(got) == 2500 and got[0] == "drift/report-00000.json"
+
+
+def test_store_list_common_prefixes_paginates():
+    from platformlib import store
+    prefixes = [f"ds-{i:05d}/" for i in range(2500)]
+    s3 = _PagedS3(prefixes=prefixes, page_size=1000)
+    got = store.list_common_prefixes(s3, "datasets", "")
+    assert len(got) == 2500
+
+
+def test_dataset_version_listing_paginates():
+    mod = _load_datasets_module()
+    versions = [f"name/{i:012d}/" for i in range(1500)]
+    s3 = _PagedS3(prefixes=versions, page_size=1000)
+    got = mod._prefixes(s3, "name/")
+    assert len(got) == 1500  # pre-018: 1000 (silent truncation)
+
+
 if __name__ == "__main__":
     sys.exit(main())

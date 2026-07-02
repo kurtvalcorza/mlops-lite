@@ -87,11 +87,29 @@ def register_dataset(name: str, content: bytes, fmt=None, metadata=None) -> dict
     return manifest
 
 
+def _prefixes(s3, prefix: str) -> list:
+    """All CommonPrefixes under `prefix`, paginated (018 US1, FR-165): delimiter listings truncate
+    at 1000 entries per page too, silently dropping datasets/versions past the first page. Inline
+    (not `platformlib.store.list_common_prefixes`) because this module is still loaded trainer-side
+    via the dual-runtime path hacks — the seams consolidate at T374."""
+    out, token = [], None
+    while True:
+        kw = {"Bucket": BUCKET, "Prefix": prefix, "Delimiter": "/"}
+        if token:
+            kw["ContinuationToken"] = token
+        page = s3.list_objects_v2(**kw)
+        out.extend(cp["Prefix"] for cp in page.get("CommonPrefixes", []))
+        if not page.get("IsTruncated"):
+            return out
+        token = page.get("NextContinuationToken")
+        if not token:
+            return out
+
+
 def _versions(s3, name: str) -> list:
     out = []
-    page = s3.list_objects_v2(Bucket=BUCKET, Prefix=f"{name}/", Delimiter="/")
-    for cp in page.get("CommonPrefixes", []):
-        ver = cp["Prefix"][len(name) + 1:].rstrip("/")
+    for cp in _prefixes(s3, f"{name}/"):
+        ver = cp[len(name) + 1:].rstrip("/")
         try:
             m = json.loads(s3.get_object(Bucket=BUCKET, Key=f"{name}/{ver}/manifest.json")["Body"].read())
             out.append({k: m.get(k) for k in ("version", "size_bytes", "sha256", "format", "uri")})
@@ -102,11 +120,10 @@ def _versions(s3, name: str) -> list:
 
 
 def list_datasets() -> list:
-    """Every registered dataset name with its immutable versions."""
+    """Every registered dataset name with its immutable versions (paginated, FR-165)."""
     s3 = _s3()
     try:
-        page = s3.list_objects_v2(Bucket=BUCKET, Delimiter="/")
-        names = [cp["Prefix"].rstrip("/") for cp in page.get("CommonPrefixes", [])]
+        names = [p.rstrip("/") for p in _prefixes(s3, "")]
         return [{"name": n, "versions": _versions(s3, n)} for n in names]
     except (ClientError, BotoCoreError) as e:
         raise DatasetError(str(e)) from e

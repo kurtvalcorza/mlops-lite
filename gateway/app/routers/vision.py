@@ -3,7 +3,6 @@
 The bento runs natively in WSL (CPU); the gateway forwards a base64 image as the multipart upload
 BentoML expects. Same hybrid-split as LLM serving — `serve_up.ps1` injects the bento's IP.
 """
-import asyncio
 import base64
 import hashlib
 import os
@@ -15,11 +14,11 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import quality, registry, swap
+from .. import background, quality, registry, swap
+from ..settings import BENTO_URL
 
 router = APIRouter()
 
-BENTO_URL = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
 # The vision model this gateway's bento serves — `prefer_name` for the registry resolve, so with
 # several promoted image-classification models the logged version attributes to the right one.
 VISION_SERVING_MODEL = os.getenv("VISION_SERVING_MODEL")
@@ -103,10 +102,8 @@ async def classify(req: ClassifyRequest):
         # policy, so a challenger can be shadow-replayed over real traffic. Fire-and-forget + fail-open.
         quality.capture_input(pid, "image-classification", req.image_b64)
 
-    try:
-        asyncio.ensure_future(_log())
-    except Exception:  # never let logging setup affect the served response (fail-open)
-        pass
+    # 018/FR-164: retained (not detached) — a GC'd task would silently drop the prediction log.
+    background.spawn(_log(), kind="vision-log")
     if isinstance(data, dict):
         data = {**data, "prediction_id": pid}
     return data

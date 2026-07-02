@@ -36,6 +36,16 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'batch/:id' }, // 014 US1: poll batch status + result link
   // Monitor tab
   { method: 'POST', pattern: 'monitor/check' }, // drift check
+  // Monitor tab — per-model policies (018 US3, FR-179/180)
+  { method: 'GET', pattern: 'policies' },
+  { method: 'GET', pattern: 'policies/:model' },
+  { method: 'PUT', pattern: 'policies/:model' }, // declare/update (validated write, structured 400)
+  { method: 'DELETE', pattern: 'policies/:model' },
+  { method: 'GET', pattern: 'policies/:model/status' }, // last check / next due / pending retrain
+  // Models tab — promotion suggestions (018 US3, FR-183)
+  { method: 'GET', pattern: 'suggestions' },
+  { method: 'POST', pattern: 'suggestions/:id/accept' }, // routes through the gated promote
+  { method: 'POST', pattern: 'suggestions/:id/dismiss' },
   // Health tab (+ smoke probe)
   { method: 'GET', pattern: 'platform/health' },
   { method: 'GET', pattern: 'platform/events' }, // live state (SSE)
