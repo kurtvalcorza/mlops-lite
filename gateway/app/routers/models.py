@@ -3,7 +3,6 @@
 Handlers are sync `def` on purpose — the MLflow client is blocking, so FastAPI runs each
 in its threadpool rather than stalling the event loop.
 """
-import os
 import uuid
 from typing import Dict, Optional
 
@@ -15,10 +14,10 @@ from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
 from .. import evaluation, quality, registry, shadow
+from ..settings import TRAINER_URL
 
 router = APIRouter()
 
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 
 REGISTRY_OPS = Counter("gateway_registry_ops_total", "Model registry operations", ["op", "status"])
 

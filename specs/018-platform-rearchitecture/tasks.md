@@ -17,18 +17,18 @@ store-schema}.md, quickstart.md).
 
 ## Phase 1: Setup — the shared package both runtimes import
 
-- [ ] **T343** Create `platformlib/` (stdlib-only, contracts/platformlib.md): `topology.py`
+- [x] **T343** Create `platformlib/` (stdlib-only, contracts/platformlib.md): `topology.py`
   (Tenant ids, `ENGINES` registry, `AGENT_PORT=8100`, `STATE_DIR`, legacy `*_URL` resolution),
   `contracts.py` (dataclasses + `validate()`: AgentHealth, EngineState, Admission*, JobSubmit,
   JobRecord, SwapCommand, UnloadResult), `store.py` (object side: promoted S3 helpers with
   module-level client + paginated `list_keys`). Wire imports: gateway `Dockerfile` `COPY
   platformlib/`, host run scripts add repo root to `PYTHONPATH`.
-- [ ] **T344** Central gateway settings: `gateway/app/settings.py` consuming
+- [x] **T344** Central gateway settings: `gateway/app/settings.py` consuming
   `platformlib.topology`; replace scattered `os.getenv` reads of `TRAINER_URL`/`SERVING_URL`/
   `BENTO_URL`/`EMBED_URL`/`TABULAR_URL`/`ASR_URL`/`SERVING_MODEL`/`MLFLOW_TRACKING_URI` in
   `gateway/app/{swap,serving,evaluation,platform_health,platform_metrics}.py` and
   `gateway/app/routers/{models,runs,batch,monitor,transcribe,vision,embed,tabular}.py`.
-- [ ] **T345** [P] Config surface: `.env.example` gains `AGENT_URL`, `MLOPS_STATE_DIR`,
+- [x] **T345** [P] Config surface: `.env.example` gains `AGENT_URL`, `MLOPS_STATE_DIR`,
   `AGENT_CONTROL_SECRET` (generalizing `SWAP_CONTROL_SECRET`); document per-engine URL flips as
   the migration/rollback mechanism (research R3).
 
@@ -42,25 +42,25 @@ store-schema}.md, quickstart.md).
 
 **Independent Test**: quickstart.md §US1 — five offline scenarios, no daemon required.
 
-- [ ] **T346** [P] [US1] Fail-closed batch guard: `gateway/app/swap.py` `_default_batch_active`
+- [x] **T346** [P] [US1] Fail-closed batch guard: `gateway/app/swap.py` `_default_batch_active`
   → trainer unreachable ⇒ treat as active (refuse preempt with "batch state unknown", FR-162);
   extend `tests/test_swap_orchestration.py` + `tests/test_no_preempt_training.py`.
-- [ ] **T347** [P] [US1] Reserve-before-launch on the PSI path: `gateway/app/routers/monitor.py`
+- [x] **T347** [P] [US1] Reserve-before-launch on the PSI path: `gateway/app/routers/monitor.py`
   drift branch calls `quality.try_reserve_retrain` before `_launch_retrain` (release on launch
   failure), unifying with the quality branch (FR-163); extend `tests/test_drift_loop.py` +
   `tests/test_quality_breach.py` with a concurrent double-breach case.
-- [ ] **T348** [P] [US1] Retained background work: keep strong references to the detached
+- [x] **T348** [P] [US1] Retained background work: keep strong references to the detached
   logging tasks in `gateway/app/routers/{vision,transcribe}.py` + `gateway/app/stream.py`
   (task-set pattern) and add a `gateway_dropped_work_total` counter beside the existing
   semaphore drops (FR-164); new `tests/test_background_logging.py`.
-- [ ] **T349** [P] [US1] Complete listings: switch `gateway/app/monitoring.py:latest_reports`
+- [x] **T349** [P] [US1] Complete listings: switch `gateway/app/monitoring.py:latest_reports`
   and `gateway/app/datasets.py:{list_datasets,list_versions}` to
   `platformlib.store.list_keys` (paginated) (FR-165); extend `tests/test_datasets.py`.
-- [ ] **T350** [US1] Coordination state off `/tmp`: `serving/gpu_lease.py` default path moves to
+- [x] **T350** [US1] Coordination state off `/tmp`: `serving/gpu_lease.py` default path moves to
   `platformlib.topology.STATE_DIR`; every lease participant (both supervisors,
   `serving/bento/service.py`, `training/trainer.py`) verifies at startup it sees the same
   beacon file/inode and fails loud on divergence (FR-166); new `tests/test_state_dir.py`.
-- [ ] **T351** [P] [US1] Stuck-child parity: port whisper's reap-before-relaunch
+- [x] **T351** [P] [US1] Stuck-child parity: port whisper's reap-before-relaunch
   (`serving/whispercpp/supervisor.py:105-110`) into `serving/llama/supervisor.py`'s
   `_ensure_loaded` (FR-167); new regression in `tests/test_serving.py`.
 

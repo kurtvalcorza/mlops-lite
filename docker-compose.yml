@@ -133,6 +133,9 @@ services:
       BENCHMARKS_DIR: /benchmarks
     volumes:
       - ./benchmarks:/benchmarks:ro
+      # 018 (FR-176): the shared contracts package — same code the native host imports from the
+      # repo (the build context is ./gateway, so it isn't in the image; mounted like benchmarks).
+      - ./platformlib:/app/platformlib:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

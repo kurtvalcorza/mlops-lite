@@ -109,6 +109,104 @@ def test_evaluate_quality_breach_flag_drives_the_trigger():
     assert rbad["breach"] is True and rgood["breach"] is False
 
 
+# --- 018 US1 (FR-163): BOTH retrain triggers reserve the cooldown BEFORE launching -----------------
+#
+# Router-level coverage: pre-018 the PSI path launched first and noted the cooldown after
+# ("asymmetric by design"), so two concurrent breaches (PSI+PSI or PSI+quality) could both launch.
+# These drive the real router handler with the drift compute + trainer launch mocked.
+
+import asyncio
+import os as _os
+import time as _time
+
+_REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for _p in (_REPO, _os.path.join(_REPO, "gateway")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+def _router():
+    from app import quality as appq
+    from app.routers import monitor as mon
+    return mon, appq
+
+
+def _drift_body(mon):
+    return mon.DriftCheck(
+        reference=mon.DatasetRef(name="ref", version="v1"),
+        current=mon.DatasetRef(name="cur", version="v2"),
+        retrain=mon.RetrainSpec(dataset_name="cur", dataset_version="v2", output_name="retrained"),
+    )
+
+
+def test_psi_reserves_cooldown_before_launch_and_debounces():
+    mon, appq = _router()
+    appq.reset_cooldown()
+    launches = []
+    orig_launch, orig_drift = mon._launch_retrain, mon.monitoring.compute_drift
+    mon._launch_retrain = lambda spec: (launches.append(spec), {"run_id": "r1"})[1]
+    mon.monitoring.compute_drift = lambda *a, **k: {"dataset_drift": True, "max_psi": 9.9}
+    try:
+        first = asyncio.run(mon.check(_drift_body(mon)))
+        second = asyncio.run(mon.check(_drift_body(mon)))   # within the cooldown -> debounced
+    finally:
+        mon._launch_retrain, mon.monitoring.compute_drift = orig_launch, orig_drift
+        appq.reset_cooldown()
+    assert first["retrain"] == {"run_id": "r1"} and len(launches) == 1
+    assert second["retrain"] == {"skipped": "cooldown"}     # PSI now debounces like quality
+
+
+def test_psi_failed_launch_releases_the_reservation():
+    mon, appq = _router()
+    appq.reset_cooldown()
+    orig_launch, orig_drift = mon._launch_retrain, mon.monitoring.compute_drift
+    mon.monitoring.compute_drift = lambda *a, **k: {"dataset_drift": True, "max_psi": 9.9}
+
+    def _down(spec):
+        raise RuntimeError("trainer down")
+
+    mon._launch_retrain = _down
+    try:
+        failed = asyncio.run(mon.check(_drift_body(mon)))
+        assert "error" in failed["retrain"]
+        # the failed launch must NOT consume the cooldown - the next genuine breach can retry
+        mon._launch_retrain = lambda spec: {"run_id": "r2"}
+        retried = asyncio.run(mon.check(_drift_body(mon)))
+    finally:
+        mon._launch_retrain, mon.monitoring.compute_drift = orig_launch, orig_drift
+        appq.reset_cooldown()
+    assert retried["retrain"] == {"run_id": "r2"}
+
+
+def test_concurrent_double_breach_launches_exactly_once():
+    # Two checks in flight together (the race FR-163 closes): the launcher is slow, so without
+    # reserve-before-launch both would pass the gate and both would fire.
+    mon, appq = _router()
+    appq.reset_cooldown()
+    launches = []
+    orig_launch, orig_drift = mon._launch_retrain, mon.monitoring.compute_drift
+    mon.monitoring.compute_drift = lambda *a, **k: {"dataset_drift": True, "max_psi": 9.9}
+
+    def _slow(spec):
+        _time.sleep(0.2)                 # runs in the threadpool - both checks overlap here
+        launches.append(spec)
+        return {"run_id": f"r{len(launches)}"}
+
+    mon._launch_retrain = _slow
+
+    async def _both():
+        return await asyncio.gather(mon.check(_drift_body(mon)), mon.check(_drift_body(mon)))
+
+    try:
+        results = asyncio.run(_both())
+    finally:
+        mon._launch_retrain, mon.monitoring.compute_drift = orig_launch, orig_drift
+        appq.reset_cooldown()
+    outcomes = sorted(str(r["retrain"]) for r in results)
+    assert len(launches) == 1, f"expected exactly one launch, got {len(launches)}: {outcomes}"
+    assert any("skipped" in o for o in outcomes) and any("run_id" in o for o in outcomes)
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

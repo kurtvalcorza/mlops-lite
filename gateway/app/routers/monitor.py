@@ -5,7 +5,6 @@ threshold and a `retrain` spec is supplied, it launches a fine-tune run on the t
 drift -> retrain, the feedback loop (FR-010/FR-011). `GET /monitor` returns recent reports.
 Drift compute is blocking (S3 + pure-Python PSI) → sync handlers run in FastAPI's threadpool.
 """
-import os
 from typing import Optional
 
 import httpx
@@ -15,10 +14,10 @@ from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
 from .. import monitoring, quality
+from ..settings import TRAINER_URL
 
 router = APIRouter()
 
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 RETRAINS = Counter("gateway_retrain_triggers_total", "Drift-triggered retrains", ["result"])
 # 013 — distinguish WHICH breach signal fired a retrain (input-PSI vs output-quality), keeping each
 # independently observable (FR-126); the original RETRAINS counter is left unchanged.
@@ -69,17 +68,23 @@ async def check(body: DriftCheck):
 
     retrain = None
     if report["dataset_drift"] and body.retrain is not None:
-        try:
-            retrain = await run_in_threadpool(_launch_retrain, body.retrain)
-            RETRAINS.labels(result="launched").inc()
-            RETRAIN_SIGNAL.labels(signal="psi", result="launched").inc()
-            # 013: the input-PSI breach is the *leading* signal — its fire decision is unchanged, but it
-            # starts the shared cooldown so the (confirming) quality trigger won't immediately re-fire.
-            quality.note_retrain()
-        except Exception as e:
-            RETRAINS.labels(result="failed").inc()
-            RETRAIN_SIGNAL.labels(signal="psi", result="failed").inc()
-            retrain = {"error": str(e)}  # surface, but the drift report still stands
+        # 018 US1 (FR-163 — review §4.1): reserve the shared cooldown BEFORE launching, exactly like the
+        # quality path below. The pre-018 "asymmetric by design" note-after-success left a window where
+        # two concurrent checks (PSI+PSI or PSI+quality) could both launch; reserve-first closes it —
+        # at most one retrain across both signals; a failed launch releases the reservation so the next
+        # genuine breach can retry.
+        if not quality.try_reserve_retrain():
+            retrain = {"skipped": "cooldown"}  # OR+cooldown debounce — a retrain fired too recently
+        else:
+            try:
+                retrain = await run_in_threadpool(_launch_retrain, body.retrain)
+                RETRAINS.labels(result="launched").inc()
+                RETRAIN_SIGNAL.labels(signal="psi", result="launched").inc()
+            except Exception as e:
+                quality.release_retrain()  # a trainer-down must not consume the cooldown
+                RETRAINS.labels(result="failed").inc()
+                RETRAIN_SIGNAL.labels(signal="psi", result="failed").inc()
+                retrain = {"error": str(e)}  # surface, but the drift report still stands
     return {"report": report, "retrain": retrain}
 
 

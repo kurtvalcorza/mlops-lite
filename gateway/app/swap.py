@@ -13,7 +13,9 @@ caller's normal forward (which acquires the now-free lease and loads the target)
 Robustness (review hardening):
   - **Batch never preempted** — a GPU *batch* drives a serving supervisor **without** holding the training
     lease, so the holder reads as `llm`/`vision`/`asr`; the broker asks the trainer whether a GPU batch is
-    active and refuses the swap if so (FR-155), on top of the `training` lease-holder refusal.
+    active and refuses the swap if so (FR-155), on top of the `training` lease-holder refusal. The probe
+    **fails closed** (018/FR-162): an unreachable trainer means the batch state is UNKNOWN, so the swap is
+    refused with that reason rather than gambling an active batch's work on an eviction.
   - **Verify the target before evicting** — probe the target daemon's health first, so an unreachable
     target never causes us to drop the only working serving model for a request that would 503 anyway.
   - **Re-resolve a stale holder** — if the holder we snapshotted already idle-released (`unload-now` →
@@ -129,8 +131,12 @@ async def preempt_if_needed(target_label: str, *, state_fn=None, http_post=None,
                 raise PreemptRefused("training in progress — not preemptable")
             # A GPU batch drives a serving supervisor without taking the training lease, so its holder is
             # llm/vision/asr — but a running batch is never preempted (FR-155). Refuse before evicting.
-            if await batch_active_fn():
-                raise PreemptRefused("batch inference in progress — not preemptable")
+            # The seam may return a bool or a truthy reason string (018/FR-162: the default probe returns
+            # "batch state unknown …" when the trainer is unreachable — fail-CLOSED, never evict blind).
+            batch = await batch_active_fn()
+            if batch:
+                raise PreemptRefused(batch if isinstance(batch, str)
+                                     else "batch inference in progress — not preemptable")
 
             url = SERVING_HOLDER_URLS.get(holder)
             if url is None:
@@ -213,12 +219,16 @@ async def _default_state() -> dict:
     return await serving.gpu_state()
 
 
-async def _default_batch_active() -> bool:
+async def _default_batch_active():
     """Whether the trainer is running a **GPU** batch (which drives a serving supervisor without holding the
-    training lease). Reads the trainer /health `gpu_batch_active`. Fail-open (`False`) if the trainer is
-    unreachable — the hard `training` lease-holder refusal still covers train/HPO/tabular; only the rarer
-    GPU-batch case relies on this probe, and failing closed would break every swap whenever the trainer is
-    down."""
+    training lease). Reads the trainer /health `gpu_batch_active`.
+
+    **Fail-CLOSED** (018 US1, FR-162 — review §4.6): when the batch state cannot be determined (trainer
+    unreachable / bad response), return a truthy *reason* so the swap is REFUSED with an explicit
+    "batch state unknown" detail. The pre-018 fail-open here was the one path that could evict a serving
+    supervisor an active GPU batch was driving — exactly the case FR-155 forbids. The cost of failing
+    closed is that preemptive swaps 409 while the trainer daemon is down; the default (non-preempt)
+    path is unaffected, and a 409 with a clear reason beats destroying batch work."""
     import httpx
 
     try:
@@ -226,9 +236,9 @@ async def _default_batch_active() -> bool:
             r = await client.get(f"{TRAINER_URL}/health")
         if r.status_code == 200:
             return bool(r.json().get("gpu_batch_active"))
-    except Exception:
-        pass
-    return False
+        return f"batch state unknown (trainer /health returned {r.status_code}) — refusing preempt (fail-closed)"
+    except Exception as e:
+        return f"batch state unknown (trainer unreachable: {e}) — refusing preempt (fail-closed)"
 
 
 async def _default_target_probe(target_label: str) -> bool:

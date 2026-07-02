@@ -5,16 +5,15 @@ The tabular service runs natively in WSL on CPU, **off the GPU lease** — so, l
 tenant holds the lease (always-available, CPU-only). Thin proxy, mirroring vision.py/embed.py;
 up_all.ps1 injects the service IP via TABULAR_URL.
 """
-import os
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
+from ..settings import TABULAR_URL
 
 router = APIRouter()
 
-TABULAR_URL = os.getenv("TABULAR_URL", "http://host.docker.internal:8094")
 TABULAR_REQUESTS = Counter("gateway_predict_total", "Tabular predict requests", ["status"])
 
 
