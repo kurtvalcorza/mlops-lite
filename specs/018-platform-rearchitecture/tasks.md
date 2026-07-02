@@ -120,16 +120,20 @@ SC-106..110 at completion.
   paths into one parameterized submit (subprocess-per-run via `training/run_flow.py` +
   `run_shadow.py` unchanged; child pid = VRAM owner via lifecycle); `POST /jobs` +
   legacy-route aliases per contracts/agent-api.md; flip `TRAINER_URL`; retire
-  `training/trainer.py`; journal-backed `GET /jobs`.
+  `training/trainer.py`; journal-backed `GET /jobs`. Retire the trainer-side path-injection
+  seams in the same phase (FR-176): `training/scoring/__init__.py:_load_evaluation`,
+  `training/flows/hpo.py:_load_evaluation`, `training/flows/batch_infer.py:_load_batch`,
+  `training/flows/shadow_replay.py:_load_gateway_shadow` → `platformlib` imports.
 - [ ] **T363** [US2] Gateway swap thinning: `gateway/app/swap.py` reduces to preempt-flag
   passthrough (the agent orchestrates); `platform_health.py`/`platform_metrics.py` read the
   agent's single health (parallelize the remaining probes with `asyncio.gather`);
   `tests/test_swap_orchestration.py` re-targeted at the passthrough contract.
 - [ ] **T364** [US2] Lockfile retirement: delete `serving/gpu_lease.py` + the interop shim +
   `supervisor/supervise.py` shrinks to `{agent, ui}` (unconditional backoff restart, FR-178);
-  rewrite `tests/test_gpu_lease.py` → agent admission API; single `AGENT_URL` replaces the six
-  daemon URLs in compose + settings; free ports 8090–8095/8099 removed from
-  `platformlib.topology`.
+  rewrite `tests/test_gpu_lease.py` → agent admission API; update `tests/test_supervisor.py`
+  and the `require_*` reachability fixtures in `tests/conftest.py` to the `{agent, ui}` daemon
+  set; single `AGENT_URL` replaces the six daemon URLs in compose + settings; free ports
+  8090–8095/8099 removed from `platformlib.topology`.
 - [ ] **T365** [US2] **[HW]** On-hardware sweep SC-106..110 per quickstart (process count,
   latency parity vs runbook baselines, swap-contention stress incl. `scripts/swap_stress.py`,
   restart-journal drill, gateway-down scrape + zero-fork watch); record results in
@@ -157,8 +161,10 @@ runs against trainer *or* agent jobs surface.
 - [ ] **T368** [US3] Scheduler: `gateway/app/scheduler.py` lifespan task per
   contracts/policy-api.md — interval ticks through existing `monitoring`/`quality` checks;
   breach → reserve → launch retrain with the policy's `modality` + `latest` dataset resolution;
-  busy ⇒ queue-of-one `PendingRetrain` with backoff/supersede (FR-181/182); tick metrics;
-  `tests/test_policy_scheduler.py` (fake clock).
+  busy ⇒ queue-of-one `PendingRetrain` with backoff/supersede (FR-181/182), persisted beside
+  the policies (MinIO pre-US4, `platformlib.store`) so a gateway restart resumes the parked
+  retrain (R5); tick metrics; `tests/test_policy_scheduler.py` (fake clock + restart-resume
+  case).
 - [ ] **T369** [P] [US3] Modality-aware direct retrain parity: `RetrainSpec` in
   `gateway/app/routers/monitor.py` (+ `monitoring/drift.py` CLI) gains `modality` +
   `dataset_version: "latest"` so the manual path matches policy behavior (closes review §4.1);
@@ -192,7 +198,9 @@ runs against trainer *or* agent jobs surface.
   `log_prediction`/`attach_label`/`capture_input` write rows (write-once = unique constraint ⇒
   `LabelExists`, FR-185; fail-open + dropped-counter on store outage); `window()` query
   replaces `_load_pairs` and `shadow.resolve_window`'s join (FR-186);
-  `tests/test_label_write_once.py`; retire the in-process `_label_write_lock`.
+  `tests/test_label_write_once.py`; retire the in-process `_label_write_lock` and the
+  dual-runtime `sys.path` hacks in `gateway/app/{quality,batch,shadow}.py` (FR-176 — shared
+  code now lives in `platformlib`).
 - [ ] **T375** [US4] Cutover — jobs/policies/suggestions: agent `journal.py` writes `jobs` rows
   directly (clarify Q4; JSONL path retired after import); `policies.py` + suggestion state move
   to their tables; gateway job reads via store.

@@ -42,7 +42,8 @@ surfaces), `test_agent_swap_txn.py` (contending acquirer never wins between evic
 
 ```bash
 make up-all                          # then:
-pgrep -fc 'hostagent|next-server'    # == 2 resident native processes (SC-106)
+pgrep -fc 'hostagent|next-server'    # == 2 supervised native daemons (SC-106; supervise.py
+                                     #    itself is the only other resident native process)
 python -m pytest tests/test_infer_panels.py tests/test_serving.py -q   # five modalities
 # SC-107: compare cold/warm latencies vs docs/on-hardware-validation-015-016-017.md baselines
 # SC-108: scripts/swap_stress.py — ≥100 preempt cycles, assert 1 tenant max, 0 sniped swaps

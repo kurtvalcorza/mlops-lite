@@ -150,19 +150,20 @@ modality, every status code, cold-load versus warm latency — is indistinguisha
 **Why this priority**: This is the headline consolidation. It eliminates the duplicated,
 already-diverged supervisor protocol code (the platform's most likely source of the next
 co-residency bug), makes swap transactional, ends the port sprawl and the `nvidia-smi` fork
-storm, removes the observability single-point-of-failure, and shrinks resident native processes
-from ~8 to 2 (agent + UI) — a direct Principle III win.
+storm, removes the observability single-point-of-failure, and shrinks the supervised native
+daemons from ~8 to 2 (agent + UI) — a direct Principle III win.
 
-**Independent Test**: Full-stack bring-up on the target machine: exactly two resident native
-processes; all five modalities serve; concurrent cross-modality stress (LLM infer + vision
+**Independent Test**: Full-stack bring-up on the target machine: exactly two supervised native
+daemons; all five modalities serve; concurrent cross-modality stress (LLM infer + vision
 classify + ASR transcribe + preempt mixes) shows zero co-residency in VRAM sampling and zero
 lease losses; agent restart preserves job history; Prometheus shows GPU metrics with the gateway
 stopped.
 
 **Acceptance Scenarios**:
 
-1. **Given** a cold platform, **When** the operator runs bring-up, **Then** exactly the agent
-   and the UI are resident natively, and every modality answers its smoke request.
+1. **Given** a cold platform, **When** the operator runs bring-up, **Then** the agent and the
+   UI are the only supervised native daemons (plus the babysitter supervising them), and every
+   modality answers its smoke request.
 2. **Given** the LLM is resident and idle past its timeout, **When** the idle reaper runs,
    **Then** VRAM returns to baseline and the next request cold-loads — same semantics as 017.
 3. **Given** the LLM is resident, **When** a vision request arrives with `preempt=true` and the
@@ -342,8 +343,8 @@ storage and reports remain reproducible after the cutover.
   throughout; each migration phase merges with the full existing test suite green. Tests that
   assert retired internals (the lockfile protocol) are rewritten against the agent's admission
   API in the same phase that retires them.
-- **FR-178**: On completion, resident native processes MUST be reduced to the agent and the UI;
-  the standalone process babysitter shrinks to supervising exactly those two, auto-restarting
+- **FR-178**: On completion, supervised native daemons MUST be reduced to the agent and the UI
+  (the shrunken babysitter remains the only other resident native process); it auto-restarts
   the agent with backoff unconditionally (interrupted work is surfaced via FR-173, never by
   withholding restart); the lockfile protocol and its `/tmp` state are deleted.
 
@@ -408,8 +409,10 @@ storage and reports remain reproducible after the cutover.
 
 ### Measurable Outcomes
 
-- **SC-106**: Full platform bring-up on the target machine yields **exactly 2 resident native
-  processes** (agent + UI), down from ~8, with all five modalities passing their smoke requests.
+- **SC-106**: Full platform bring-up on the target machine yields **exactly 2 supervised native
+  daemons** (agent + UI; the shrunken babysitter that supervises them is the only other resident
+  native process), down from ~8 daemons today, with all five modalities passing their smoke
+  requests.
 - **SC-107**: Idle infrastructure stays ≤ ~3 GB RAM, and cold-load and warm-inference latency
   for every modality are within 10% of the 017 baseline recorded in the on-hardware runbook.
 - **SC-108**: A concurrent contention stress (parallel LLM/vision/ASR requests with preempt
