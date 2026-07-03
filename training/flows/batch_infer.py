@@ -47,14 +47,10 @@ TABULAR_URL = os.getenv("TABULAR_URL", "http://localhost:8100/engines/tabular")
 
 
 def _load_batch():
-    """The gateway's batch core (gateway/app/batch.py) — stdlib + boto3 only, shared so the scoring +
-    content-addressed write are defined once."""
-    gw = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                      "gateway")
-    if gw not in sys.path:
-        sys.path.insert(0, gw)
-    from app import batch
-    return batch
+    """The gateway's batch core (score + content-addressed write) via the audited platformlib bridge
+    (018 T362.1, FR-176 — replaces a per-seam gateway/ path injection)."""
+    from platformlib.gateway_bridge import batch
+    return batch()
 
 
 def _predict_fn(modality: str):

@@ -66,14 +66,10 @@ def score_challenger(pairs: list, modality: str, version: str, *, predict_fn) ->
 
 
 def _load_gateway_shadow():
-    """Import the gateway's shadow orchestration (window resolve + verdict + persist) from the native
-    trainer — path-injected, the same cross-tree pattern hpo.py uses for 011's evaluation harness."""
-    gw = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                      "gateway")
-    if gw not in sys.path:
-        sys.path.insert(0, gw)
-    from app import shadow
-    return shadow
+    """Import the gateway's shadow orchestration (window resolve + verdict + persist) via the audited
+    platformlib bridge (018 T362.1, FR-176 — replaces a per-seam gateway/ path injection)."""
+    from platformlib.gateway_bridge import shadow
+    return shadow()
 
 
 def replay_job(name, champion_version, challenger_version, modality, *, shadow_id, window_n=None):
