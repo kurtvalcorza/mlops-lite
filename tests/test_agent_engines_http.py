@@ -21,8 +21,9 @@ if REPO not in sys.path:
 from test_agent_lifecycle import FakeChild  # noqa: E402
 
 from hostagent import admission as adm  # noqa: E402
+from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
-from hostagent import main as agent_main
+from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 
 
@@ -69,7 +70,8 @@ def _serve(adapter):
     rt = lifecycle.EngineRuntime(adapter, admission)
     manager = lifecycle.EngineManager(admission, runtimes={"llm": rt})
     server = ThreadingHTTPServer(
-        ("127.0.0.1", 0), agent_main.make_handler(admission, journal, manager))
+        ("127.0.0.1", 0), agent_main.make_handler(
+            admission, journal, manager, jobs_mod.JobManager(admission, journal)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}", rt
 
@@ -183,7 +185,8 @@ def _serve_vision():
     rt = lifecycle.EngineRuntime(FakeVision(), admission)
     manager = lifecycle.EngineManager(admission, runtimes={"vision": rt})
     server = ThreadingHTTPServer(
-        ("127.0.0.1", 0), agent_main.make_handler(admission, journal, manager))
+        ("127.0.0.1", 0), agent_main.make_handler(
+            admission, journal, manager, jobs_mod.JobManager(admission, journal)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 

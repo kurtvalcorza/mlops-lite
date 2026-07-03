@@ -27,18 +27,20 @@ def test_batch_infer_llm_url_defaults_to_agent(monkeypatch):
     assert mod.SERVING_URL == "http://localhost:8100/engines/llm"
 
 
-def test_supervise_maps_legacy_serving_selection_to_agent(monkeypatch):
+def test_supervise_maps_legacy_serving_and_training_selection_to_agent(monkeypatch):
+    # 018 T362: `training` also folds into the agent, so a legacy `serving,training,ui` override
+    # maps BOTH serving and training -> agent (deduped), leaving {agent, ui}.
     monkeypatch.setenv("SUPERVISE_DAEMONS", "serving,training,ui")
     mod = _load("supervise_under_test", "supervisor", "supervise.py")
-    assert "serving" not in mod._SELECTED
-    assert mod._SELECTED == ["agent", "training", "ui"]
+    assert "serving" not in mod._SELECTED and "training" not in mod._SELECTED
+    assert mod._SELECTED == ["agent", "ui"]
 
 
 def test_supervise_dedups_when_both_serving_and_agent_listed(monkeypatch):
     monkeypatch.setenv("SUPERVISE_DAEMONS", "serving,agent,training")
     mod = _load("supervise_under_test2", "supervisor", "supervise.py")
     assert mod._SELECTED.count("agent") == 1
-    assert mod._SELECTED == ["agent", "training"]
+    assert mod._SELECTED == ["agent"]  # 018 T362: training also -> agent, all collapse to one entry
 
 
 def test_supervise_default_set_includes_agent_not_serving(monkeypatch):
