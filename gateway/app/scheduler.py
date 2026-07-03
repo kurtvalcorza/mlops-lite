@@ -421,6 +421,19 @@ def _default_check(policy: dict, monitor: dict) -> dict:
             "report_id": report.get("report_id")}
 
 
+def _idempotency_key(output_name: str, modality: str, dataset_name, dataset_version) -> str:
+    """A stable per-retrain key (019/US3, FR-192): the retrain's IDENTITY — the model, modality, and
+    resolved dataset version. A breach re-detected because a launch response was lost (or a park re-
+    launched after a store blip) resolves the SAME `latest` version, so it re-derives the SAME key and
+    the trainer dedupes it to the in-flight/recent run instead of starting a duplicate. A genuinely new
+    breach with a newly-registered dataset version derives a different key → a fresh run, as intended
+    (re-training the same model on the same data is idempotent, so deduping it is correct, not a bug)."""
+    import hashlib
+
+    raw = "|".join(str(x) for x in (output_name, modality, dataset_name, dataset_version))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> dict:
     import httpx
 
@@ -434,6 +447,12 @@ def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> di
     # version). Write-time validation now rejects a mismatch; this is the belt for policies
     # stored before it existed.
     body["output_name"] = policy["model_name"]
+    # Make the launch idempotent per retrain (019/US3, FR-192): a lost /train response or a
+    # post-launch store-write failure re-issues this exact request; the key lets the trainer return
+    # the existing run instead of starting a duplicate on the single GPU. Manual /train callers omit
+    # the key and keep today's no-dedup behavior.
+    body["idempotency_key"] = _idempotency_key(policy["model_name"], policy["modality"],
+                                               dataset_name, dataset_version)
     with httpx.Client(timeout=15) as client:
         r = client.post(f"{trainer_url()}/train", json=body)
     if r.status_code == 409:

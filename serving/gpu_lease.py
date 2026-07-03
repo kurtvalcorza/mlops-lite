@@ -410,13 +410,20 @@ def acquire(tenant: str, est_gb: float = 0.0, vram_budget_gb: float | None = Non
                         holder.pop("vram_start", None)
                         _replace_holder(holder)
                     return holder
-                # Same process, DIFFERENT tenant: refuse like any other live holder (018 US2).
-                # Pre-018 each daemon process carried exactly one tenant identity, so this branch
-                # "couldn't happen" and silently replaced the claim. The host agent is ONE process
-                # hosting several tenant identities via the interop shim — a silent replace here
-                # would evict tenant A's claim while its child still owns VRAM (co-residency with
-                # no error). Refusing is correct in both worlds.
-                raise LeaseHeld(holder)
+                # Same process, DIFFERENT tenant. The host agent is ONE process hosting several
+                # tenant identities via the interop shim. If our own model is genuinely still
+                # resident — a LIVE recorded VRAM child — refuse, else loading tenant B would
+                # co-reside with the resident tenant A (co-residency with no error, Principle II).
+                vram_pid = holder.get("vram_pid")
+                if vram_pid is not None and _alive(vram_pid, holder.get("vram_start")):
+                    raise LeaseHeld(holder)
+                # No live VRAM child: this is our OWN stale claim — e.g. a release that was dropped
+                # or failed after the model already unloaded (admission.release swallows a failed
+                # lease.release). Refusing here would wedge every OTHER tenant behind a live-PID
+                # record until the agent restarts (019/US2, FR-190). Self-heal our own record and
+                # fall through to a fresh claim; a DIFFERENT live PID is still refused by the
+                # _holder_live branch below.
+                _unlink_quiet()
             elif _holder_live(holder):
                 raise LeaseHeld(holder)
             else:

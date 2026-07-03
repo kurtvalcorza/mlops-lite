@@ -2,9 +2,11 @@
 
 **Input**: Design documents from `specs/019-review-remediation-018/` (spec.md, plan.md).
 
-> **Status (2026-07-03):** Draft — remediation of ten verified findings from the high-effort review of the
-> 018 fold-in. Not yet implemented. IDs continue the shared space (FR-188..197, SC-117..126, T382..T400).
-> Each fix is TDD: write the failing regression test first (it MUST fail on current `HEAD`), then the fix.
+> **Status (2026-07-03):** P1 (US1–US4, T382–T392) **BUILT** with regression tests — the four CONFIRMED
+> live correctness bugs are fixed. P2/P3 (US5–US9, T393–T400) remain. IDs continue the shared space
+> (FR-188..197, SC-117..126, T382..T400). Each fix is TDD: the regression test fails on the pre-fix code
+> and passes after. Offline suites (`test_agent_journal`, `test_lockfile_interop`, `test_swap_orchestration`
+> core, `test_train_idempotency`) are green; the prometheus/httpx-backed suites run in CI.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -18,14 +20,14 @@
 **Goal**: A torn-tail crash never loses a durably-appended transition (FR-188/189). **Test**: torn file →
 append → replay loses zero records; a failed append never advances in-memory state.
 
-- [ ] **T382** [P] [US1] `tests/test_agent_journal.py` — add cases: (a) write record A, truncate off its
+- [x] **T382** [P] [US1] `tests/test_agent_journal.py` — add cases: (a) write record A, truncate off its
   trailing newline, `_append` record B, then `_replay` → **both** A and B are recovered as separate lines;
   (b) a `_append` whose `f.write`/fsync raises leaves `get()`/`active_count()` reporting the *pre*-transition
   state (memory does not lead the log). Both MUST fail on current `HEAD`.
-- [ ] **T383** [US1] `hostagent/journal.py` `_append`: before writing, seek to EOF and repair a torn tail —
+- [x] **T383** [US1] `hostagent/journal.py` `_append`: before writing, seek to EOF and repair a torn tail —
   if the file is non-empty and does not end in `\n`, truncate the partial line (or write a leading `\n`) so
   every record occupies its own parseable line; fsync the containing directory on first file create.
-- [ ] **T384** [US1] `hostagent/journal.py` `transition()`/`submit()`: perform the durable append *before*
+- [x] **T384** [US1] `hostagent/journal.py` `transition()`/`submit()`: perform the durable append *before*
   mutating the in-memory record (or roll the mutation back if the append raises) so memory never leads the
   durable log; propagate the failure to the caller.
 
@@ -38,13 +40,13 @@ append → replay loses zero records; a failed append never advances in-memory s
 **Goal**: A dropped/failed release never permanently wedges other tenants (FR-190). **Test**: stale
 ours-wrong-tenant record → next different-tenant acquire self-heals; a different live PID is still refused.
 
-- [ ] **T385** [P] [US2] `tests/test_lockfile_interop.py` (or `tests/test_state_dir.py`) — write a lockfile
+- [x] **T385** [P] [US2] `tests/test_lockfile_interop.py` (or `tests/test_state_dir.py`) — write a lockfile
   record owned by the current live PID for tenant `llm-serving`, then `acquire("vision")` → succeeds by
   reclaiming our own record; a record owned by a *different* live PID still raises `LeaseHeld`. First case
   MUST fail on current `HEAD`.
-- [ ] **T386** [US2] `serving/gpu_lease.py` `acquire()`: in the ours-but-different-tenant branch, reclaim
+- [x] **T386** [US2] `serving/gpu_lease.py` `acquire()`: in the ours-but-different-tenant branch, reclaim
   (self-heal) the same-owner record instead of `raise LeaseHeld`; leave the different-owner refusal intact.
-- [ ] **T387** [P] [US2] `hostagent/admission.py` `release()`: do not silently swallow a failed
+- [x] **T387** [P] [US2] `hostagent/admission.py` `release()`: do not silently swallow a failed
   `lease.release()` — log it (and/or reconcile on the next acquire) so a skipped release is observable.
 
 **Checkpoint**: SC-118 green — no restart-only wedge; cross-process exclusion preserved.
@@ -56,10 +58,10 @@ ours-wrong-tenant record → next different-tenant acquire self-heals; a differe
 **Goal**: A non-2xx target refuses the swap before eviction (FR-191). **Test**: 503 target → resident model
 untouched; 200 target still swaps.
 
-- [ ] **T388** [P] [US3] `tests/test_swap_orchestration.py` — stub the target probe endpoint to return 503;
+- [x] **T388** [P] [US3] `tests/test_swap_orchestration.py` — stub the target probe endpoint to return 503;
   assert `preempt_if_needed` refuses (no `unload_holder` call, resident holder still resident); a 200 target
   still swaps. 503 case MUST fail on current `HEAD`.
-- [ ] **T389** [US3] `gateway/app/swap.py` `_default_target_probe`: return reachable only on a serve-ready
+- [x] **T389** [US3] `gateway/app/swap.py` `_default_target_probe`: return reachable only on a serve-ready
   status (2xx / explicit readiness), not on any HTTP response; a non-2xx refuses the swap and the refusal is
   distinguishable from "holder busy / not preemptable".
 
@@ -72,18 +74,27 @@ untouched; 200 target still swaps.
 **Goal**: Exactly one training run per breach under partial failure (FR-192). **Test**: lost launch response
 and double store-write failure each launch exactly one run; a genuinely-failed launch still retries.
 
-- [ ] **T390** [P] [US4] `tests/test_policy_scheduler.py` — (a) `/train` POST raises *after* the run is
+- [x] **T390** [P] [US4] `tests/test_policy_scheduler.py` — (a) `/train` POST raises *after* the run is
   accepted → next due check does **not** dispatch a second run; (b) both `clear_pending` and the `landed`
   `save_pending` fail → next tick does **not** re-launch; (c) a launch that never created a run **is**
   retried. (a)/(b) MUST fail on current `HEAD`.
-- [ ] **T391** [US4] `gateway/app/scheduler.py`: attach a stable per-breach run/idempotency key to
+- [x] **T391** [US4] `gateway/app/scheduler.py`: attach a stable per-breach run/idempotency key to
   `_default_launch`'s `/train` body, and mark the park **launched before** issuing the request so a lost
   response is reconciled as launched (not failed); a launch that provably never started stays retriable.
-- [ ] **T392** [US4] `gateway/app/scheduler.py` `_retry_pending`: when both post-launch store writes fail,
+- [x] **T392** [US4] `gateway/app/scheduler.py` `_retry_pending`: when both post-launch store writes fail,
   ensure the on-disk park is not left past-due-and-un-landed (persist "launched" durably, or dedupe by run
   key on the next tick).
 
 **Checkpoint**: SC-120 green — no duplicate GPU training runs.
+
+> **Realized as** a stable per-retrain **idempotency key** (`scheduler._idempotency_key`, a hash of
+> model+modality+dataset+resolved-version) added to the `/train` body, which the trainer dedupes
+> (`trainer._idempotent_hit` + `_run_keys`, gated by `_active`): a re-issued identical launch (lost
+> response, or a park retry after a store blip) returns the existing run instead of starting a second on
+> the single GPU — covering both failure modes at their shared root (no trainer-honored key) rather than
+> patching each store-write race. Tests: `tests/test_train_idempotency.py` (the dedup decision) and
+> `tests/test_policy_scheduler.py::test_idempotency_key_is_stable_per_retrain_identity` (a stable key).
+> Manual `/train` callers omit the key → today's behavior unchanged.
 
 ---
 

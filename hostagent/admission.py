@@ -15,10 +15,13 @@ Migration interop (FR-166): while any legacy daemon remains, every agent claim a
 legacy file lease (`serving/gpu_lease.py`) under the tenant's legacy identity, so an agent
 tenant and a legacy tenant can never co-reside. The shim (`lease=` seam) is deleted at T364.
 """
+import logging
 import threading
 import time
 
 from platformlib.topology import Tenant
+
+_log = logging.getLogger("hostagent.admission")
 
 #: Agent tenant id → legacy lockfile identity (the llama supervisor still claims "llm-serving").
 LEGACY_TENANT = {Tenant.LLM: Tenant.LLM_LEGACY, Tenant.ASR: Tenant.ASR,
@@ -204,4 +207,10 @@ class Admission:
                     try:
                         self._lease.release(LEGACY_TENANT.get(tenant, tenant))
                     except Exception:
-                        pass
+                        # Never fail the in-process release over the interop shim — but do NOT
+                        # swallow it silently: a dropped lease release leaves a stale lockfile
+                        # record that the lease's same-owner self-heal (019/US2) must reconcile on
+                        # the next acquire. Log it so the skipped release is observable, not a
+                        # silent wedge (019/US2, FR-190).
+                        _log.warning("legacy lease release for %s failed; the lockfile record will "
+                                     "be self-healed on the next acquire", tenant, exc_info=True)

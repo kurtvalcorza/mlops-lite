@@ -242,9 +242,14 @@ async def _default_batch_active():
 
 
 async def _default_target_probe(target_label: str) -> bool:
-    """Whether the swap *target* daemon is reachable (so we don't evict the holder just to 503). Any HTTP
-    response means the daemon is up; only a transport error (process down/unreachable) returns False. An
-    unmapped target isn't blocked (best-effort — the forward will surface any error)."""
+    """Whether the swap *target* daemon is **serve-ready** (so we don't evict the holder just to 503).
+
+    Only a success status (<400) counts as ready — the health endpoints (`/health`, `/healthz`) return 200
+    when the daemon is up and can load on demand, and a non-2xx (e.g. a 503 that is up-but-the-model-failed-
+    to-load, or a 404 misconfig) means the target could NOT serve the request we are about to evict the
+    holder for. Treating any HTTP response as "up" (019/US3, FR-191) defeats the guard: it would evict the
+    only working serving model for a target that then 503s anyway — an evict-then-fail outage. A transport
+    error (process down/unreachable) also returns False. An unmapped target isn't blocked (best-effort)."""
     url = TARGET_HEALTH_URLS.get(target_label)
     if not url:
         return True
@@ -252,8 +257,8 @@ async def _default_target_probe(target_label: str) -> bool:
 
     try:
         async with httpx.AsyncClient(timeout=3) as client:
-            await client.get(url)
-        return True
+            r = await client.get(url)
+        return r.status_code < 400
     except Exception:
         return False
 

@@ -135,7 +135,9 @@ Per fold-in (T358–T361), the recipe SC-114 proved: one adapter module in `host
 
 ## 5. House conventions
 
-- FR/SC/T numbering continues the shared space (next: FR-187, SC-116, T381).
+- FR/SC/T numbering continues the shared space (next: FR-198, SC-127, T401). 019
+  (review-remediation) used FR-188..197 / SC-117..126 / T382..400; FR-187 / SC-116 / T381 were
+  left unused (a harmless one-each gap — nothing references them).
 - Every fix ships with a regression test whose comment names the finding's source round.
 - Offline-testability: injectable seams (`store=`, `check_fn=`, `read_fn=`, `_s3()`…), FakeS3
   in `tests/_quality.py`, importlib standalone loading (keep `gateway/app/swap.py` and
