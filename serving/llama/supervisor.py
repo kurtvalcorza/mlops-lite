@@ -82,6 +82,14 @@ def _ensure_loaded() -> float:
     global _proc, _last_load_ms
     if _resident() and _server_ready():
         return 0.0  # already loaded → we already hold the lease; no re-acquire
+    # Resident but NOT ready (a stuck/unresponsive child) → reap it BEFORE relaunching (018 US1,
+    # FR-167 — parity with the whisper supervisor, which gained this in 016's review while this
+    # copy didn't: the duplication drift the 2026-07 architecture review flagged, §4.2). Without
+    # the reap, a second Popen would bind the same fixed LLAMA_PORT against the orphaned child →
+    # EADDRINUSE → startup failure → _unload() releases the lease while the orphan still occupies
+    # VRAM + the port, breaking the single-tenant invariant and looping every retry into a 507.
+    if _resident():
+        _unload()  # kill the stuck child + release the lease; we re-acquire fresh below
     try:
         gpu_lease.acquire(LEASE_TENANT, est_gb=_estimate_vram_gb(), vram_budget_gb=VRAM_GB)
     except gpu_lease.LeaseHeld as e:
@@ -362,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    gpu_lease.verify_shared_state_dir("llama-supervisor")  # 018/FR-166: fail loud on divergence
     print(f"supervisor :{SUPERVISOR_PORT} | model={os.path.basename(MODEL)} "
           f"| est_vram={_estimate_vram_gb():.1f}GB budget={VRAM_GB:.0f}GB fits={_fits()} "
           f"| idle_timeout={IDLE_TIMEOUT}s", flush=True)

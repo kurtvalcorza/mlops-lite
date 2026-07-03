@@ -11,10 +11,10 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
+from ..settings import EMBED_URL
 
 router = APIRouter()
 
-EMBED_URL = os.getenv("EMBED_URL", "http://host.docker.internal:8093")
 EMBED_REQUESTS = Counter("gateway_embed_total", "Embedding requests", ["status"])
 
 

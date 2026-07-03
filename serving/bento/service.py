@@ -40,6 +40,10 @@ VRAM_GB = float(os.getenv("VRAM_GB", "12"))              # static-budget fallbac
 VISION_EST_GB = float(os.getenv("VISION_EST_GB", "1.0"))  # MobileNet + CUDA context (tiny, but non-zero)
 # One GPU tenant in VRAM (Principle II): use the GPU when present, else CPU (CPU is lease-exempt).
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda":
+    # 018/FR-166: a lease participant must observe the same coordination state as its peers —
+    # fail loud at startup on divergence rather than co-reside on the GPU later.
+    gpu_lease.verify_shared_state_dir("bento-vision")
 
 _preprocess = transforms.Compose([
     transforms.Resize(256),

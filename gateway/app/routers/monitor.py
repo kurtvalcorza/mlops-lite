@@ -5,20 +5,21 @@ threshold and a `retrain` spec is supplied, it launches a fine-tune run on the t
 drift -> retrain, the feedback loop (FR-010/FR-011). `GET /monitor` returns recent reports.
 Drift compute is blocking (S3 + pure-Python PSI) → sync handlers run in FastAPI's threadpool.
 """
-import os
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from .. import monitoring, quality
+from platformlib.topology import TRAINABLE_MODALITIES
+
+from .. import monitoring, policies, quality
+from ..settings import TRAINER_URL
 
 router = APIRouter()
 
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
 RETRAINS = Counter("gateway_retrain_triggers_total", "Drift-triggered retrains", ["result"])
 # 013 — distinguish WHICH breach signal fired a retrain (input-PSI vs output-quality), keeping each
 # independently observable (FR-126); the original RETRAINS counter is left unchanged.
@@ -32,11 +33,23 @@ class DatasetRef(BaseModel):
 
 
 class RetrainSpec(BaseModel):
+    """018 US3 (T369, FR-181 — closes review §4.1): the trigger can retrain ANY trainable
+    modality (pre-018 the absent field made every drift-triggered retrain an LLM run), and
+    `dataset_version: "latest"` resolves to the newest registered version at launch time so the
+    retrain consumes the drifted data, not a pinned snapshot."""
     dataset_name: str
-    dataset_version: str
+    dataset_version: str                   # a pinned version, or "latest"
     output_name: str
+    modality: str = "llm"                  # any TRAINABLE_MODALITIES member (422 otherwise)
     steps: int = 10
     lora_r: int = 8
+
+    @field_validator("modality")
+    @classmethod
+    def _known_modality(cls, v):
+        if v not in TRAINABLE_MODALITIES:
+            raise ValueError(f"modality must be one of {TRAINABLE_MODALITIES}")
+        return v
 
 
 class DriftCheck(BaseModel):
@@ -47,9 +60,13 @@ class DriftCheck(BaseModel):
 
 
 def _launch_retrain(spec: RetrainSpec) -> dict:
-    """Fire a fine-tune run on the training daemon (the drift->retrain trigger)."""
+    """Fire a fine-tune run on the training daemon (the drift->retrain trigger). `latest` is
+    resolved HERE, at launch time (FR-181)."""
+    body = spec.model_dump()
+    body["dataset_version"] = policies.resolve_dataset_version(
+        spec.dataset_name, spec.dataset_version)
     with httpx.Client(timeout=15) as client:
-        r = client.post(f"{TRAINER_URL}/train", json=spec.model_dump())
+        r = client.post(f"{TRAINER_URL}/train", json=body)
     if r.status_code not in (200, 202):
         raise RuntimeError(f"trainer returned {r.status_code}: {r.text[:200]}")
     return r.json()
@@ -69,17 +86,27 @@ async def check(body: DriftCheck):
 
     retrain = None
     if report["dataset_drift"] and body.retrain is not None:
-        try:
-            retrain = await run_in_threadpool(_launch_retrain, body.retrain)
-            RETRAINS.labels(result="launched").inc()
-            RETRAIN_SIGNAL.labels(signal="psi", result="launched").inc()
-            # 013: the input-PSI breach is the *leading* signal — its fire decision is unchanged, but it
-            # starts the shared cooldown so the (confirming) quality trigger won't immediately re-fire.
-            quality.note_retrain()
-        except Exception as e:
-            RETRAINS.labels(result="failed").inc()
-            RETRAIN_SIGNAL.labels(signal="psi", result="failed").inc()
-            retrain = {"error": str(e)}  # surface, but the drift report still stands
+        # 018 US1 (FR-163 — review §4.1): reserve the shared cooldown BEFORE launching, exactly like the
+        # quality path below. The pre-018 "asymmetric by design" note-after-success left a window where
+        # two concurrent checks (PSI+PSI or PSI+quality) could both launch; reserve-first closes it —
+        # at most one retrain across both signals; a failed launch releases the reservation so the next
+        # genuine breach can retry.
+        token = quality.try_reserve_retrain()
+        if not token:
+            RETRAIN_SIGNAL.labels(signal="psi", result="cooldown").inc()  # observable, not silent
+            retrain = {"skipped": "cooldown"}  # OR+cooldown debounce — a retrain fired too recently
+        else:
+            try:
+                retrain = await run_in_threadpool(_launch_retrain, body.retrain)
+                RETRAINS.labels(result="launched").inc()
+                RETRAIN_SIGNAL.labels(signal="psi", result="launched").inc()
+            except Exception as e:
+                # a trainer-down must not consume the cooldown; token-guarded so this can only
+                # undo OUR reservation, never a newer stamp (internal review, 018)
+                quality.release_retrain(token)
+                RETRAINS.labels(result="failed").inc()
+                RETRAIN_SIGNAL.labels(signal="psi", result="failed").inc()
+                retrain = {"error": str(e)}  # surface, but the drift report still stands
     return {"report": report, "retrain": retrain}
 
 
@@ -138,10 +165,13 @@ async def quality_check(body: QualityCheck):
 
     retrain = None
     if report["breach"] and body.retrain is not None:
-        # OR + cooldown (asymmetric by design): the input-PSI breach is the *leading* signal and fires
-        # unconditionally (above); the quality breach is the *confirming* signal and debounces against a
-        # retrain from EITHER signal so the two don't storm retrains together (FR-126).
-        if not quality.try_reserve_retrain():  # atomic: reserve the cooldown before launching (no race)
+        # OR + cooldown, SYMMETRIC since 018 (FR-163): both breach signals — input-PSI above and
+        # this output-quality one — reserve the shared cooldown atomically before launching, so at
+        # most one retrain fires across the two and neither can double-fire in a race (FR-126).
+        # (Pre-018 the PSI side fired unconditionally; this comment used to say so — stale.)
+        token = quality.try_reserve_retrain()  # atomic: reserve the cooldown before launching
+        if not token:
+            RETRAIN_SIGNAL.labels(signal="quality", result="cooldown").inc()
             retrain = {"skipped": "cooldown"}  # OR+cooldown debounce — a retrain fired too recently
         else:
             # the cooldown is already reserved (try_reserve_retrain) — launching now, fail-soft.
@@ -150,9 +180,9 @@ async def quality_check(body: QualityCheck):
                 RETRAINS.labels(result="launched").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="launched").inc()
             except Exception as e:  # fail-soft — the quality report still stands (FR-125)
-                # release the reservation: a trainer-down must NOT consume the cooldown (so the next
-                # genuine breach can retry) — symmetric with the PSI path's note-after-success.
-                quality.release_retrain()
+                # release the reservation: a trainer-down must NOT consume the cooldown (so the
+                # next genuine breach can retry); token-guarded — only OUR reservation is undone.
+                quality.release_retrain(token)
                 RETRAINS.labels(result="failed").inc()
                 RETRAIN_SIGNAL.labels(signal="quality", result="failed").inc()
                 retrain = {"error": str(e)}

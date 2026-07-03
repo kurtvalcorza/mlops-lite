@@ -8,6 +8,8 @@ Phase 8: GPU/daemon metrics proxied into /metrics; OpenAPI exported for contract
 002 hardening (US1): the lifecycle routers below require an API key (FR-016); `/healthz`,
 `/metrics`, and `/` stay open for liveness and Prometheus.
 """
+import os
+
 from fastapi import Depends, FastAPI
 from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
@@ -21,6 +23,7 @@ from .routers import (
     infer,
     models,
     monitor,
+    policies as policies_router,
     runs,
     stream,
     tabular,
@@ -45,6 +48,7 @@ app.include_router(transcribe.router, tags=["asr"], dependencies=_protected)  # 
 app.include_router(tabular.router, tags=["tabular"], dependencies=_protected)  # 009 US4 (CPU, off-lease)
 app.include_router(validation.router, tags=["validation"], dependencies=_protected)  # 014 US2
 app.include_router(batch.router, tags=["batch"], dependencies=_protected)  # 014 US1 (offline batch)
+app.include_router(policies_router.router, tags=["policies"], dependencies=_protected)  # 018 US3
 
 REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"])
 
@@ -101,3 +105,30 @@ def root():
         "tracing": tracing.enabled(),
         "trace_capture": tracing.capture_io(),
     }
+
+
+# --- 018 US3 (FR-180): the policy scheduler — the loop runs without an external trigger -------------
+# A lifespan asyncio task (research R5). Fail-open by construction: a tick with no policies is a
+# no-op, per-policy errors are contained inside tick(), and the whole loop is disable-able.
+_scheduler_stop = None
+_scheduler_task = None  # strong reference — a bare ensure_future task can be GC'd mid-flight
+# (Codex round 2, 018: the same weak-reference foot-gun background.spawn() was added to close).
+
+
+@app.on_event("startup")
+async def _start_policy_scheduler():
+    global _scheduler_stop, _scheduler_task
+    if os.getenv("POLICY_SCHEDULER_ENABLED", "1").lower() in ("0", "false", "no"):
+        return
+    import asyncio
+
+    from . import scheduler as _scheduler
+
+    _scheduler_stop = asyncio.Event()
+    _scheduler_task = asyncio.ensure_future(_scheduler.PolicyScheduler().run(_scheduler_stop))
+
+
+@app.on_event("shutdown")
+async def _stop_policy_scheduler():
+    if _scheduler_stop is not None:
+        _scheduler_stop.set()

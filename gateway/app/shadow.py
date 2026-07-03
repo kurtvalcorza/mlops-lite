@@ -86,7 +86,7 @@ def build_verdict(name, champion_version, challenger_version, modality, pairs, c
     else:
         winner = "champion"
     return {
-        "status": "completed", "modality": quality.normalize_modality(modality),
+        "status": "completed", "name": name, "modality": quality.normalize_modality(modality),
         "metric": metric_name, "direction": direction, "n_pairs": len(pairs),
         "champion": {"version": str(champion_version), "value": champ_val},
         "challenger": {"version": str(challenger_version), "value": chall_val},

@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import platform_health, quality, registry, serving, swap, tracing
+from .. import background, platform_health, quality, registry, serving, swap, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -156,10 +156,8 @@ async def infer_stream(req: StreamRequest):
                     # REST inputs before their labels arrive and starving shadow-replay. Capture only
                     # where the prediction is logged (the /infer path).
 
-                try:
-                    asyncio.ensure_future(_log())
-                except Exception:  # never let logging setup affect the stream
-                    pass
+                # 018/FR-164: retained (not detached) — a GC'd task would silently drop the log.
+                background.spawn(_log(), kind="stream-log")
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 

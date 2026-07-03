@@ -11,12 +11,13 @@ in-flight supervisor call); it no longer *enforces* Principle II. `gpu_state()` 
 holder via the supervisor `/health` for the UI status line (FR-068).
 """
 import asyncio
-import os
 
 import httpx
 
-SERVING_URL = os.getenv("SERVING_URL", "http://host.docker.internal:8090")
-SERVING_MODEL = os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
+from . import settings
+
+SERVING_URL = settings.SERVING_URL
+SERVING_MODEL = settings.SERVING_MODEL
 
 # Shared-lockfile tenant id -> the label the UI status line shows (008 FR-068). The supervisor reads
 # the single GPU lease (serving/gpu_lease.py) and reports its current holder in /health, so this one

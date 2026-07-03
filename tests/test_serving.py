@@ -49,5 +49,58 @@ def test_serving(require_serving, require_key):
     assert main() == 0
 
 
+# --- 018 US1 (FR-167): llama reaps a stuck child before relaunching (offline) ----------------------
+#
+# Regression for the duplication drift the 2026-07 architecture review flagged (§4.2): whisper
+# gained reap-before-relaunch in 016's review; the llama copy didn't. A resident-but-unready child
+# must be _unload()ed BEFORE a fresh lease acquire + Popen — otherwise the new child hits the
+# orphan's fixed port (EADDRINUSE) and the failure path releases the lease the orphan still uses.
+
+import importlib.util as _ilu
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_llama_supervisor():
+    path = os.path.join(_REPO, "serving", "llama", "supervisor.py")
+    spec = _ilu.spec_from_file_location("llama_supervisor_reap_test", path)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_llama_reaps_stuck_child_before_relaunch():
+    mod = _load_llama_supervisor()
+    state = {"resident": True}
+    events = []
+    mod._resident = lambda: state["resident"]
+    mod._server_ready = lambda: False           # resident but NOT ready — the stuck-child case
+    mod._estimate_vram_gb = lambda: 1.0         # no model file in the offline environment
+
+    def _unload():
+        events.append("unload")
+        state["resident"] = False
+
+    mod._unload = _unload
+
+    class _Stop(Exception):
+        pass
+
+    def _acquire(*a, **kw):
+        events.append("acquire")
+        raise _Stop()                           # stop the flow after the ordering is observable
+
+    orig_acquire = mod.gpu_lease.acquire        # gpu_lease is a shared real module — restore it
+    mod.gpu_lease.acquire = _acquire
+    try:
+        try:
+            mod._ensure_loaded()
+        except _Stop:
+            pass
+        assert events == ["unload", "acquire"], events  # reap FIRST, then a fresh acquire
+    finally:
+        mod.gpu_lease.acquire = orig_acquire
+
+
 if __name__ == "__main__":
     sys.exit(main())

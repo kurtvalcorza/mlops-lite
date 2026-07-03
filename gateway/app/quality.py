@@ -530,10 +530,12 @@ def note_retrain(now: float = None) -> None:
         _last_retrain_monotonic = time.monotonic() if now is None else now
 
 
-def try_reserve_retrain(now: float = None, cooldown_sec: float = None) -> bool:
-    """**Atomically** check-and-start the cooldown: return True (and begin the window) only if not
-    already cooling down, else False. The quality trigger reserves before launching so two concurrent
-    `/monitor/quality/check` calls can't both pass an in_cooldown() check and double-fire (Codex P2)."""
+def try_reserve_retrain(now: float = None, cooldown_sec: float = None):
+    """**Atomically** check-and-start the cooldown: return a truthy TOKEN (the stamp — and begin
+    the window) only if not already cooling down, else False. The quality trigger reserves before
+    launching so two concurrent `/monitor/quality/check` calls can't both pass an in_cooldown()
+    check and double-fire (Codex P2). Pass the token back to release_retrain() so a failed
+    launch can only undo its OWN reservation."""
     cd = RETRAIN_COOLDOWN_SEC if cooldown_sec is None else cooldown_sec
     t = time.monotonic() if now is None else now
     global _last_retrain_monotonic
@@ -541,16 +543,20 @@ def try_reserve_retrain(now: float = None, cooldown_sec: float = None) -> bool:
         if _last_retrain_monotonic > 0 and (t - _last_retrain_monotonic) < cd:
             return False
         _last_retrain_monotonic = t
-        return True
+        return t
 
 
-def release_retrain() -> None:
+def release_retrain(token: float = None) -> None:
     """Undo a reservation when the launch it guarded FAILED — so a trainer-down doesn't consume the
-    cooldown (the next genuine breach can retry). Symmetric with the PSI path, which only starts the
-    cooldown on a successful launch. Safe because the window was free when we reserved."""
+    cooldown (the next genuine breach can retry). Token-guarded (internal review, 018): with the
+    token from try_reserve_retrain, the release is a no-op when a NEWER stamp landed in between
+    (e.g. the policy scheduler's parked-retrain keep-alive refresh) — a failed launch must not
+    clear someone else's live window. `None` keeps the unconditional pre-018 behavior for callers
+    that hold no token (the scheduler's park paths, which own the stamp by construction)."""
     global _last_retrain_monotonic
     with _cooldown_lock:
-        _last_retrain_monotonic = 0.0
+        if token is None or _last_retrain_monotonic == token:
+            _last_retrain_monotonic = 0.0
 
 
 def reset_cooldown() -> None:

@@ -6,7 +6,6 @@ contention: the ASR supervisor returns 409 when another GPU tenant holds the lea
 VRAM can't admit the model — both surfaced here with their hints. Audio is carried as base64 in JSON
 (mirroring /vision/classify); up_all.ps1 injects the daemon IP via ASR_URL.
 """
-import asyncio
 import base64
 import os
 import uuid
@@ -17,11 +16,11 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import quality, registry, swap
+from .. import background, quality, registry, swap
+from ..settings import ASR_URL
 
 router = APIRouter()
 
-ASR_URL = os.getenv("ASR_URL", "http://host.docker.internal:8095")
 ASR_REQUESTS = Counter("gateway_transcribe_total", "Transcription requests", ["status"])
 ASR_SERVING_MODEL = os.getenv("ASR_SERVING_MODEL")  # prefer this name when several asr models are promoted
 
@@ -90,10 +89,8 @@ async def transcribe(req: TranscribeRequest):
         quality.log_prediction(asr_name, asr_version, "asr", req.filename, text, prediction_id=pid)
         quality.capture_input(pid, "asr", req.audio_b64, options={"language": req.language})
 
-    try:
-        asyncio.ensure_future(_log())
-    except Exception:  # never let logging setup affect the served response (fail-open)
-        pass
+    # 018/FR-164: retained (not detached) — a GC'd task would silently drop the prediction log.
+    background.spawn(_log(), kind="transcribe-log")
     if isinstance(data, dict):
         data = {**data, "prediction_id": pid}
     return data

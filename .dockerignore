@@ -1,0 +1,15 @@
+# The gateway image builds from the REPO ROOT (so it can COPY platformlib — see
+# gateway/Dockerfile). Send Docker only what that build needs; everything else (models, datasets,
+# node_modules, specs, .git) stays out of the build context.
+#
+# Codex round 6 (018): with last-match-wins rules, `!gateway` alone re-includes only the
+# directory ENTRY on some builders — descendants like gateway/requirements.txt can still match
+# the leading `*` and the first COPY fails. The `/**` forms re-include the contents explicitly,
+# which is correct on both the classic builder and BuildKit.
+*
+!gateway
+!gateway/**
+!platformlib
+!platformlib/**
+**/__pycache__
+**/*.pyc

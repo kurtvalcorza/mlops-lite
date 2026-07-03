@@ -50,7 +50,11 @@ def main() -> int:
     ap.add_argument("--cur", required=True, help="current dataset as name@version")
     ap.add_argument("--threshold", type=float, default=0.25)
     ap.add_argument("--retrain", default=None,
-                    help="on breach, launch training: dataset@version:output_name")
+                    help="on breach, launch training: dataset@version:output_name "
+                         "(version may be 'latest' — resolved at launch, 018/FR-181)")
+    ap.add_argument("--retrain-modality", default="llm",
+                    help="which fine-tune flow the breach launches: llm|vision|embeddings|asr "
+                         "(018 US3 T369 — pre-018 every triggered retrain was an LLM run)")
     ap.add_argument("--gateway", default=os.getenv("GATEWAY_URL", "http://localhost:8080"))
     ap.add_argument("--api-key", default=None,
                     help="gateway API key (else GATEWAY_API_KEY / GATEWAY_API_KEYS_FILE)")
@@ -62,7 +66,8 @@ def main() -> int:
         ds, _, out = args.retrain.partition(":")
         rd = _split(ds)
         payload["retrain"] = {"dataset_name": rd["name"], "dataset_version": rd["version"],
-                              "output_name": out or "retrained-lora"}
+                              "output_name": out or "retrained-lora",
+                              "modality": args.retrain_modality}
 
     headers = {"Content-Type": "application/json"}
     key = resolve_api_key(args.api_key)

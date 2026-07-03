@@ -14,9 +14,17 @@ way (at run time) and assume the gateway was (re)started with the matching key.
 import json
 import os
 import shutil
+import tempfile
 import urllib.request
 
 import pytest
+
+# 018: serving/gpu_lease.py honors a live holder at the FIXED pre-018 /tmp lease path (the
+# mixed-version upgrade guard), captured at module import. Point it at a per-session temp file
+# so a real /tmp/mlops-lite-gpu.lease on the box (or a parallel run) never bleeds into tests.
+os.environ.setdefault(
+    "MLOPS_LEGACY_LEASE_PATH",
+    os.path.join(tempfile.mkdtemp(prefix="mlops-legacy-lease-"), "legacy.lease"))
 
 GATEWAY_PORT = os.getenv("GATEWAY_PORT", "8080")
 UI_PORT = os.getenv("UI_PORT", "3000")

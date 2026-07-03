@@ -6,13 +6,14 @@ cross-distro scrape, the gateway (which already knows the daemons' injected URLs
 health on each /metrics scrape and re-exports the GPU/state signals as its own gauges. Prometheus
 then gets everything from the one gateway target it already scrapes.
 """
-import os
 
 import httpx
 from prometheus_client import Gauge
 
-SERVING_URL = os.getenv("SERVING_URL", "http://host.docker.internal:8090")
-TRAINER_URL = os.getenv("TRAINER_URL", "http://host.docker.internal:8091")
+from . import settings
+
+SERVING_URL = settings.SERVING_URL
+TRAINER_URL = settings.TRAINER_URL
 
 GPU_FREE = Gauge("mlops_gpu_free_mib", "Free GPU memory (MiB) reported by the training daemon")
 SERVING_RESIDENT = Gauge("mlops_serving_resident", "1 if a model is resident in the serving GPU")

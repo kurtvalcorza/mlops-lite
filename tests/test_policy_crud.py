@@ -1,0 +1,294 @@
+"""018 US3 — policy declaration validation + CRUD store (T366/T367, FR-179).
+
+Offline, GPU-free: the contract validation (structural, write-time, structured errors — the spec
+edge case "policy misconfiguration is rejected at declaration time, never discovered at breach
+time") plus the MinIO-backed store with a fake S3.
+"""
+import json
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (REPO, os.path.join(REPO, "gateway")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from platformlib.contracts import ContractError, ModelPolicy  # noqa: E402
+
+
+def _doc(**over):
+    doc = {
+        "model_name": "vision-mobilenet",
+        "modality": "vision",
+        "monitors": [{"kind": "quality", "window_n": 50, "drop_pct": 0.1}],
+        "check_interval_s": 900,
+        "on_breach": {"action": "retrain", "dataset": "latest",
+                      "params": {"dataset_name": "shapes-live"}},
+        "promotion_mode": "suggest",
+        "enabled": True,
+        "updated_at": 1.0,
+        "updated_by": "operator",
+    }
+    doc.update(over)
+    return doc
+
+
+def _errors(doc):
+    try:
+        ModelPolicy.from_json(doc)
+    except ContractError as e:
+        return {err["field"] for err in json.loads(str(e))["errors"]}
+    return set()
+
+
+def test_valid_policy_passes():
+    assert _errors(_doc()) == set()
+
+
+def test_unknown_modality_rejected():
+    assert "modality" in _errors(_doc(modality="tabular"))   # no fine-tune flow → rejected
+    assert "modality" in _errors(_doc(modality="banana"))
+
+
+def test_interval_and_monitors_rejected():
+    assert "check_interval_s" in _errors(_doc(check_interval_s=0))
+    assert "check_interval_s" in _errors(_doc(check_interval_s=59))
+    assert "monitors" in _errors(_doc(monitors=[]))
+    assert "monitors[0].kind" in _errors(_doc(monitors=[{"kind": "vibes"}]))
+
+
+def test_input_drift_needs_a_complete_reference():
+    assert "monitors[0].reference" in _errors(_doc(monitors=[{"kind": "input_drift"}]))
+    # Codex review (018): a truthy-but-incomplete reference must be rejected at declaration —
+    # the scheduler indexes reference["version"], so {name} alone would error on every tick.
+    assert "monitors[0].reference" in _errors(
+        _doc(monitors=[{"kind": "input_drift", "reference": {"name": "feat-baseline"}}]))
+    assert "monitors[0].reference" in _errors(
+        _doc(monitors=[{"kind": "input_drift", "reference": "feat-baseline@abc123"}]))
+    ok = _doc(monitors=[{"kind": "input_drift",
+                         "reference": {"name": "feat-baseline", "version": "abc123"}}])
+    assert _errors(ok) == set()
+
+
+def test_breach_action_needs_dataset_name():
+    assert "on_breach.params.dataset_name" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest", "params": {}}))
+    assert "on_breach.dataset" in _errors(
+        _doc(on_breach={"action": "retrain", "params": {"dataset_name": "d"}}))
+    assert "on_breach.action" in _errors(_doc(on_breach={"action": "email-someone"}))
+
+
+def test_promotion_mode_rejected():
+    assert "promotion_mode" in _errors(_doc(promotion_mode="yolo"))
+
+
+def test_enabled_must_be_a_real_boolean():
+    # Codex round 6 (018): `enabled: "false"` stored as-is is TRUTHY in tick() — a policy the
+    # operator meant to pause would keep checking and retraining.
+    assert "enabled" in _errors(_doc(enabled="false"))
+    assert "enabled" in _errors(_doc(enabled="0"))
+    assert "enabled" in _errors(_doc(enabled=1))
+    assert _errors(_doc(enabled=False)) == set()
+    assert _errors(_doc(enabled=True)) == set()
+
+
+def test_non_object_params_is_a_structured_error_not_a_crash():
+    # Codex round 5 (018): a truthy non-object params used to AttributeError inside validate() —
+    # an unstructured 500 where FR-179 promises a structured 400.
+    assert "on_breach.params" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest", "params": "dataset"}))
+    assert "on_breach.params" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest", "params": ["dataset_name"]}))
+
+
+def test_malformed_numeric_knobs_rejected_at_write_time():
+    # Codex round 5 (018): the scheduler casts these with int()/float() at check time — a bad
+    # value would fail EVERY due tick as a check error and the policy would never evaluate.
+    assert "monitors[0].window_n" in _errors(
+        _doc(monitors=[{"kind": "quality", "window_n": "bad"}]))
+    assert "monitors[0].window_n" in _errors(
+        _doc(monitors=[{"kind": "quality", "window_n": 0}]))
+    assert "monitors[0].drop_pct" in _errors(
+        _doc(monitors=[{"kind": "quality", "drop_pct": "lots"}]))
+    assert "monitors[0].threshold" in _errors(
+        _doc(monitors=[{"kind": "input_drift",
+                        "reference": {"name": "d", "version": "1"}, "threshold": "high"}]))
+    assert "monitors[0].baseline" in _errors(
+        _doc(monitors=[{"kind": "quality", "baseline": "good"}]))
+    # parseable strings stay fine — the scheduler's int()/float() casts accept them
+    assert _errors(_doc(monitors=[{"kind": "quality", "window_n": 50,
+                                   "drop_pct": "0.2"}])) == set()
+
+
+def test_output_name_must_match_the_policy_model():
+    # Codex round 5 (018): the loop gates/promotes policy.model_name with only the returned
+    # version — a different registered name makes that pair meaningless (versions are per-model).
+    assert "on_breach.params.output_name" in _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest",
+                        "params": {"dataset_name": "d", "output_name": "some-other-model"}}))
+    assert _errors(
+        _doc(on_breach={"action": "retrain", "dataset": "latest",
+                        "params": {"dataset_name": "d",
+                                   "output_name": "vision-mobilenet"}})) == set()
+
+
+# --- the store, against a fake S3 -------------------------------------------------------------------
+
+from _quality import FakeS3  # noqa: E402 — the shared in-memory S3 fake
+
+from app import policies  # noqa: E402
+
+
+def _fake_store():
+    fake = FakeS3()
+    policies._s3 = lambda: fake
+    # FakeS3 lacks delete_object — add it so delete/clear paths work
+    fake.delete_object = lambda Bucket, Key: fake.objs.pop(Key, None)
+    return fake
+
+
+def test_put_get_list_delete_roundtrip():
+    _fake_store()
+    stored = policies.put_policy("vision-mobilenet", _doc())
+    assert stored["model_name"] == "vision-mobilenet" and stored["updated_at"] > 0
+    assert policies.get_policy("vision-mobilenet")["modality"] == "vision"
+    policies.put_policy("qa-demo", _doc(model_name="qa-demo", modality="llm",
+                                        on_breach={"action": "retrain", "dataset": "latest",
+                                                   "params": {"dataset_name": "qa-live"}}))
+    assert [p["model_name"] for p in policies.list_policies()] == ["qa-demo", "vision-mobilenet"]
+    policies.delete_policy("qa-demo")
+    assert policies.get_policy("qa-demo") is None
+    assert len(policies.list_policies()) == 1
+
+
+def test_invalid_policy_is_rejected_and_never_stored():
+    _fake_store()
+    try:
+        policies.put_policy("m", _doc(model_name="m", modality="nope"))
+    except policies.PolicyError as e:
+        assert "modality" in str(e)
+    else:
+        raise AssertionError("expected PolicyError")
+    assert policies.get_policy("m") is None                  # nothing stored (FR-179)
+
+
+def test_pending_and_status_do_not_pollute_the_policy_list():
+    _fake_store()
+    policies.put_policy("vision-mobilenet", _doc())
+    policies.save_pending({"model_name": "vision-mobilenet",
+                           "breach": {"signal": "quality", "score": 0.4, "at": 1.0},
+                           "attempts": 1, "next_attempt_at": 2.0})
+    policies.save_status("vision-mobilenet", {"last_check_at": 1.0})
+    assert len(policies.list_policies()) == 1                # sub-prefixes filtered out
+    st = policies.policy_status("vision-mobilenet")
+    assert st["pending_retrain"]["attempts"] == 1
+    policies.clear_pending("vision-mobilenet")
+    assert policies.policy_status("vision-mobilenet")["pending_retrain"] is None
+
+
+def test_transient_store_failure_raises_not_none():
+    # Codex review (018): only a confirmed 404 may read as "absent" — a store outage must raise
+    # PolicyStoreError (502), never a false 404 / a silently-vanished PendingRetrain.
+    fake = _fake_store()
+    policies.put_policy("vision-mobilenet", _doc())
+
+    class Outage(Exception):
+        pass  # no .response attribute — NOT 404-shaped
+
+    def broken_get(Bucket, Key):
+        raise Outage("connection reset")
+
+    fake.get_object = broken_get
+    for call in (lambda: policies.get_policy("vision-mobilenet"),
+                 lambda: policies.get_pending("vision-mobilenet"),
+                 lambda: policies.get_suggestion("s1")):
+        try:
+            call()
+        except policies.PolicyStoreError:
+            pass
+        else:
+            raise AssertionError("expected PolicyStoreError on a transient store failure")
+
+
+def test_transient_delete_failure_raises_not_false_success():
+    # Codex round 2 (018): a swallowed delete let DELETE /policies succeed during an outage
+    # while the policy (and its pending retrain) survived and kept scheduling.
+    fake = _fake_store()
+    policies.put_policy("vision-mobilenet", _doc())
+
+    def broken_delete(Bucket, Key):
+        raise RuntimeError("connection reset")             # not 404-shaped
+
+    fake.delete_object = broken_delete
+    try:
+        policies.delete_policy("vision-mobilenet")
+    except policies.PolicyStoreError:
+        pass
+    else:
+        raise AssertionError("expected PolicyStoreError on a transient delete failure")
+
+
+def test_latest_resolution_aborts_on_transient_manifest_failure():
+    # Codex round 2 (018): a manifest read blip must abort the launch — treating it as missing
+    # could silently resolve `latest` to an OLDER version and retrain on stale data.
+    _fake_store()
+    from app import datasets as ds
+
+    orig_list, orig_s3 = ds.list_datasets, ds._s3
+    ds.list_datasets = lambda: [{"name": "d", "versions": [{"version": "v1"},
+                                                           {"version": "v2"}]}]
+
+    class BrokenS3:
+        def get_object(self, Bucket, Key):
+            raise RuntimeError("connection reset")         # not 404-shaped
+
+    ds._s3 = lambda: BrokenS3()
+    try:
+        policies.resolve_dataset_version("d", "latest")
+    except policies.PolicyStoreError as e:
+        assert "manifest" in str(e)
+    else:
+        raise AssertionError("expected PolicyStoreError on a transient manifest failure")
+    finally:
+        ds.list_datasets, ds._s3 = orig_list, orig_s3
+
+
+def test_suggestion_lifecycle():
+    _fake_store()
+    rec = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},
+                                     {"winner": "challenger"})
+    assert rec["state"] == "open"
+    assert policies.list_suggestions(state="open")[0]["id"] == rec["id"]
+    done = policies.resolve_suggestion(rec["id"], "accepted")
+    assert done["state"] == "accepted" and done["resolved_at"] is not None
+    try:
+        policies.resolve_suggestion(rec["id"], "dismissed")
+    except policies.SuggestionConflict:
+        # its OWN type, not PolicyError (Codex round 4, 018): a lost accept/dismiss race is a
+        # 409 conflict at the router, never a 400 "bad request" for a well-formed click
+        pass
+    else:
+        raise AssertionError("resolving twice must be refused")
+
+
+def test_create_suggestion_is_idempotent_per_candidate():
+    # Codex round 4 (018): the scheduler clears its watch only AFTER the suggestion write lands,
+    # so a status-store blip re-runs the terminal handling next tick — the retry must return the
+    # existing record, not mint a duplicate open suggestion (or a duplicate audit row).
+    _fake_store()
+    a = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"})
+    b = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"})
+    assert b["id"] == a["id"]
+    assert len(policies.list_suggestions(state="open")) == 1
+    c = policies.create_suggestion("qa-demo", "8", {"verdict": "pass"})   # a NEW candidate is new
+    assert c["id"] != a["id"]
+    audit1 = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},
+                                        state="auto-promoted", actor="policy:qa-demo")
+    audit2 = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},
+                                        state="auto-promoted", actor="policy:qa-demo")
+    assert audit2["id"] == audit1["id"]                                   # audit rows too
+
+
+if __name__ == "__main__":
+    import pytest
+    sys.exit(pytest.main([__file__, "-q"]))

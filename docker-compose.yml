@@ -90,7 +90,13 @@ services:
       retries: 12
 
   gateway:
-    build: ./gateway
+    build:
+      # Repo root, not ./gateway (Codex round 4, 018): the image COPYs BOTH gateway/app and the
+      # shared platformlib package, so the built image runs outside this compose file too
+      # (contracts/platformlib.md — no bind-mount-only dependency). .dockerignore keeps the
+      # context small.
+      context: .
+      dockerfile: gateway/Dockerfile
     depends_on:
       mlflow:
         condition: service_started
@@ -127,9 +133,9 @@ services:
       AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
       AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
       AWS_DEFAULT_REGION: us-east-1
-      # 011 eval harness — the held-out benchmark fixtures live in the repo (the build context is
-      # ./gateway, so they aren't in the image). Bind-mount them read-only and point the harness at the
-      # mount; they're operator-extendable by design (benchmarks/README → BENCHMARKS_DIR override).
+      # 011 eval harness — the held-out benchmark fixtures are bind-mounted read-only (not baked
+      # into the image) because they're operator-extendable by design: drop a new fixture in and
+      # re-run, no rebuild (benchmarks/README → BENCHMARKS_DIR override).
       BENCHMARKS_DIR: /benchmarks
     volumes:
       - ./benchmarks:/benchmarks:ro
@@ -148,6 +154,10 @@ services:
     image: prom/prometheus:v3.5.4  # 007 US2: pin (was :latest, captured T118)
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # 018 (FR-174): direct scrape of the native host agent (:8100) — same host-gateway mapping
+      # the gateway uses to reach the native daemons.
+      - "host.docker.internal:host-gateway"
     ports:
       # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
