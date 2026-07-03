@@ -220,6 +220,17 @@ def test_multipart_to_a_json_only_engine_is_415():
         server.shutdown()
 
 
+def test_json_to_a_multipart_only_engine_is_415():
+    # symmetric (claude review, T360): a JSON POST to a multipart-only engine (vision has no
+    # `forward`) must be a clean 415, not an AttributeError -> 502
+    server, base = _serve_vision()
+    try:
+        code, _ = _req(base, "/engines/vision/classify", "POST", {"image_b64": "x"})
+        assert code == 415
+    finally:
+        server.shutdown()
+
+
 def test_unload_now_idle_payload_is_byte_compatible():
     # not resident -> exactly {"status": "idle"} (no shared-lifecycle `drained` key)
     server, base, _ = _serve(FakeLLM())

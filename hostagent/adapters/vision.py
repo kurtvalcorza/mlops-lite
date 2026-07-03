@@ -17,7 +17,6 @@ import json
 import os
 import signal
 import subprocess
-import urllib.error
 import urllib.request
 
 from hostagent.adapters._common import free_port, gpu_lease_health

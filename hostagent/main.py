@@ -87,8 +87,13 @@ def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, mult
         return 404, {"error": f"unknown engine {engine_id!r}"}
     if verb not in getattr(rt.adapter, "verbs", ()):
         return 404, {"error": f"engine {engine_id!r} has no verb {verb!r}"}
-    if multipart and not hasattr(rt.adapter, "forward_multipart"):
-        return 415, {"error": f"engine {engine_id!r} does not accept multipart"}
+    # Symmetric content-type guard (claude review, T360): a multipart POST to a JSON-only engine AND
+    # a JSON POST to a multipart-only engine (e.g. vision, which has no `forward`) both get a clean
+    # 415 rather than the latter falling through to an AttributeError → 502.
+    method = "forward_multipart" if multipart else "forward"
+    if not hasattr(rt.adapter, method):
+        kind = "multipart" if multipart else "JSON"
+        return 415, {"error": f"engine {engine_id!r} does not accept {kind} for verb {verb!r}"}
     try:
         with rt.lock:
             load_ms = rt.ensure_loaded()

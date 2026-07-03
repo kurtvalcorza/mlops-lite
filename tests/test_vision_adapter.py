@@ -81,7 +81,7 @@ def test_forward_multipart_relays_raw_body_to_classify(tmp_path, monkeypatch):
                                 "predictions": [{"label": "tabby cat", "score": 0.91}]})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    body = b'--b\r\nContent-Disposition: form-data; name="image"; filename="x.png"\r\n\r\nPNG\r\n--b--\r\n'
+    body = b'--b\r\nContent-Disposition: form-data; name="image"\r\n\r\nPNGDATA\r\n--b--\r\n'
     ctype = "multipart/form-data; boundary=b"
     out = a.forward_multipart("classify", body, ctype, load_ms=5.0)
     assert out["predictions"][0]["label"] == "tabby cat" and out["device"] == "cuda"
