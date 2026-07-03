@@ -148,12 +148,19 @@ class LlamaAdapter:
     def health(self, resident: bool) -> dict:
         """Byte-compatible with the retired supervisor's `/health` (gateway `serving.gpu_state`
         reads `ok`/`resident`/`model`/`lease_holder`). `lease_holder` + `vram_free_gb` come from the
-        GLOBAL lockfile during migration (see the module note); None once the lease retires."""
+        GLOBAL lockfile during migration (see the module note); None once the lease retires.
+
+        `ok` reflects `available()` (Codex round 7, 018): if the llama binary / model GGUF is
+        missing the engine cannot serve, so it must report NOT ok — otherwise the gateway's swap
+        target-probe (any 200 = reachable) would evict a working vision/asr holder for a
+        `preempt=true` LLM request that then fails to load. The retired supervisor always answered
+        `ok: true`; surfacing real unavailability is the correct-er answer, not a regression."""
+        ok, reason = self.available()
         holder = self._lease.current_holder() if self._lease else None
         free = self._lease.free_vram_gb() if self._lease else None
         est = self.estimate_vram() if os.path.exists(self.model) else None
-        return {
-            "ok": True,
+        payload = {
+            "ok": ok,
             "resident": resident,
             "model": self.alias,
             "vram_budget_gb": self.vram_budget_gb,
@@ -162,6 +169,9 @@ class LlamaAdapter:
             "vram_free_gb": round(free, 1) if free is not None else None,
             "lease_holder": holder.get("tenant") if holder else None,
         }
+        if not ok:
+            payload["unavailable"] = reason
+        return payload
 
     # -- helpers ---------------------------------------------------------------------------------
     def _chat_payload(self, body: dict, *, stream: bool):

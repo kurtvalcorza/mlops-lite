@@ -238,6 +238,12 @@ def make_handler(admission, journal, manager):
                     if body is None:
                         return self._send(400, {"error": "invalid JSON"})
                     result = rt.unload(drain_timeout_s=float(body.get("drain_timeout_s", 10)))
+                    # Byte-compat with the retired supervisor's /unload-now (Codex round 7, 018): it
+                    # returned exactly {"status": "idle"} for the not-resident/stale-snapshot no-op,
+                    # without the shared lifecycle's extra `drained` key. Gateway swap reads only
+                    # `status`, but this route is the advertised byte-compatible endpoint.
+                    if result.get("status") == "idle":
+                        result = {"status": "idle"}
                     code = 200 if result.get("status") in ("unloaded", "idle") else 409
                     return self._send(code, result)
                 body = self._read_body()

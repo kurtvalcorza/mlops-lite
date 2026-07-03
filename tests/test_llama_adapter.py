@@ -139,6 +139,25 @@ def test_health_without_lease_reports_no_holder(tmp_path, monkeypatch):
     assert h["lease_holder"] is None and h["vram_free_gb"] is None and h["resident"] is False
 
 
+def test_health_ok_false_when_prereqs_missing(tmp_path, monkeypatch):
+    # Codex round 7: an unavailable engine must NOT report ok:true, or the gateway swap target-probe
+    # (any 200 = reachable) would evict a working holder for an LLM request that then fails to load.
+    a = _adapter(tmp_path, monkeypatch, with_model=False)
+    h = a.health(resident=False)
+    assert h["ok"] is False and "llama-server" in h["unavailable"]
+
+
+def test_build_runtimes_honors_idle_timeout_env(tmp_path, monkeypatch):
+    # Codex round 7: the retired supervisor read IDLE_TIMEOUT; a fold-in that only flips the gateway
+    # URL must not silently reset a tuned deployment's idle timeout to the 120s default.
+    from hostagent import admission as adm
+
+    monkeypatch.setenv("IDLE_TIMEOUT", "45")
+    a = adm.Admission(vram_budget_gb=12.0, gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
+    rts = adapters.build_runtimes(a)
+    assert rts["llm"].idle_timeout_s == 45.0
+
+
 def test_build_runtimes_registers_llm_engine(tmp_path, monkeypatch):
     from hostagent import admission as adm
 

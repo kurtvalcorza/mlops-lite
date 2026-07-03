@@ -14,6 +14,7 @@ from .. import quality, registry, swap, tracing
 from ..serving import (
     SERVING_MODEL,
     ModelTooLargeError,
+    ServingBusyError,
     ServingError,
     gpu_state,
     health,
@@ -87,6 +88,14 @@ async def infer(req: InferRequest):
             INFER_REQUESTS.labels(status="rejected").inc()
             trace_status, outcome = "ERROR", "rejected"
             raise HTTPException(status_code=400, detail=str(e))
+        except ServingBusyError as e:
+            # 018 T358: another GPU tenant holds the slot (refuse-if-held). Contention, not an
+            # outage — classify as `rejected` (like the pre-018 507-for-busy path), so alerting on
+            # `error` doesn't misfire, and return 409 with the holder detail the agent surfaced.
+            # Must precede the ServingError branch — ServingBusyError is a subclass.
+            INFER_REQUESTS.labels(status="rejected").inc()
+            trace_status, outcome = "ERROR", "rejected"
+            raise HTTPException(status_code=409, detail=str(e))
         except ServingError as e:
             INFER_REQUESTS.labels(status="error").inc()
             trace_status, outcome = "ERROR", "error"
