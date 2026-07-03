@@ -27,7 +27,7 @@ sys.exit(0 if ds and all(x["state"] == "healthy" for x in ds) else 1)
 # only to detect a STALE pre-fold-in supervisor still up from before the gateway URL flip. Mirror
 # supervise.py's legacy mapping (a `serving` override now means `agent`) so the stale check below
 # fires even for an unchanged `SUPERVISE_DAEMONS=serving,...` override (Codex round 8, 018).
-DESIRED="${SUPERVISE_DAEMONS:-agent,training,vision,embed,tabular,ui}"
+DESIRED="${SUPERVISE_DAEMONS:-agent,training,embed,tabular,ui}"
 DESIRED="${DESIRED//serving/agent}"
 
 # Is a named daemon present in the running supervisor's status?

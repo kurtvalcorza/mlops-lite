@@ -75,21 +75,29 @@ def _engine_error_status(exc: BaseException) -> int:
     return 502      # child/backend inference failure
 
 
-def forward_engine(manager, engine_id: str, verb: str, body: dict):
-    """Non-streaming inference passthrough (contracts/agent-api.md): resolve the engine, ensure it
-    is admitted (cold-load if needed) under the runtime lock, forward to the child, stamp
-    `last_used`. Returns (status_code, payload). Framework-free so it is unit-testable without HTTP.
-    The runtime lock is held across the whole forward so the reaper/swap cannot unload mid-flight
-    (the supervisor's `_lock`-across-generation semantics, now shared)."""
+def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, multipart=False):
+    """Shared lifecycle wrapper for an engine forward (contracts/agent-api.md): resolve, verb-check,
+    ensure-admitted (cold-load if needed) UNDER the runtime lock, delegate the engine-specific call,
+    stamp `last_used`. Returns (status_code, payload). Framework-free so it is unit-testable without
+    HTTP. The lock is held across the whole forward so the reaper/swap cannot unload mid-flight (the
+    supervisor's `_lock`-across-generation semantics, now shared). `do_forward(adapter, load_ms)`
+    is the JSON or multipart call."""
     rt = manager.runtimes.get(engine_id)
     if rt is None:
         return 404, {"error": f"unknown engine {engine_id!r}"}
     if verb not in getattr(rt.adapter, "verbs", ()):
         return 404, {"error": f"engine {engine_id!r} has no verb {verb!r}"}
+    # Symmetric content-type guard (claude review, T360): a multipart POST to a JSON-only engine AND
+    # a JSON POST to a multipart-only engine (e.g. vision, which has no `forward`) both get a clean
+    # 415 rather than the latter falling through to an AttributeError → 502.
+    method = "forward_multipart" if multipart else "forward"
+    if not hasattr(rt.adapter, method):
+        kind = "multipart" if multipart else "JSON"
+        return 415, {"error": f"engine {engine_id!r} does not accept {kind} for verb {verb!r}"}
     try:
         with rt.lock:
             load_ms = rt.ensure_loaded()
-            result = rt.adapter.forward(verb, body, load_ms)
+            result = do_forward(rt.adapter, load_ms)
             rt.touch()
         return 200, result
     except adm.Held as e:
@@ -97,6 +105,23 @@ def forward_engine(manager, engine_id: str, verb: str, body: dict):
                      "kind": e.holder.get("kind")}
     except Exception as e:  # noqa: BLE001 — mapped to the preserved status vocabulary
         return _engine_error_status(e), {"error": str(e)}
+
+
+def forward_engine(manager, engine_id: str, verb: str, body: dict):
+    """JSON inference passthrough (llm/asr/embed/tabular): forward a parsed dict body."""
+    return _forward_under_lease(manager, engine_id, verb,
+                                lambda ad, load_ms: ad.forward(verb, body, load_ms))
+
+
+def forward_engine_multipart(manager, engine_id: str, verb: str, raw_body: bytes,
+                             content_type: str):
+    """Binary/multipart inference passthrough (vision classify): relay the raw multipart body + its
+    Content-Type to the engine's child unchanged (byte-compat, FR-177). The adapter opts in by
+    implementing `forward_multipart(verb, raw_body, content_type, load_ms)`."""
+    return _forward_under_lease(
+        manager, engine_id, verb,
+        lambda ad, load_ms: ad.forward_multipart(verb, raw_body, content_type, load_ms),
+        multipart=True)
 
 
 def _refresh_metrics(admission, journal, manager) -> None:
@@ -159,10 +184,15 @@ def make_handler(admission, journal, manager):
                            content_type="text/plain; version=0.0.4")
             elif path == "/engines":
                 self._send(200, {"engines": manager.engine_states()})
-            elif path.startswith("/engines/") and path.endswith("/health"):
-                # Per-engine health (byte-compatible with the retired daemon's /health, FR-177): the
-                # gateway's serving.gpu_state reads it for the UI status line + swap holder.
-                eid = path[len("/engines/"):-len("/health")]
+            elif path.startswith("/engines/") and any(
+                    path.endswith(s) for s in ("/health", "/readyz", "/healthz")):
+                # Per-engine health/readiness (byte-compat, FR-177): the gateway/swap probe bento-
+                # derived engines (vision/embed/tabular) via /readyz|/healthz (BentoML's endpoints)
+                # and the native ones (llm/asr) via /health — the agent answers ALL with the same
+                # GPU-lease payload + status, so no gateway probe URL needs to change. gpu_state
+                # reads it for the UI/swap.
+                suffix = next(s for s in ("/health", "/readyz", "/healthz") if path.endswith(s))
+                eid = path[len("/engines/"):-len(suffix)]
                 rt = manager.runtimes.get(eid)
                 if rt is None or not hasattr(rt.adapter, "health"):
                     self._send(404, {"error": f"unknown engine {eid!r}"})
@@ -264,6 +294,13 @@ def make_handler(admission, journal, manager):
                         result = {"status": "idle"}
                     code = 200 if result.get("status") in ("unloaded", "idle") else 409
                     return self._send(code, result)
+                # Binary/multipart engines (vision classify) send multipart, not JSON — relay the
+                # raw body + Content-Type through to the child unchanged (byte-compat, FR-177).
+                ctype = self.headers.get("Content-Type", "")
+                if not stream and ctype.startswith("multipart/"):
+                    raw = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0)
+                    code, payload = forward_engine_multipart(manager, eid, verb, raw, ctype)
+                    return self._send(code, payload)
                 body = self._read_body()
                 if body is None:
                     return self._send(400, {"error": "invalid JSON"})

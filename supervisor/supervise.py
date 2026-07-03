@@ -44,11 +44,9 @@ _ALL = {
         "health_url": os.getenv("TRAINING_HEALTH", "http://localhost:8091/health"),
         "grace_s": float(os.getenv("TRAINING_GRACE", "30")),
     },
-    "vision": {
-        "cmd": ["bash", os.path.join(REPO, "serving", "bento", "run.sh")],
-        "health_url": os.getenv("VISION_HEALTH", "http://localhost:8092/readyz"),
-        "grace_s": float(os.getenv("VISION_GRACE", "60")),  # bentoml is slow to come up
-    },
+    # 018 T360 — vision (BentoML) folded into the host agent (hostagent/adapters/vision.py): the
+    # agent spawns serving/bento/run.sh as a child under the `vision` lease and serves
+    # /engines/vision/*. BENTO_URL points at the agent; no standalone vision daemon.
     # 009 US2 — embeddings: a 5th native CPU daemon, OFF the GPU lease (always-on, no VRAM). BentoML
     # is slow to come up (model download on first load), so the grace is generous like vision.
     "embed": {
@@ -95,7 +93,7 @@ _ALL = {
 # unchanged override silently drops `serving` (no longer in _ALL) AND never adds `agent`, leaving
 # LLM serving unsupervised while the gateway's SERVING_URL points at :8100 (Codex round 7, 018).
 _SELECTED = []
-for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,vision,embed,tabular,ui").split(","):
+for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,embed,tabular,ui").split(","):
     _n = _n.strip()
     _n = "agent" if _n == "serving" else _n
     if _n in _ALL and _n not in _SELECTED:
