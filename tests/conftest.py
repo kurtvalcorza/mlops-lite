@@ -124,7 +124,8 @@ def require_tabular(require_gateway):
 @pytest.fixture
 def require_asr(require_gateway):
     if not _daemon_reachable("asr"):
-        pytest.skip("ASR (whisper.cpp) daemon not reachable — start the supervisor / serving/whispercpp")
+        pytest.skip("ASR (whisper.cpp via the host agent /engines/asr) not reachable — build "
+                    "whisper.cpp (serving/whispercpp/build.sh) and bring the agent up (up_all)")
 
 
 @pytest.fixture

@@ -13,12 +13,16 @@ import os
 
 from hostagent import lifecycle
 from hostagent.adapters.llama import LlamaAdapter
+from hostagent.adapters.whisper import WhisperAdapter
 from platformlib.topology import ENGINES
 
 #: engine_id -> factory(lease) -> adapter. One row per folded-in engine (SC-114). `lease` is the
-#: legacy lockfile module (migration interop); adapters that don't need it ignore the argument.
+#: legacy lockfile module (migration interop); adapters that don't need it ignore the argument. The
+#: `asr` engine is opt-in (optional=True): it registers here always but reports unavailable until
+#: whisper.cpp is built, so platform-health (which treats asr as optional) never stalls on it.
 ADAPTERS = {
     "llm": lambda lease: LlamaAdapter(lease=lease),
+    "asr": lambda lease: WhisperAdapter(lease=lease),
 }
 
 

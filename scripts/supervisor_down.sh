@@ -31,10 +31,12 @@ echo "[down] sweeping any leftover daemon processes ..."
 # caught by the GPU-compute sweep below) so a dead/stale supervisor or a restart never orphans it.
 kill_match "hostagent/main.py" KILL || true
 kill_match "hostagent/run.sh" KILL || true
-# Keep sweeping the RETIRED llama supervisor too (Codex round 8, 018): a manually started or
-# pre-upgrade serving/llama/supervisor.py — not a child of the current supervisor — would otherwise
-# survive teardown holding :8081/VRAM. The file is gone from HEAD; the match is a migration backstop.
+# Keep sweeping the RETIRED llama + whisper supervisors too (Codex round 8, 018 / T359): a manually
+# started or pre-upgrade serving/{llama,whispercpp}/supervisor.py — not a child of the current
+# supervisor — would otherwise survive teardown holding VRAM. The files are gone from HEAD; the
+# matches are migration backstops.
 kill_match "serving/llama/supervisor.py" KILL || true
+kill_match "serving/whispercpp/supervisor.py" KILL || true
 kill_match "training/trainer.py" KILL || true
 kill_match "bentoml serve" KILL || true
 kill_match "VisionClassifier" KILL || true
