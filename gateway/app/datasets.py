@@ -20,29 +20,16 @@ import json
 import os
 import time
 
-import boto3
-from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL") or os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000")
-BUCKET = os.getenv("DATASETS_BUCKET", "datasets")
+# 018 T362.1 (FR-176): the S3 client factory + bucket constants moved to platformlib so the training
+# flows' reused cores (batch/quality/validation) import them from one shared place. Re-exported here
+# so `datasets._s3` / `datasets.BUCKET` / `datasets.S3_ENDPOINT` stay valid for every existing caller.
+from platformlib.s3io import BUCKET, S3_ENDPOINT, _s3  # noqa: F401
 
 
 class DatasetError(Exception):
     """A dataset storage operation failed (object store unreachable or rejected the request)."""
-
-
-def _s3():
-    return boto3.client(
-        "s3",
-        endpoint_url=S3_ENDPOINT,
-        # Credentials from the environment — no hardcoded default (FR-017). The gateway gets these
-        # from compose; a missing var fails loudly (KeyError names the var, never its value).
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
-        config=Config(signature_version="s3v4"),
-    )
 
 
 def register_dataset(name: str, content: bytes, fmt=None, metadata=None) -> dict:

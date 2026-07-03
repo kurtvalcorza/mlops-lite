@@ -69,14 +69,10 @@ def optimize_direction(modality: str) -> str:
 
 
 def _load_evaluation():
-    """Import 011's eval harness (gateway/app/evaluation.py) for metric direction + the default
-    objective. Deferred + path-injected so HPO's pure logic imports without the gateway tree."""
-    gw = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                      "gateway")
-    if gw not in sys.path:
-        sys.path.insert(0, gw)
-    from app import evaluation
-    return evaluation
+    """Import 011's eval harness (metric direction + the default objective) via the audited platformlib
+    bridge (018 T362.1, FR-176 — replaces a per-seam gateway/ path injection)."""
+    from platformlib.gateway_bridge import evaluation
+    return evaluation()
 
 
 # --- the default seams (live: subprocess train + 011 eval) ----------------------------------------

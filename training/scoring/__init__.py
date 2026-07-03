@@ -20,22 +20,11 @@ The per-modality `predict_fn(rows, modality, version) -> list[prediction]` facto
 `training.scoring.{vision,embeddings,llm,asr}`; this module owns only the load→predict→metric→log glue,
 so it is unit-testable offline with an injected `predict_fn` (no GPU, no model).
 """
-import os
-import sys
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(os.path.dirname(_HERE))  # scoring -> training -> repo root
-
-
 def _load_evaluation():
-    """Import 011's eval harness (gateway/app/evaluation.py) for the metric registry, benchmark loader,
-    and `_log_eval`. Deferred + path-injected (same pattern as training/flows/hpo.py) so this module's
-    glue imports without the gateway tree on the path."""
-    gw = os.path.join(_REPO, "gateway")
-    if gw not in sys.path:
-        sys.path.insert(0, gw)
-    from app import evaluation
-    return evaluation
+    """Import 011's eval harness (metric registry, benchmark loader, `_log_eval`) via the audited
+    platformlib bridge (018 T362.1, FR-176 — replaces a per-seam gateway/ path injection)."""
+    from platformlib.gateway_bridge import evaluation
+    return evaluation()
 
 
 def _refs_for(modality: str, rows: list) -> list:
