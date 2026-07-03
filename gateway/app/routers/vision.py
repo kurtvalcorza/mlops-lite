@@ -74,17 +74,21 @@ async def classify(req: ClassifyRequest):
         except httpx.HTTPError as e:
             VISION_REQUESTS.labels(status="unavailable").inc()
             raise HTTPException(status_code=503, detail=f"vision service unreachable at {BENTO_URL}: {e}")
+    if r.status_code == 409:
+        # 018 T360: vision now serves through the host agent, which refuses GPU-lease contention
+        # with a real 409 (the in-service 200 `{"busy": true}` marker is gone — it existed only
+        # because BentoML masks 5xx bodies; the agent isn't BentoML). Pass the hint through.
+        VISION_REQUESTS.labels(status="busy").inc()
+        raise HTTPException(status_code=409,
+                            detail=r.json().get("error", "GPU busy — free the GPU and retry"))
+    if r.status_code == 507:
+        VISION_REQUESTS.labels(status="rejected").inc()
+        raise HTTPException(status_code=507,
+                            detail=r.json().get("error", "model exceeds VRAM budget"))
     if r.status_code != 200:
         VISION_REQUESTS.labels(status="error").inc()
         raise HTTPException(status_code=502, detail=f"vision service error {r.status_code}: {r.text[:200]}")
     data = r.json()
-    if isinstance(data, dict) and data.get("busy"):
-        # Expected GPU-lease contention (008 FR-067): the bento returns a structured busy marker
-        # (200) rather than a 5xx (whose message BentoML masks). Surface the documented 409 GPU-busy
-        # with the actionable hint, so stale-UI / direct-API clients get a clean refusal (Codex #6).
-        VISION_REQUESTS.labels(status="busy").inc()
-        raise HTTPException(status_code=409,
-                            detail=data.get("detail", "GPU busy — free the GPU and retry"))
     VISION_REQUESTS.labels(status="ok").inc()
     # 013/FR-119: log the served classification fully OFF the response path. The prediction id is
     # generated synchronously (returned to the caller), while the registry version-resolve + the store

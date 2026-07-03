@@ -13,6 +13,7 @@ import os
 
 from hostagent import lifecycle
 from hostagent.adapters.llama import LlamaAdapter
+from hostagent.adapters.vision import VisionAdapter
 from hostagent.adapters.whisper import WhisperAdapter
 from platformlib.topology import ENGINES
 
@@ -23,6 +24,7 @@ from platformlib.topology import ENGINES
 ADAPTERS = {
     "llm": lambda lease: LlamaAdapter(lease=lease),
     "asr": lambda lease: WhisperAdapter(lease=lease),
+    "vision": lambda lease: VisionAdapter(lease=lease),
 }
 
 

@@ -25,5 +25,8 @@ if [[ ! -x "$VENV/bin/bentoml" ]]; then
 fi
 
 cd "$DIR"
-echo ">> Starting BentoML vision service on :$BENTO_PORT (model loads from MinIO on first request)"
-exec "$VENV/bin/bentoml" serve service:VisionClassifier --host 0.0.0.0 --port "$BENTO_PORT"
+# 018 T360: the host agent spawns this as a child and binds it to loopback (BENTO_HOST=127.0.0.1);
+# the default stays 0.0.0.0 for a standalone/legacy launch.
+BENTO_HOST="${BENTO_HOST:-0.0.0.0}"
+echo ">> Starting BentoML vision service on ${BENTO_HOST}:$BENTO_PORT (model loads from MinIO on first request)"
+exec "$VENV/bin/bentoml" serve service:VisionClassifier --host "$BENTO_HOST" --port "$BENTO_PORT"
