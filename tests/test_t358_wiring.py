@@ -47,6 +47,14 @@ def test_supervise_default_set_includes_agent_not_serving(monkeypatch):
     assert "agent" in mod._SELECTED and "serving" not in mod._SELECTED
 
 
+def test_supervise_probes_the_llm_engine_health(monkeypatch):
+    # Codex round 8: the agent replaces the LLM serving daemon, so its supervisor health probe must
+    # hit the LLM ENGINE health (503 when unavailable/wedged), not just the process's /health.
+    monkeypatch.delenv("AGENT_HEALTH", raising=False)
+    mod = _load("supervise_under_test4", "supervisor", "supervise.py")
+    assert mod._ALL["agent"]["health_url"].endswith("/engines/llm/health")
+
+
 if __name__ == "__main__":
     import pytest
 

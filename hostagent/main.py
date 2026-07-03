@@ -168,9 +168,17 @@ def make_handler(admission, journal, manager):
                     self._send(404, {"error": f"unknown engine {eid!r}"})
                 else:
                     payload = rt.adapter.health(rt._resident())
-                    # 503 when the engine can't serve (missing/dud prereqs) so the gateway readiness
-                    # aggregator (platform_health keys on status==200) and serving.health() both see
-                    # a REQUIRED engine as down, not falsely healthy (Codex round 7, 018).
+                    # 503 when the engine can't serve so the gateway readiness aggregator
+                    # (platform_health keys on status==200), serving.health(), and the supervisor
+                    # all see a REQUIRED engine as down, not falsely healthy. Two cases (Codex
+                    # rounds 7/8, 018): the adapter reports NOT ok (missing/dud prereqs), OR the
+                    # runtime is wedged/disabled — a wedged child (survived SIGKILL, GPU pinned)
+                    # reports ok:true from the adapter's file checks alone, so fold in the runtime
+                    # state. A cold/idle engine stays `ok` (available, just not resident).
+                    st = rt.state().get("state")
+                    if st in ("wedged", "disabled"):
+                        payload["ok"] = False
+                        payload[st] = rt.state().get("reason", True)
                     self._send(200 if payload.get("ok", True) else 503, payload)
             elif path == "/jobs" or path.startswith("/jobs/"):
                 job_id = path[len("/jobs/"):] if path.startswith("/jobs/") else None
@@ -233,6 +241,12 @@ def make_handler(admission, journal, manager):
                 rt = manager.runtimes.get(eid)
                 if rt is None:
                     return self._send(404, {"error": f"unknown engine {eid!r}"})
+                # Strict shape (Codex round 8, 018): exactly /engines/<id>/<verb> or
+                # /engines/<id>/<verb>/stream — reject /engines/<id>/<verb>/typo and deeper rather
+                # than silently forwarding them as the bare verb.
+                stream = len(segs) == 4 and segs[3] == "stream"
+                if not (len(segs) == 3 or stream):
+                    return self._send(404, {"error": "unknown path"})
                 if verb == "unload-now" and len(segs) == 3:
                     if SWAP_CONTROL_SECRET and \
                             self.headers.get("X-Swap-Control", "") != SWAP_CONTROL_SECRET:
@@ -253,7 +267,6 @@ def make_handler(admission, journal, manager):
                 body = self._read_body()
                 if body is None:
                     return self._send(400, {"error": "invalid JSON"})
-                stream = len(segs) == 4 and segs[3] == "stream"
                 if stream:
                     if verb not in getattr(rt.adapter, "stream_verbs", ()):
                         return self._send(404, {"error": f"engine {eid!r} has no stream "

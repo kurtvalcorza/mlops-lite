@@ -79,7 +79,13 @@ _ALL = {
     # and the vision/embed/tabular/asr entries above are deleted.
     "agent": {
         "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
-        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/health"),
+        # Probe the LLM ENGINE, not just the process (Codex round 8, 018): the agent replaces the
+        # LLM serving daemon, so a supervised "healthy" must mean the LLM can serve. The top-level
+        # /health returns 200 while the process lives even if the engine is unavailable/wedged;
+        # /engines/llm/health returns 503 in those cases (a cold/idle engine still reports 200, so
+        # this doesn't restart-loop on normal idle). Restarting clears a wedged child; a missing
+        # model surfaces as an unhealthy daemon (backoff-paced) rather than a silently-up agent.
+        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/engines/llm/health"),
         "grace_s": float(os.getenv("AGENT_GRACE", "30")),
     },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).
