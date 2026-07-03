@@ -36,7 +36,10 @@ except Exception:  # Prefect absent → no-op decorator (ephemeral, like finetun
         return fn if fn else (lambda f: f)
 
 
-SERVING_URL = os.getenv("SERVING_URL", "http://localhost:8090")
+# 018 T358: the LLM engine moved from the standalone llama supervisor (:8090, deleted) to the host
+# agent's /engines/llm sub-path. This flow runs natively in WSL, so the default is localhost:8100
+# (SERVING_URL is not exported into the WSL daemon env); the /infer verb path is unchanged (FR-177).
+SERVING_URL = os.getenv("SERVING_URL", "http://localhost:8100/engines/llm")
 BENTO_URL = os.getenv("BENTO_URL", "http://localhost:8092")
 TABULAR_URL = os.getenv("TABULAR_URL", "http://localhost:8093")
 

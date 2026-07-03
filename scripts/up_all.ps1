@@ -10,7 +10,7 @@
   4. Starts the native daemons under the supervisor (idempotent) and waits for health.
   5. Waits until the gateway itself resolves every daemon (`/platform/health`).
 #>
-param([string]$Distro = "Ubuntu", [int]$SupervisorPort = 8090, [int]$TrainerPort = 8091,
+param([string]$Distro = "Ubuntu", [int]$AgentPort = 8100, [int]$TrainerPort = 8091,
       [int]$BentoPort = 8092, [int]$EmbedPort = 8093, [int]$TabularPort = 8094, [int]$AsrPort = 8095)
 
 $ErrorActionPreference = "Stop"
@@ -25,15 +25,19 @@ if (-not (Test-Path "$repo/.env")) {
 # 1. Resolve the (dynamic) WSL IP and wire the gateway -> daemon URLs.
 $ip = (wsl.exe -d $Distro hostname -I).Trim().Split(' ')[0]
 if (-not $ip) { Write-Error "Could not resolve $Distro IP"; exit 1 }
-$env:SERVING_URL = "http://${ip}:${SupervisorPort}"
+$env:AGENT_URL   = "http://${ip}:${AgentPort}"
+# 018 T358: the LLM engine is served by the host agent — SERVING_URL points at the agent's
+# /engines/llm sub-path (byte-compatible /health, /infer, /infer/stream, /unload-now). The other
+# modalities still point at their legacy daemons until their fold-in (T359-T361).
+$env:SERVING_URL = "http://${ip}:${AgentPort}/engines/llm"
 $env:TRAINER_URL = "http://${ip}:${TrainerPort}"
 $env:BENTO_URL   = "http://${ip}:${BentoPort}"
 # 009 new modality daemons (embeddings + tabular = CPU/off-lease, ASR = GPU-lease tenant).
 $env:EMBED_URL   = "http://${ip}:${EmbedPort}"
 $env:TABULAR_URL = "http://${ip}:${TabularPort}"
 $env:ASR_URL     = "http://${ip}:${AsrPort}"
-Write-Host "daemon URLs -> serving=$env:SERVING_URL training=$env:TRAINER_URL vision=$env:BENTO_URL" -ForegroundColor Cyan
-Write-Host "             embed=$env:EMBED_URL tabular=$env:TABULAR_URL asr=$env:ASR_URL" -ForegroundColor Cyan
+Write-Host "daemon URLs -> serving(llm@agent)=$env:SERVING_URL training=$env:TRAINER_URL vision=$env:BENTO_URL" -ForegroundColor Cyan
+Write-Host "             embed=$env:EMBED_URL tabular=$env:TABULAR_URL asr=$env:ASR_URL agent=$env:AGENT_URL" -ForegroundColor Cyan
 
 # 2. Bring up the Compose infra (gateway inherits the daemon URLs above).
 Write-Host "`n[1/3] docker compose up ..." -ForegroundColor Green

@@ -35,6 +35,13 @@ class ModelTooLargeError(ServingError):
     """Requested model exceeds the VRAM budget (FR-004)."""
 
 
+class ServingBusyError(ServingError):
+    """Another GPU tenant holds the single slot — the refuse-if-held path (Principle II / 008).
+    The host agent (018 T358) returns 409 for this; the retired supervisor lumped it into 507. It
+    is contention, NOT a backend fault, so the router classifies it as `rejected` (not `error`)
+    and surfaces it as a 409 rather than a 502."""
+
+
 async def health() -> bool:
     async with httpx.AsyncClient(timeout=5) as client:
         try:
@@ -79,6 +86,15 @@ async def run_inference(prompt: str, max_tokens: int = 256, temperature: float =
                 raise ServingError(f"serving supervisor unreachable at {SERVING_URL}: {e}")
     if r.status_code == 507:
         raise ModelTooLargeError(r.json().get("error", "model exceeds VRAM budget"))
+    if r.status_code == 409:
+        # 018 T358: the agent returns 409 when another GPU tenant holds the slot. Keep it a distinct
+        # "busy" (not a generic ServingError → 502) so /infer reports it rejected, keeping the
+        # pre-018 refuse-if-held client semantics the retired supervisor expressed as a 507.
+        try:
+            detail = r.json().get("error") or "GPU busy — another tenant holds the slot"
+        except Exception:
+            detail = "GPU busy — another tenant holds the slot"
+        raise ServingBusyError(detail)
     if r.status_code != 200:
         raise ServingError(f"serving error {r.status_code}: {r.text[:200]}")
     return r.json()

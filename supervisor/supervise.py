@@ -36,11 +36,9 @@ STATUS_PORT = int(os.getenv("SUPERVISE_STATUS_PORT", "8099"))
 # supervisor runs on the same WSL host as the daemons. The set can be narrowed for testing via
 # SUPERVISE_DAEMONS (comma-separated names); default is all three.
 _ALL = {
-    "serving": {
-        "cmd": ["bash", os.path.join(REPO, "serving", "llama", "run.sh")],
-        "health_url": os.getenv("SERVING_HEALTH", "http://localhost:8090/health"),
-        "grace_s": float(os.getenv("SERVING_GRACE", "30")),
-    },
+    # 018 T358 — the LLM engine folded into the host agent (`hostagent/adapters/llama.py`); the
+    # standalone llama supervisor daemon is retired. The agent (below) now serves `/engines/llm/*`;
+    # the gateway's SERVING_URL points at it. Vision/asr/embed/tabular fold in at T359–T361.
     "training": {
         "cmd": ["bash", os.path.join(REPO, "training", "run.sh")],
         "health_url": os.getenv("TRAINING_HEALTH", "http://localhost:8091/health"),
@@ -62,7 +60,7 @@ _ALL = {
     # idle-release VRAM). **Opt-in** (NOT in the default set below): unlike embed/tabular — whose deps
     # bootstrap.sh installs — whisper.cpp needs a manual CUDA build (serving/whispercpp/build.sh), so
     # on a host that hasn't built it run.sh would exit and stall bring-up (Codex review). Enable once
-    # built:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,asr,ui
+    # built:  SUPERVISE_DAEMONS=agent,training,vision,embed,tabular,asr,ui
     "asr": {
         "cmd": ["bash", os.path.join(REPO, "serving", "whispercpp", "run.sh")],
         "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
@@ -74,14 +72,20 @@ _ALL = {
         "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
         "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
     },
-    # 018 US2 — the GPU host agent (hostagent/). **Opt-in during the strangler migration** (NOT in
-    # the default set below): it coexists with the legacy daemons via the lockfile interop shim and
-    # takes over one engine per fold-in phase (T358+). At lockfile retirement (T364) this becomes
-    # one of exactly two supervised daemons (agent + ui) and the entries above are deleted.
-    # Enable:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,ui,agent
+    # 018 US2 — the GPU host agent (hostagent/). In the default set since T358 (it serves the LLM
+    # engine, replacing the retired llama supervisor); it coexists with the remaining legacy daemons
+    # via the lockfile interop shim and takes over one more engine per fold-in phase (T359-T361).
+    # At lockfile retirement (T364) this becomes one of exactly two supervised daemons (agent + ui)
+    # and the vision/embed/tabular/asr entries above are deleted.
     "agent": {
         "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
-        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/health"),
+        # Probe the LLM ENGINE, not just the process (Codex round 8, 018): the agent replaces the
+        # LLM serving daemon, so a supervised "healthy" must mean the LLM can serve. The top-level
+        # /health returns 200 while the process lives even if the engine is unavailable/wedged;
+        # /engines/llm/health returns 503 in those cases (a cold/idle engine still reports 200, so
+        # this doesn't restart-loop on normal idle). Restarting clears a wedged child; a missing
+        # model surfaces as an unhealthy daemon (backoff-paced) rather than a silently-up agent.
+        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/engines/llm/health"),
         "grace_s": float(os.getenv("AGENT_GRACE", "30")),
     },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).
@@ -92,10 +96,16 @@ _ALL = {
         "grace_s": float(os.getenv("UI_GRACE", "300")),
     },
 }
-_SELECTED = [n.strip()
-             for n in os.getenv("SUPERVISE_DAEMONS",
-                                "serving,training,vision,embed,tabular,ui").split(",")
-             if n.strip() in _ALL]
+# 018 T358: a legacy `serving` selection (a pre-fold-in .env override that predates the LLM
+# fold-in) now means the `agent`, which serves the LLM engine. Translate it — otherwise an
+# unchanged override silently drops `serving` (no longer in _ALL) AND never adds `agent`, leaving
+# LLM serving unsupervised while the gateway's SERVING_URL points at :8100 (Codex round 7, 018).
+_SELECTED = []
+for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,vision,embed,tabular,ui").split(","):
+    _n = _n.strip()
+    _n = "agent" if _n == "serving" else _n
+    if _n in _ALL and _n not in _SELECTED:
+        _SELECTED.append(_n)
 
 
 def _backoff(failures: int) -> float:

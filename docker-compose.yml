@@ -115,9 +115,13 @@ services:
       # 005 US2 (FR-042): fail-closed by default. No key => protected routes 401, UNLESS this
       # truthy dev override runs the gateway open (logged loudly). Never the default.
       GATEWAY_ALLOW_OPEN: ${GATEWAY_ALLOW_OPEN:-}
-      # Native serving supervisor on the WSL GPU host (hybrid GPU). serve_up.ps1 injects the
-      # Ubuntu IP since host.docker.internal can't cross WSL distros.
-      SERVING_URL: ${SERVING_URL:-http://host.docker.internal:8090}
+      # GPU host agent on the WSL host (018). up_all.ps1 injects the Ubuntu IP since
+      # host.docker.internal can't cross WSL distros.
+      AGENT_URL: ${AGENT_URL:-http://host.docker.internal:8100}
+      # 018 T358: the LLM engine is served by the agent — SERVING_URL is the agent's /engines/llm
+      # sub-path (byte-compatible /health, /infer, /infer/stream, /unload-now). Folds to a single
+      # AGENT_URL at T364; the other modalities still point at their legacy daemons for now.
+      SERVING_URL: ${SERVING_URL:-http://host.docker.internal:8100/engines/llm}
       SERVING_MODEL: ${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}
       # Native training daemon on the WSL GPU host (US4). serve_up.ps1 injects the Ubuntu IP.
       TRAINER_URL: ${TRAINER_URL:-http://host.docker.internal:8091}

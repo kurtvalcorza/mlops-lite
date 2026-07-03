@@ -20,7 +20,8 @@ import urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATUS_URL = f"http://localhost:{os.getenv('SUPERVISE_STATUS_PORT', '8099')}/status"
-DAEMONS = [d.strip() for d in os.getenv("SUPERVISE_DAEMONS", "serving,training,vision").split(",") if d.strip()]
+DAEMONS = [d.strip() for d in os.getenv("SUPERVISE_DAEMONS", "agent,training,vision").split(",")
+           if d.strip()]
 VICTIM = os.getenv("SUP_VICTIM", DAEMONS[0])
 HEALTHY_TIMEOUT = int(os.getenv("SUP_HEALTHY_TIMEOUT", "180"))
 RECOVER_TIMEOUT = int(os.getenv("SUP_RECOVER_TIMEOUT", "90"))
