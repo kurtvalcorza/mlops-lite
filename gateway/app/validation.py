@@ -177,7 +177,7 @@ def validate_dataset(name: str, version: str, *, fmt=None, **ruleset) -> dict:
     """Load dataset `name@version` from the content-addressed registry (MinIO) and validate it. The
     format is read from the dataset manifest when not given. Raises ValidationError if the bytes can't
     be loaded/parsed; a dataset that loads but fails its rules returns a `passed=false` report."""
-    from .datasets import BUCKET, _s3
+    from platformlib.s3io import BUCKET, _s3  # 018 T362.1: shared S3 factory (FR-176)
 
     s3 = _s3()
     try:

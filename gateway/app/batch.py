@@ -32,11 +32,9 @@ class BatchError(Exception):
 
 
 def _s3():
-    """The MinIO/S3 client, reused from the dataset registry. Lazy so the pure core imports without boto3."""
-    try:
-        from .datasets import _s3 as ds_s3
-    except ImportError:
-        from app.datasets import _s3 as ds_s3
+    """The MinIO/S3 client. Lazy so the pure core imports without boto3 (018 T362.1: from the shared
+    platformlib factory, dropping the `.datasets`/`app.datasets` dual-fallback — FR-176)."""
+    from platformlib.s3io import _s3 as ds_s3
     return ds_s3()
 
 
