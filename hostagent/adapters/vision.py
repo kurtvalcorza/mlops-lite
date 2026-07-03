@@ -15,45 +15,11 @@ relays the raw multipart body + Content-Type to the child unchanged (byte-compat
 """
 import json
 import os
-import signal
-import subprocess
 import urllib.request
 
-from hostagent.adapters._common import free_port, gpu_lease_health
+from hostagent.adapters._common import bento_spawn, gpu_lease_health, http_200
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-class _ProcGroup:
-    """A Popen whose terminate/kill signal the whole process GROUP (BentoML forks workers, so
-    killing only the launcher would orphan a worker still holding VRAM). Spawned with
-    start_new_session=True, so the launcher leads the group. Exposes the Popen-like surface the
-    shared lifecycle drives (`.pid .poll() .terminate() .kill() .wait()`)."""
-
-    def __init__(self, popen):
-        self._p = popen
-        self.pid = popen.pid
-
-    def poll(self):
-        return self._p.poll()
-
-    def _sig_group(self, sig):
-        try:
-            os.killpg(os.getpgid(self._p.pid), sig)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                self._p.send_signal(sig)  # fall back to the single pid
-            except Exception:
-                pass
-
-    def terminate(self):
-        self._sig_group(signal.SIGTERM)
-
-    def kill(self):
-        self._sig_group(signal.SIGKILL)
-
-    def wait(self, timeout=None):
-        return self._p.wait(timeout)
 
 
 class VisionAdapter:
@@ -86,22 +52,13 @@ class VisionAdapter:
         return self.est_gb  # MobileNet + CUDA context (small, non-zero)
 
     def spawn(self):
-        """Spawn the bento service via its run.sh (which sources .env + bridges MinIO creds) on a
-        dynamic loopback port, in its own process group so the whole worker tree is reap-able."""
-        self._port = free_port()
-        env = dict(os.environ, BENTO_HOST="127.0.0.1", BENTO_PORT=str(self._port))
-        p = subprocess.Popen(["bash", self.run_sh], env=env, start_new_session=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return _ProcGroup(p)
+        """Spawn the bento service via its run.sh (sources .env + bridges MinIO creds) on a dynamic
+        loopback port, in its own process group so the whole worker tree is reap-able (_common)."""
+        self._port, child = bento_spawn(self.run_sh)
+        return child
 
     def ready(self) -> bool:
-        if self._port is None:
-            return False
-        try:
-            with urllib.request.urlopen(self._url("/readyz"), timeout=2) as r:
-                return r.status == 200
-        except Exception:
-            return False
+        return self._port is not None and http_200(self._url("/readyz"))
 
     # -- forward surface (multipart, not JSON) --------------------------------------------------
     def forward_multipart(self, verb: str, raw_body: bytes, content_type: str, load_ms: float):

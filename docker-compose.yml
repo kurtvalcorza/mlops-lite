@@ -129,10 +129,11 @@ services:
       # 018 T360: the vision engine is served by the host agent's /engines/vision sub-path (was the
       # BentoML supervisor on :8092). Byte-compatible /readyz, /classify, /unload-now.
       BENTO_URL: ${BENTO_URL:-http://host.docker.internal:8100/engines/vision}
-      # 009 native BentoML embeddings (US2, CPU/off-lease) + tabular (US4, CPU/off-lease). up_all.ps1
-      # injects the Ubuntu IP.
-      EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8093}
-      TABULAR_URL: ${TABULAR_URL:-http://host.docker.internal:8094}
+      # 018 T361: the embeddings + tabular CPU engines are served by the host agent's
+      # /engines/{embed,tabular} sub-paths (were BentoML supervisors on :8093/:8094). Byte-compatible
+      # /readyz, /embed, /predict.
+      EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8100/engines/embed}
+      TABULAR_URL: ${TABULAR_URL:-http://host.docker.internal:8100/engines/tabular}
       # 018 T359: the ASR engine is served by the host agent's /engines/asr sub-path (was the
       # whisper.cpp supervisor on :8095). Byte-compatible /health, /transcribe, /unload-now.
       ASR_URL: ${ASR_URL:-http://host.docker.internal:8100/engines/asr}

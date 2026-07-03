@@ -36,13 +36,14 @@ except Exception:  # Prefect absent → no-op decorator (ephemeral, like finetun
         return fn if fn else (lambda f: f)
 
 
-# 018 T358/T360: the LLM and vision engines moved from their standalone daemons (:8090 / :8092,
-# deleted) to the host agent's /engines/<id> sub-paths. This flow runs natively in WSL, so the
-# defaults are localhost:8100 (the gateway's injected URLs don't reach the WSL daemon env); the
-# /infer and /classify verb paths are unchanged (FR-177). Tabular folds in at T361.
+# 018 T358/T360/T361: the LLM/vision/tabular engines moved from their standalone daemons (:8090 /
+# :8092 / :8094, deleted) to the host agent's /engines/<id> sub-paths. This flow runs natively in
+# WSL, so the defaults are localhost:8100 (the gateway's injected URLs don't reach the WSL daemon
+# env); the /infer, /classify, /predict verb paths are unchanged (FR-177). (The old TABULAR_URL
+# default was :8093 — the embed port — a pre-existing mismatch this flip also corrects.)
 SERVING_URL = os.getenv("SERVING_URL", "http://localhost:8100/engines/llm")
 BENTO_URL = os.getenv("BENTO_URL", "http://localhost:8100/engines/vision")
-TABULAR_URL = os.getenv("TABULAR_URL", "http://localhost:8093")
+TABULAR_URL = os.getenv("TABULAR_URL", "http://localhost:8100/engines/tabular")
 
 
 def _load_batch():

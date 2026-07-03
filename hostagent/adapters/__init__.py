@@ -12,7 +12,9 @@ Fold-in order (each flips one gateway URL + deletes one legacy daemon in its pha
 import os
 
 from hostagent import lifecycle
+from hostagent.adapters.embed import EmbedAdapter
 from hostagent.adapters.llama import LlamaAdapter
+from hostagent.adapters.tabular import TabularAdapter
 from hostagent.adapters.vision import VisionAdapter
 from hostagent.adapters.whisper import WhisperAdapter
 from platformlib.topology import ENGINES
@@ -21,10 +23,13 @@ from platformlib.topology import ENGINES
 #: legacy lockfile module (migration interop); adapters that don't need it ignore the argument. The
 #: `asr` engine is opt-in (optional=True): it registers here always but reports unavailable until
 #: whisper.cpp is built, so platform-health (which treats asr as optional) never stalls on it.
+#: embed/tabular are CPU (gpu=False): off-lease, so the lifecycle admits nothing for them (T361).
 ADAPTERS = {
     "llm": lambda lease: LlamaAdapter(lease=lease),
     "asr": lambda lease: WhisperAdapter(lease=lease),
     "vision": lambda lease: VisionAdapter(lease=lease),
+    "embed": lambda lease: EmbedAdapter(lease=lease),
+    "tabular": lambda lease: TabularAdapter(lease=lease),
 }
 
 
@@ -47,6 +52,10 @@ def build_runtimes(admission, lease=None) -> dict:
             raise ValueError(
                 f"adapter {engine_id!r} gpu={adapter.gpu} disagrees with topology.ENGINES "
                 f"gpu={meta.get('gpu')}")
+        # CPU engines (gpu=False) are never idle-reaped (T361): the idle reaper exists to free the
+        # GPU lease/VRAM, and a CPU engine holds neither — reaping it would only cost a bento
+        # respawn (+ model reload), reverting the "always-on" behaviour of the retired daemons.
+        idle = idle_timeout_s if adapter.gpu else float("inf")
         runtimes[engine_id] = lifecycle.EngineRuntime(adapter, admission, kind="serving",
-                                                      idle_timeout_s=idle_timeout_s)
+                                                      idle_timeout_s=idle)
     return runtimes

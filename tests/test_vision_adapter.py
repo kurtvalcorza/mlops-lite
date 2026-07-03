@@ -18,7 +18,8 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from hostagent import adapters  # noqa: E402
-from hostagent.adapters.vision import VisionAdapter, _ProcGroup  # noqa: E402
+from hostagent.adapters._common import ProcGroup  # noqa: E402
+from hostagent.adapters.vision import VisionAdapter  # noqa: E402
 
 
 class _Resp:
@@ -127,7 +128,7 @@ def test_procgroup_terminate_reaps_the_group():
     # BentoML forks workers, so the child is spawned in its own session and terminate() must signal
     # the whole group. Drive it with a real `sleep` child (WSL/Linux only — killpg is POSIX).
     p = subprocess.Popen(["sleep", "30"], start_new_session=True)
-    pg = _ProcGroup(p)
+    pg = ProcGroup(p)
     assert pg.pid == p.pid and pg.poll() is None
     pg.terminate()
     for _ in range(60):

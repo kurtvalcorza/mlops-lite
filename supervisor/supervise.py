@@ -44,26 +44,11 @@ _ALL = {
         "health_url": os.getenv("TRAINING_HEALTH", "http://localhost:8091/health"),
         "grace_s": float(os.getenv("TRAINING_GRACE", "30")),
     },
-    # 018 T360 — vision (BentoML) folded into the host agent (hostagent/adapters/vision.py): the
-    # agent spawns serving/bento/run.sh as a child under the `vision` lease and serves
-    # /engines/vision/*. BENTO_URL points at the agent; no standalone vision daemon.
-    # 009 US2 — embeddings: a 5th native CPU daemon, OFF the GPU lease (always-on, no VRAM). BentoML
-    # is slow to come up (model download on first load), so the grace is generous like vision.
-    "embed": {
-        "cmd": ["bash", os.path.join(REPO, "serving", "bento", "embed_run.sh")],
-        "health_url": os.getenv("EMBED_HEALTH", "http://localhost:8093/readyz"),
-        "grace_s": float(os.getenv("EMBED_GRACE", "120")),
-    },
-    # 018 T359 — ASR (whisper.cpp) folded into the host agent (hostagent/adapters/whisper.py); the
-    # standalone whisper supervisor is retired. The agent serves /engines/asr/* (opt-in: reports
-    # unavailable until whisper.cpp is built via serving/whispercpp/build.sh). ASR_URL points at the
-    # agent; platform-health treats asr as optional so an unbuilt host never stalls bring-up.
-    # 009 US4 — tabular: a BentoML CPU daemon, OFF the GPU lease (always-on, no VRAM), like embed.
-    "tabular": {
-        "cmd": ["bash", os.path.join(REPO, "serving", "bento", "tabular_run.sh")],
-        "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
-        "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
-    },
+    # 018 T359-T361: ASR (whisper.cpp) + vision/embed/tabular (BentoML) all folded into the host
+    # agent (hostagent/adapters/{whisper,vision,embed,tabular}.py). The agent spawns each bento
+    # run.sh as a child and serves /engines/<id>/*; their URLs point at the agent. embed/tabular are
+    # CPU/off-lease; asr is opt-in (unavailable until whisper.cpp built; platform-health treats it
+    # as optional so an unbuilt host never stalls bring-up). No standalone vision/embed/tabular/asr.
     # 018 US2 — the GPU host agent (hostagent/). In the default set since T358; it serves the LLM
     # (T358) and ASR (T359) engines, replacing their retired supervisors, and coexists with the
     # remaining legacy daemons via the lockfile interop shim, taking one more engine per fold-in
@@ -93,7 +78,7 @@ _ALL = {
 # unchanged override silently drops `serving` (no longer in _ALL) AND never adds `agent`, leaving
 # LLM serving unsupervised while the gateway's SERVING_URL points at :8100 (Codex round 7, 018).
 _SELECTED = []
-for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,embed,tabular,ui").split(","):
+for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,ui").split(","):
     _n = _n.strip()
     _n = "agent" if _n == "serving" else _n
     if _n in _ALL and _n not in _SELECTED:
