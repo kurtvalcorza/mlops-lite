@@ -18,22 +18,14 @@ the health source flips to `admission.holder()` and the `lease` argument goes aw
 """
 import json
 import os
-import socket
 import subprocess
 import time
 import urllib.request
 
+from hostagent.adapters._common import free_port, gpu_lease_health
+
 DEFAULT_MODEL = "~/models/gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
 DEFAULT_ALIAS = "qwen2.5-7b-instruct-q4_k_m"
-
-
-def _free_port() -> int:
-    """An ephemeral loopback port for the llama-server child. Small bind→close→respawn TOCTOU
-    window (same host, ephemeral range) — acceptable, and it removes the fixed-port EADDRINUSE
-    class of failure the old supervisor's :8081 had against an orphaned child."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class LlamaAdapter:
@@ -84,7 +76,7 @@ class LlamaAdapter:
     def spawn(self):
         """Start `llama-server` on a fresh dynamic port; return the Popen (the shared lifecycle
         records its pid on admission and drives readiness/teardown)."""
-        self._port = _free_port()
+        self._port = free_port()
         return subprocess.Popen(
             [self.llama_bin, "-m", self.model, "--host", "127.0.0.1", "--port", str(self._port),
              "-ngl", self.ngl, "--ctx-size", self.ctx, "--alias", self.alias],
@@ -150,32 +142,13 @@ class LlamaAdapter:
                            "model": self.alias})
 
     def health(self, resident: bool) -> dict:
-        """Byte-compatible with the retired supervisor's `/health` (gateway `serving.gpu_state`
-        reads `ok`/`resident`/`model`/`lease_holder`). `lease_holder` + `vram_free_gb` come from the
-        GLOBAL lockfile during migration (see the module note); None once the lease retires.
-
-        `ok` reflects `available()` (Codex round 7, 018): if the llama binary / model GGUF is
-        missing the engine cannot serve, so it must report NOT ok — otherwise the gateway's swap
-        target-probe (any 200 = reachable) would evict a working vision/asr holder for a
-        `preempt=true` LLM request that then fails to load. The retired supervisor always answered
-        `ok: true`; surfacing real unavailability is the correct-er answer, not a regression."""
+        """Byte-compatible with the retired supervisor's `/health` — the shared GPU-lease payload
+        (see `_common.gpu_lease_health`); gateway `serving.gpu_state` reads
+        `ok`/`resident`/`model`/`lease_holder`."""
         ok, reason = self.available()
-        holder = self._lease.current_holder() if self._lease else None
-        free = self._lease.free_vram_gb() if self._lease else None
-        est = self.estimate_vram() if os.path.exists(self.model) else None
-        payload = {
-            "ok": ok,
-            "resident": resident,
-            "model": self.alias,
-            "vram_budget_gb": self.vram_budget_gb,
-            "est_vram_gb": round(est, 1) if est is not None else None,
-            "fits": (est <= self.vram_budget_gb * 0.95) if est is not None else None,
-            "vram_free_gb": round(free, 1) if free is not None else None,
-            "lease_holder": holder.get("tenant") if holder else None,
-        }
-        if not ok:
-            payload["unavailable"] = reason
-        return payload
+        est = self.estimate_vram() if os.path.isfile(self.model) else None
+        return gpu_lease_health(self._lease, ok=ok, reason=reason, resident=resident,
+                                model=self.alias, vram_budget_gb=self.vram_budget_gb, est_vram=est)
 
     # -- helpers ---------------------------------------------------------------------------------
     def _chat_payload(self, body: dict, *, stream: bool):

@@ -38,7 +38,7 @@ STATUS_PORT = int(os.getenv("SUPERVISE_STATUS_PORT", "8099"))
 _ALL = {
     # 018 T358 — the LLM engine folded into the host agent (`hostagent/adapters/llama.py`); the
     # standalone llama supervisor daemon is retired. The agent (below) now serves `/engines/llm/*`;
-    # the gateway's SERVING_URL points at it. Vision/asr/embed/tabular fold in at T359–T361.
+    # the gateway's SERVING_URL points at it. ASR at T359; vision/embed/tabular at T360-T361.
     "training": {
         "cmd": ["bash", os.path.join(REPO, "training", "run.sh")],
         "health_url": os.getenv("TRAINING_HEALTH", "http://localhost:8091/health"),
@@ -56,27 +56,21 @@ _ALL = {
         "health_url": os.getenv("EMBED_HEALTH", "http://localhost:8093/readyz"),
         "grace_s": float(os.getenv("EMBED_GRACE", "120")),
     },
-    # 009 US3 — ASR: the whisper.cpp native CUDA supervisor, a GPU-lease tenant (load-on-demand,
-    # idle-release VRAM). **Opt-in** (NOT in the default set below): unlike embed/tabular — whose deps
-    # bootstrap.sh installs — whisper.cpp needs a manual CUDA build (serving/whispercpp/build.sh), so
-    # on a host that hasn't built it run.sh would exit and stall bring-up (Codex review). Enable once
-    # built:  SUPERVISE_DAEMONS=agent,training,vision,embed,tabular,asr,ui
-    "asr": {
-        "cmd": ["bash", os.path.join(REPO, "serving", "whispercpp", "run.sh")],
-        "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
-        "grace_s": float(os.getenv("ASR_GRACE", "30")),
-    },
+    # 018 T359 — ASR (whisper.cpp) folded into the host agent (hostagent/adapters/whisper.py); the
+    # standalone whisper supervisor is retired. The agent serves /engines/asr/* (opt-in: reports
+    # unavailable until whisper.cpp is built via serving/whispercpp/build.sh). ASR_URL points at the
+    # agent; platform-health treats asr as optional so an unbuilt host never stalls bring-up.
     # 009 US4 — tabular: a BentoML CPU daemon, OFF the GPU lease (always-on, no VRAM), like embed.
     "tabular": {
         "cmd": ["bash", os.path.join(REPO, "serving", "bento", "tabular_run.sh")],
         "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
         "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
     },
-    # 018 US2 — the GPU host agent (hostagent/). In the default set since T358 (it serves the LLM
-    # engine, replacing the retired llama supervisor); it coexists with the remaining legacy daemons
-    # via the lockfile interop shim and takes over one more engine per fold-in phase (T359-T361).
-    # At lockfile retirement (T364) this becomes one of exactly two supervised daemons (agent + ui)
-    # and the vision/embed/tabular/asr entries above are deleted.
+    # 018 US2 — the GPU host agent (hostagent/). In the default set since T358; it serves the LLM
+    # (T358) and ASR (T359) engines, replacing their retired supervisors, and coexists with the
+    # remaining legacy daemons via the lockfile interop shim, taking one more engine per fold-in
+    # phase (T360-T361). At lockfile retirement (T364) this becomes one of exactly two supervised
+    # daemons (agent + ui) and the vision/embed/tabular entries above are deleted.
     "agent": {
         "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
         # Probe the LLM ENGINE, not just the process (Codex round 8, 018): the agent replaces the

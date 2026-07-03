@@ -52,4 +52,5 @@ if [[ ! -f "$MODEL_FILE" ]]; then
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL_NAME}.bin"
 fi
 echo ">> model ready: $MODEL_FILE"
-echo "done. start the ASR supervisor:  bash serving/whispercpp/run.sh"
+echo "done. ASR is served by the host agent at /engines/asr (018 T359 — no separate daemon);"
+echo "      restart the agent (or up_all) to pick up the freshly-built whisper.cpp."

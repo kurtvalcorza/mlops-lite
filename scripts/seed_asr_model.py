@@ -33,7 +33,8 @@ def main() -> int:
     c.set_registered_model_alias(NAME, "serving", mv.version)
     print(f"registered {NAME} v{mv.version} -> {SOURCE}  (task=asr, serving_engine=whisper.cpp, "
           f"promoted @serving)")
-    print("done. build + start ASR:  bash serving/whispercpp/build.sh && bash serving/whispercpp/run.sh")
+    print("done. build ASR (the host agent then serves it at /engines/asr, 018 T359):  "
+          "bash serving/whispercpp/build.sh")
     return 0
 
 
