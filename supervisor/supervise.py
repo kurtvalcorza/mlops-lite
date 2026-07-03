@@ -36,11 +36,9 @@ STATUS_PORT = int(os.getenv("SUPERVISE_STATUS_PORT", "8099"))
 # supervisor runs on the same WSL host as the daemons. The set can be narrowed for testing via
 # SUPERVISE_DAEMONS (comma-separated names); default is all three.
 _ALL = {
-    "serving": {
-        "cmd": ["bash", os.path.join(REPO, "serving", "llama", "run.sh")],
-        "health_url": os.getenv("SERVING_HEALTH", "http://localhost:8090/health"),
-        "grace_s": float(os.getenv("SERVING_GRACE", "30")),
-    },
+    # 018 T358 — the LLM engine folded into the host agent (`hostagent/adapters/llama.py`); the
+    # standalone llama supervisor daemon is retired. The agent (below) now serves `/engines/llm/*`;
+    # the gateway's SERVING_URL points at it. Vision/asr/embed/tabular fold in at T359–T361.
     "training": {
         "cmd": ["bash", os.path.join(REPO, "training", "run.sh")],
         "health_url": os.getenv("TRAINING_HEALTH", "http://localhost:8091/health"),
@@ -62,7 +60,7 @@ _ALL = {
     # idle-release VRAM). **Opt-in** (NOT in the default set below): unlike embed/tabular — whose deps
     # bootstrap.sh installs — whisper.cpp needs a manual CUDA build (serving/whispercpp/build.sh), so
     # on a host that hasn't built it run.sh would exit and stall bring-up (Codex review). Enable once
-    # built:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,asr,ui
+    # built:  SUPERVISE_DAEMONS=agent,training,vision,embed,tabular,asr,ui
     "asr": {
         "cmd": ["bash", os.path.join(REPO, "serving", "whispercpp", "run.sh")],
         "health_url": os.getenv("ASR_HEALTH", "http://localhost:8095/health"),
@@ -74,11 +72,11 @@ _ALL = {
         "health_url": os.getenv("TABULAR_HEALTH", "http://localhost:8094/readyz"),
         "grace_s": float(os.getenv("TABULAR_GRACE", "120")),
     },
-    # 018 US2 — the GPU host agent (hostagent/). **Opt-in during the strangler migration** (NOT in
-    # the default set below): it coexists with the legacy daemons via the lockfile interop shim and
-    # takes over one engine per fold-in phase (T358+). At lockfile retirement (T364) this becomes
-    # one of exactly two supervised daemons (agent + ui) and the entries above are deleted.
-    # Enable:  SUPERVISE_DAEMONS=serving,training,vision,embed,tabular,ui,agent
+    # 018 US2 — the GPU host agent (hostagent/). In the default set since T358 (it serves the LLM
+    # engine, replacing the retired llama supervisor); it coexists with the remaining legacy daemons
+    # via the lockfile interop shim and takes over one more engine per fold-in phase (T359-T361).
+    # At lockfile retirement (T364) this becomes one of exactly two supervised daemons (agent + ui)
+    # and the vision/embed/tabular/asr entries above are deleted.
     "agent": {
         "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
         "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/health"),
@@ -94,7 +92,7 @@ _ALL = {
 }
 _SELECTED = [n.strip()
              for n in os.getenv("SUPERVISE_DAEMONS",
-                                "serving,training,vision,embed,tabular,ui").split(",")
+                                "agent,training,vision,embed,tabular,ui").split(",")
              if n.strip() in _ALL]
 
 

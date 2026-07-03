@@ -102,11 +102,15 @@ SC-106..110 at completion.
 
 ### Fold-ins (one mergeable phase each)
 
-- [ ] **T358** [US2] LLM fold-in: `hostagent/adapters/llama.py` (from
+- [x] **T358** [US2] LLM fold-in: `hostagent/adapters/llama.py` (from
   `serving/llama/supervisor.py` — spawn llama-server on a dynamic port, ready probe, forward
   incl. SSE `/engines/llm/infer/stream`); flip `SERVING_URL` →
   `http://…:8100/engines/llm`; delete `serving/llama/supervisor.py` (+ its `run.sh` entry);
   gateway `serving.py` reads agent health shape. **[HW]** smoke per quickstart.
+  — BUILT (offline: adapter + generic `/engines/{id}/{verb}[/stream]`/health/unload-now surface
+  + `adapters` registry; `SERVING_URL`/compose/supervise wiring; supervisor retired; 18 new tests
+  + shared-lifecycle drain/reap coverage supersedes the retired supervisor tests; 325 passed /
+  24 skipped offline, ruff-clean). **[HW] smoke pending on the GPU box.**
 - [ ] **T359** [US2] ASR fold-in: `hostagent/adapters/whisper.py` (multipart forward, opt-in
   engine, `unavailable` when the CUDA build is absent); flip `ASR_URL`; delete
   `serving/whispercpp/supervisor.py` (keep `build.sh`). **[HW]** smoke.
