@@ -3,7 +3,11 @@ adapter. This is where the llama/whisper copy that the 2026-07 architecture revi
 converges: both GPU-lease serving supervisors returned a byte-identical /health and both picked a
 dynamic child port the same way. One definition here, one behaviour for every lease tenant.
 """
+import os
+import signal
 import socket
+import subprocess
+import urllib.request
 
 
 def free_port() -> int:
@@ -13,6 +17,60 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+class ProcGroup:
+    """A Popen whose terminate/kill signal the whole process GROUP. BentoML forks worker processes,
+    so killing only the launcher would orphan a worker still holding VRAM/RAM + its port. Spawned
+    with start_new_session=True (the launcher leads the group). Exposes the Popen-like surface the
+    shared lifecycle drives (`.pid .poll() .terminate() .kill() .wait()`)."""
+
+    def __init__(self, popen):
+        self._p = popen
+        self.pid = popen.pid
+
+    def poll(self):
+        return self._p.poll()
+
+    def _sig_group(self, sig):
+        try:
+            os.killpg(os.getpgid(self._p.pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                self._p.send_signal(sig)  # fall back to the single pid
+            except Exception:
+                pass
+
+    def terminate(self):
+        self._sig_group(signal.SIGTERM)
+
+    def kill(self):
+        self._sig_group(signal.SIGKILL)
+
+    def wait(self, timeout=None):
+        return self._p.wait(timeout)
+
+
+def bento_spawn(run_sh_path: str):
+    """Spawn a BentoML service via its run.sh on a fresh loopback port, in its OWN process group so
+    the whole worker tree is reap-able (see ProcGroup). Returns (port, ProcGroup). The run scripts
+    honor BENTO_HOST/BENTO_PORT and source .env for their MinIO creds — the agent stays torch-free
+    (research R10) by wrapping them rather than importing their heavy deps."""
+    port = free_port()
+    env = dict(os.environ, BENTO_HOST="127.0.0.1", BENTO_PORT=str(port))
+    p = subprocess.Popen(["bash", run_sh_path], env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return port, ProcGroup(p)
+
+
+def http_200(url: str, timeout: float = 2.0) -> bool:
+    """True iff `url` returns HTTP 200 — the BentoML `/readyz` readiness probe every bento child
+    (vision/embed/tabular) shares."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
 
 def gpu_lease_health(lease, *, ok, reason, resident, model, vram_budget_gb, est_vram) -> dict:

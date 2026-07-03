@@ -25,7 +25,10 @@ export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:?set MINIO_ROOT
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (.env / scripts/gen_secrets)}}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export EMBED_MODEL="${EMBED_MODEL:-embed-minilm}"
-EMBED_PORT="${EMBED_PORT:-8093}"
+# 018 T361: the host agent spawns this as a child, injecting BENTO_HOST/BENTO_PORT (shared with the
+# other bento children). Fall back to the standalone EMBED_PORT / 0.0.0.0 for a legacy launch.
+EMBED_PORT="${BENTO_PORT:-${EMBED_PORT:-8093}}"
+EMBED_HOST="${BENTO_HOST:-0.0.0.0}"
 
 if [[ ! -x "$VENV/bin/bentoml" ]]; then
   echo "bentoml not found in $VENV — pip install bentoml sentence-transformers into it first." >&2
@@ -33,5 +36,5 @@ if [[ ! -x "$VENV/bin/bentoml" ]]; then
 fi
 
 cd "$DIR"
-echo ">> Starting BentoML embeddings service on :$EMBED_PORT (CPU, off-lease; model loads on first request)"
-exec "$VENV/bin/bentoml" serve embed_service:EmbeddingService --host 0.0.0.0 --port "$EMBED_PORT"
+echo ">> Starting BentoML embeddings service on ${EMBED_HOST}:$EMBED_PORT (CPU, off-lease; model loads on first request)"
+exec "$VENV/bin/bentoml" serve embed_service:EmbeddingService --host "$EMBED_HOST" --port "$EMBED_PORT"

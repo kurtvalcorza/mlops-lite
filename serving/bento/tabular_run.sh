@@ -18,7 +18,10 @@ export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:?set MINIO_ROOT
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (.env / scripts/gen_secrets)}}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export TABULAR_MODEL="${TABULAR_MODEL:-tabular-lgbm}"
-TABULAR_PORT="${TABULAR_PORT:-8094}"
+# 018 T361: the host agent spawns this as a child, injecting BENTO_HOST/BENTO_PORT (shared with the
+# other bento children). Fall back to the standalone TABULAR_PORT / 0.0.0.0 for a legacy launch.
+TABULAR_PORT="${BENTO_PORT:-${TABULAR_PORT:-8094}}"
+TABULAR_HOST="${BENTO_HOST:-0.0.0.0}"
 
 if [[ ! -x "$VENV/bin/bentoml" ]]; then
   echo "bentoml not found in $VENV — pip install bentoml lightgbm joblib into it first." >&2
@@ -26,5 +29,5 @@ if [[ ! -x "$VENV/bin/bentoml" ]]; then
 fi
 
 cd "$DIR"
-echo ">> Starting BentoML tabular service on :$TABULAR_PORT (CPU, off-lease; model loads on first request)"
-exec "$VENV/bin/bentoml" serve tabular_service:TabularService --host 0.0.0.0 --port "$TABULAR_PORT"
+echo ">> Starting BentoML tabular service on ${TABULAR_HOST}:$TABULAR_PORT (CPU, off-lease; model loads on first request)"
+exec "$VENV/bin/bentoml" serve tabular_service:TabularService --host "$TABULAR_HOST" --port "$TABULAR_PORT"
