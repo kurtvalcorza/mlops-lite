@@ -60,12 +60,16 @@ class LlamaAdapter:
 
     # -- lifecycle interface (data-model.md §EngineAdapter) --------------------------------------
     def available(self):
-        """Binary + model prerequisites present? Surfaces as `unavailable(reason)` (R7) instead of
-        a spawn crash — the old supervisor discovered a missing binary only at load time."""
-        if not os.path.exists(self.llama_bin):
-            return (False, f"llama-server not found at {self.llama_bin} — build llama.cpp (README)")
-        if not os.path.exists(self.model):
-            return (False, f"model GGUF not found at {self.model}")
+        """Binary + model prerequisites present AND usable? Surfaces as `unavailable(reason)` (R7)
+        instead of a spawn crash — the old supervisor found a missing binary only at load time.
+        Checks executability / real-file (Codex round 7, 018): an existing-but-non-executable binary
+        or a MODEL that is a directory would otherwise pass here and let the swap target-probe evict
+        a working holder for a load that then fails."""
+        if not (os.path.isfile(self.llama_bin) and os.access(self.llama_bin, os.X_OK)):
+            return (False, f"llama-server missing or not executable at {self.llama_bin} — "
+                           f"build llama.cpp (README)")
+        if not os.path.isfile(self.model):
+            return (False, f"model GGUF not found (or not a file) at {self.model}")
         return (True, None)
 
     def estimate_vram(self) -> float:

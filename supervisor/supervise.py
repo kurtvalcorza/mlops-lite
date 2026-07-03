@@ -90,10 +90,16 @@ _ALL = {
         "grace_s": float(os.getenv("UI_GRACE", "300")),
     },
 }
-_SELECTED = [n.strip()
-             for n in os.getenv("SUPERVISE_DAEMONS",
-                                "agent,training,vision,embed,tabular,ui").split(",")
-             if n.strip() in _ALL]
+# 018 T358: a legacy `serving` selection (a pre-fold-in .env override that predates the LLM
+# fold-in) now means the `agent`, which serves the LLM engine. Translate it — otherwise an
+# unchanged override silently drops `serving` (no longer in _ALL) AND never adds `agent`, leaving
+# LLM serving unsupervised while the gateway's SERVING_URL points at :8100 (Codex round 7, 018).
+_SELECTED = []
+for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,vision,embed,tabular,ui").split(","):
+    _n = _n.strip()
+    _n = "agent" if _n == "serving" else _n
+    if _n in _ALL and _n not in _SELECTED:
+        _SELECTED.append(_n)
 
 
 def _backoff(failures: int) -> float:

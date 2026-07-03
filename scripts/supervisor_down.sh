@@ -27,7 +27,10 @@ kill_match "supervisor/supervise.py" TERM || echo "  (no supervisor running)"
 sleep 5
 
 echo "[down] sweeping any leftover daemon processes ..."
-kill_match "serving/llama/supervisor.py" KILL || true
+# 018 T358: the GPU host agent is a supervised default now — sweep it (its llama-server child is
+# caught by the GPU-compute sweep below) so a dead/stale supervisor or a restart never orphans it.
+kill_match "hostagent/main.py" KILL || true
+kill_match "hostagent/run.sh" KILL || true
 kill_match "training/trainer.py" KILL || true
 kill_match "bentoml serve" KILL || true
 kill_match "VisionClassifier" KILL || true

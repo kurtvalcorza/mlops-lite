@@ -167,7 +167,11 @@ def make_handler(admission, journal, manager):
                 if rt is None or not hasattr(rt.adapter, "health"):
                     self._send(404, {"error": f"unknown engine {eid!r}"})
                 else:
-                    self._send(200, rt.adapter.health(rt._resident()))
+                    payload = rt.adapter.health(rt._resident())
+                    # 503 when the engine can't serve (missing/dud prereqs) so the gateway readiness
+                    # aggregator (platform_health keys on status==200) and serving.health() both see
+                    # a REQUIRED engine as down, not falsely healthy (Codex round 7, 018).
+                    self._send(200 if payload.get("ok", True) else 503, payload)
             elif path == "/jobs" or path.startswith("/jobs/"):
                 job_id = path[len("/jobs/"):] if path.startswith("/jobs/") else None
                 if job_id:

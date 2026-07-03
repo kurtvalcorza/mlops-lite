@@ -45,6 +45,7 @@ def _adapter(tmp_path, monkeypatch, *, with_model=True):
     if with_model:
         bin_ = tmp_path / "llama-server"
         bin_.write_text("#!/bin/sh\n")
+        os.chmod(bin_, 0o755)  # available() requires an EXECUTABLE binary (Codex round 7)
         model = tmp_path / "model.gguf"
         model.write_bytes(b"x" * (2 * 1024 * 1024))  # 2 MiB — a nonzero size for the estimate
         monkeypatch.setenv("LLAMA_BIN", str(bin_))
@@ -67,6 +68,22 @@ def test_available_ok_and_estimate_positive(tmp_path, monkeypatch):
     a = _adapter(tmp_path, monkeypatch)
     assert a.available() == (True, None)
     assert a.estimate_vram() > 1.0  # size*1.2 + 1.0 headroom
+
+
+def test_available_requires_executable_binary_and_file_model(tmp_path, monkeypatch):
+    # Codex round 7: an existing-but-non-executable binary, or a MODEL that is a directory, must be
+    # unavailable — else the swap target-probe evicts a working holder for a load that then fails.
+    a = _adapter(tmp_path, monkeypatch)
+    os.chmod(a.llama_bin, 0o644)  # exists but not executable
+    ok, reason = a.available()
+    assert not ok and "executable" in reason
+    os.chmod(a.llama_bin, 0o755)
+    model_dir = tmp_path / "model_is_a_dir"
+    model_dir.mkdir()
+    monkeypatch.setenv("MODEL", str(model_dir))
+    a2 = LlamaAdapter()
+    ok2, reason2 = a2.available()
+    assert not ok2 and "not a file" in reason2
 
 
 def test_estimate_missing_file_is_near_budget_not_zero(tmp_path, monkeypatch):
