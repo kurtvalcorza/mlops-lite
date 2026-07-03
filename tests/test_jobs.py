@@ -181,6 +181,31 @@ def test_batch_tabular_is_off_gpu_no_flag(tmp_path):
     assert holder is None and flag is False
 
 
+def test_terminal_journal_write_precedes_slot_release(tmp_path):
+    """@claude PR#33: the durable terminal transition must land BEFORE the GPU slot/_active free —
+    else a crash in the window loses a completed job (FR-173) and /health reads busy=false while
+    jobs_active still counts it. A spy journal snapshots the slot state at the terminal write."""
+    a = _admission()
+    seen = {}
+
+    class SpyJournal(Journal):
+        def transition(self, job_id, to, **kw):
+            if to in ("completed", "succeeded", "failed"):   # snapshot at the TERMINAL write
+                seen["active"] = jm._active
+                seen["holder"] = a.holder()
+            return super().transition(job_id, to, **kw)
+
+    jm = jobs_mod.JobManager(a, SpyJournal(str(tmp_path / "j.jsonl")),
+                             runners=_const_runners({"status": "completed"}))
+    _, p = jm.submit("finetune", dict(FT_REQ))
+    assert _wait_state(jm, p["run_id"], "completed")
+    # at the terminal journal write the job slot was STILL held — release runs strictly after
+    assert seen["active"] == p["run_id"]
+    assert seen["holder"] is not None and seen["holder"]["kind"] == "job"
+    # and afterwards the slot is freed (no strand)
+    assert a.holder() is None and jm._active is None
+
+
 # ---- subprocess runner plumbing (real _run_finetune, fake Popen) ------------------------------
 def test_finetune_subprocess_success_maps_fields_and_sets_child(tmp_path):
     seen = {}

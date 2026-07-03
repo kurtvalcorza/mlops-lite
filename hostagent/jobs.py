@@ -221,11 +221,19 @@ class JobManager:
             update = {"status": "failed", "error": f"{type(e).__name__}: {e}"}
         finally:
             self._children.pop(job_id, None)
-            self._release(kind, spec)
             status = update.pop("status", "failed")
             fields = {k: v for k, v in update.items() if k != "result"}
-            self.journal.transition(job_id, status, ended_at=self.clock(),
-                                    result=update.get("result"), fields=fields or None)
+            # Journal the terminal state BEFORE freeing the slot (@claude PR#33): the durable write
+            # must land first, else a crash in the window between release and this fsync leaves the
+            # journal showing a COMPLETED job as queued/running — `mark_interrupted` would then fail
+            # it on restart, losing its real result (the exact loss FR-173's journal prevents) — and
+            # a concurrent /health could read busy=false while `jobs_active` still counts it.
+            # Release runs in a nested finally so a journal-write error can never strand the slot.
+            try:
+                self.journal.transition(job_id, status, ended_at=self.clock(),
+                                        result=update.get("result"), fields=fields or None)
+            finally:
+                self._release(kind, spec)
 
     # -- the four runners (verb bodies unchanged from trainer.py) --------------------------------
     def _run_finetune(self, job_id: str, request: dict) -> dict:
@@ -370,6 +378,6 @@ def legacy_view(record: dict) -> dict:
             view[field] = record.get(field)
     if record.get("error") is not None:
         view["error"] = record["error"]
-    if kind == "hpo" and record.get("summary"):
-        view["trials"] = record["summary"].get("trials")
+    # (No top-level `trials` for HPO — the retired trainer never returned one; `trials` stays nested
+    # under `summary`, which `spec.extra` already surfaces. Strict byte-compat, @claude PR#33.)
     return view
