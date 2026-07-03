@@ -23,6 +23,7 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from hostagent import admission as adm  # noqa: E402
+from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 from hostagent.metrics import REGISTRY  # noqa: E402
@@ -59,7 +60,8 @@ def build_agent(lease=None):
     from hostagent import adapters  # one runtime per registered engine adapter (T358+)
 
     manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission, lease))
-    return admission, journal, manager
+    jobs = jobs_mod.JobManager(admission, journal)  # 018 T362: the trainer folded in
+    return admission, journal, manager, jobs
 
 
 def _engine_error_status(exc: BaseException) -> int:
@@ -146,7 +148,7 @@ def _refresh_metrics(admission, journal, manager) -> None:
     REGISTRY.set_gauge("hostagent_wedged", wedged)
 
 
-def make_handler(admission, journal, manager):
+def make_handler(admission, journal, manager, jobs):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet — health polling would spam stdout
             pass
@@ -167,6 +169,10 @@ def make_handler(admission, journal, manager):
             path = url.path
             if path in ("/health", "/healthz"):
                 holder = admission.holder()
+                # The agent's own health PLUS the trainer's `/health` fields (018 T362): TRAINER_URL
+                # now points here, so swap.py (gpu_batch_active), platform_metrics (busy/free_mib/
+                # gpu_batch_active), and the gateway training-health view keep reading the same
+                # field names with only a base-URL flip (byte-compat, FR-177).
                 self._send(200, {
                     "ok": True,
                     "engines": {eid: s["state"] for eid, s in manager.engine_states().items()},
@@ -177,6 +183,7 @@ def make_handler(admission, journal, manager):
                     "jobs_active": journal.active_count(),
                     "interrupted_since_start": _interrupted_at_start,
                     "started_at": _started_at,
+                    **jobs.health_fields(),
                 })
             elif path == "/metrics":
                 _refresh_metrics(admission, journal, manager)
@@ -218,8 +225,24 @@ def make_handler(admission, journal, manager):
                 else:
                     kind = (parse_qs(url.query).get("kind") or [None])[0]
                     self._send(200, {"jobs": journal.jobs(kind=kind)})
+            elif self._legacy_job_get(path):
+                pass  # handled: GET /train/{id} | /study/{id} | /batch/{id} | /shadow-replay/{id}
             else:
                 self._send(404, {"error": "unknown path"})
+
+        def _legacy_job_get(self, path: str) -> bool:
+            """Byte-compat status poll (018 T362, FR-177): the trainer's GET /train/{id} etc. The
+            agent renders the JobRecord to the trainer's exact legacy shape; a wrong-kind id 404s
+            just as the trainer (a separate dict per kind) did. Returns True if it routed."""
+            segs = path.strip("/").split("/")
+            if len(segs) != 2 or segs[0] not in jobs_mod.ROUTE_TO_KIND:
+                return False
+            rec = jobs.get(segs[1])
+            if rec is None or rec.get("kind") != jobs_mod.ROUTE_TO_KIND[segs[0]]:
+                self._send(404, {"error": f"no {segs[0]} {segs[1]}"})
+            else:
+                self._send(200, jobs_mod.legacy_view(rec))
+            return True
 
         def _read_body(self):
             try:
@@ -263,6 +286,33 @@ def make_handler(admission, journal, manager):
                 result = rt.unload(drain_timeout_s=float(body.get("drain_timeout_s", 10)))
                 code = 200 if result.get("status") in ("unloaded", "idle") else 409
                 return self._send(code, result)
+            # Jobs surface (018 T362, contracts/agent-api.md) + the legacy trainer aliases the
+            # gateway still calls (byte-compat, FR-177 — retired from the gateway at US4/cleanup).
+            if path == "/jobs":
+                body = self._read_body()
+                if body is None:
+                    return self._send(400, {"error": "invalid JSON"})
+                # {kind, modality, request}: fold `modality` into the inner request (the trainer
+                # carried it there); tolerate a flat body (request fields at top level) too.
+                request = dict(body.get("request") or {k: v for k, v in body.items()
+                                                       if k not in ("kind", "modality", "request")})
+                if body.get("modality") is not None:
+                    request.setdefault("modality", body["modality"])
+                code, payload = jobs.submit(body.get("kind"), request)
+                return self._send(code, payload)
+            if path.startswith("/jobs/") and path.endswith("/cancel"):
+                if CONTROL_SECRET and self.headers.get("X-Agent-Control", "") != CONTROL_SECRET:
+                    return self._send(403, {"error": "bad or missing X-Agent-Control"})
+                job_id = path[len("/jobs/"):-len("/cancel")]
+                result = jobs.cancel(job_id)
+                code = 404 if result.get("status") == "unknown" else 200
+                return self._send(code, result)
+            if path.strip("/") in jobs_mod.ROUTE_TO_KIND:  # legacy trainer aliases
+                body = self._read_body()
+                if body is None:
+                    return self._send(400, {"error": "invalid JSON"})
+                code, payload = jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
+                return self._send(code, payload)
             # Inference passthrough: /engines/<id>/<verb> (+ /stream), and the migration-only
             # byte-compatible /engines/<id>/unload-now the gateway swap still calls (retires T363).
             segs = path.strip("/").split("/")
@@ -333,7 +383,7 @@ def make_handler(admission, journal, manager):
 
 def main() -> None:
     global _interrupted_at_start
-    admission, journal, manager = build_agent()
+    admission, journal, manager, jobs = build_agent()
     _interrupted_at_start = journal.mark_interrupted("agent restart")
     if _interrupted_at_start:
         REGISTRY.inc("hostagent_jobs_interrupted_total", by=_interrupted_at_start)
@@ -341,9 +391,9 @@ def main() -> None:
               f"(FR-173)", flush=True)
     threading.Thread(target=manager.run_reaper, daemon=True).start()
     print(f"hostagent :{AGENT_PORT} | state={STATE_DIR} | engines={list(manager.runtimes)} "
-          f"| vram_budget={VRAM_GB:.0f}GB", flush=True)
-    ThreadingHTTPServer((AGENT_BIND, AGENT_PORT), make_handler(admission, journal, manager)) \
-        .serve_forever()
+          f"| jobs=on | vram_budget={VRAM_GB:.0f}GB", flush=True)
+    ThreadingHTTPServer((AGENT_BIND, AGENT_PORT),
+                        make_handler(admission, journal, manager, jobs)).serve_forever()
 
 
 if __name__ == "__main__":

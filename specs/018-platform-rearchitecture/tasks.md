@@ -120,12 +120,18 @@ SC-106..110 at completion.
   in favor of agent 409s. **[HW]** smoke.
 - [ ] **T361** [P] [US2] CPU fold-ins: `hostagent/adapters/{embed,tabular}.py` (children, no
   admission); flip `EMBED_URL`/`TABULAR_URL`; retire their supervise entries.
-- [ ] **T362** [US2] Jobs fold-in: `hostagent/jobs.py` ports the trainer daemon's four launch
+- [x] **T362** [US2] Jobs fold-in: `hostagent/jobs.py` ports the trainer daemon's four launch
   paths into one parameterized submit (subprocess-per-run via `training/run_flow.py` +
   `run_shadow.py` unchanged; child pid = VRAM owner via lifecycle); `POST /jobs` +
   legacy-route aliases per contracts/agent-api.md; flip `TRAINER_URL`; retire
-  `training/trainer.py`; journal-backed `GET /jobs`. Retire the trainer-side path-injection
-  seams in the same phase (FR-176): `training/scoring/__init__.py:_load_evaluation`,
+  `training/trainer.py`; journal-backed `GET /jobs`. **BUILT (branch `018/t362-jobs-foldin`):**
+  JobManager over admission (`kind="job"`, structurally preempt-proof) + the durable journal;
+  jobs hold the single job slot; batch runs off-lease with `gpu_batch_active`; `/health` is a
+  superset carrying the trainer fields so swap.py/platform_metrics keep working (byte-compat,
+  FR-177); supervise set shrinks to `{agent, ui}`; agent runs under the training venv. 406 passed
+  offline. **FR-176 path-injection seam retirement DEFERRED to T362.1** (own PR — it moves the
+  gateway evaluation/batch/shadow cores into `platformlib`, a gateway-wide restructure the jobs
+  surface doesn't need): `training/scoring/__init__.py:_load_evaluation`,
   `training/flows/hpo.py:_load_evaluation`, `training/flows/batch_infer.py:_load_batch`,
   `training/flows/shadow_replay.py:_load_gateway_shadow` → `platformlib` imports.
 - [ ] **T363** [US2] Gateway swap thinning: `gateway/app/swap.py` reduces to preempt-flag

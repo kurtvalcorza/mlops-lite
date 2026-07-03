@@ -18,7 +18,9 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from hostagent import admission as adm  # noqa: E402
-from hostagent import lifecycle, main as agent_main  # noqa: E402
+from hostagent import jobs as jobs_mod  # noqa: E402
+from hostagent import lifecycle  # noqa: E402
+from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 
 
@@ -30,7 +32,8 @@ def _serve():
     journal.submit({"job_id": "b1", "kind": "batch", "state": "queued", "submitted_at": 2.0})
     manager = lifecycle.EngineManager(admission, runtimes={})
     server = ThreadingHTTPServer(
-        ("127.0.0.1", 0), agent_main.make_handler(admission, journal, manager))
+        ("127.0.0.1", 0), agent_main.make_handler(
+            admission, journal, manager, jobs_mod.JobManager(admission, journal)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 

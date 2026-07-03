@@ -36,24 +36,12 @@ STATUS_PORT = int(os.getenv("SUPERVISE_STATUS_PORT", "8099"))
 # supervisor runs on the same WSL host as the daemons. The set can be narrowed for testing via
 # SUPERVISE_DAEMONS (comma-separated names); default is all three.
 _ALL = {
-    # 018 T358 — the LLM engine folded into the host agent (`hostagent/adapters/llama.py`); the
-    # standalone llama supervisor daemon is retired. The agent (below) now serves `/engines/llm/*`;
-    # the gateway's SERVING_URL points at it. ASR at T359; vision/embed/tabular at T360-T361.
-    "training": {
-        "cmd": ["bash", os.path.join(REPO, "training", "run.sh")],
-        "health_url": os.getenv("TRAINING_HEALTH", "http://localhost:8091/health"),
-        "grace_s": float(os.getenv("TRAINING_GRACE", "30")),
-    },
-    # 018 T359-T361: ASR (whisper.cpp) + vision/embed/tabular (BentoML) all folded into the host
-    # agent (hostagent/adapters/{whisper,vision,embed,tabular}.py). The agent spawns each bento
-    # run.sh as a child and serves /engines/<id>/*; their URLs point at the agent. embed/tabular are
-    # CPU/off-lease; asr is opt-in (unavailable until whisper.cpp built; platform-health treats it
-    # as optional so an unbuilt host never stalls bring-up). No standalone vision/embed/tabular/asr.
-    # 018 US2 — the GPU host agent (hostagent/). In the default set since T358; it serves the LLM
-    # (T358) and ASR (T359) engines, replacing their retired supervisors, and coexists with the
-    # remaining legacy daemons via the lockfile interop shim, taking one more engine per fold-in
-    # phase (T360-T361). At lockfile retirement (T364) this becomes one of exactly two supervised
-    # daemons (agent + ui) and the vision/embed/tabular entries above are deleted.
+    # 018 T358-T362: EVERY GPU/CPU daemon folded into the host agent — the LLM (T358), ASR (T359),
+    # vision/embed/tabular (T360-T361) engines AND the training/HPO/batch/shadow-replay jobs surface
+    # (T362, `hostagent/jobs.py`, replacing the retired `training/trainer.py`). The agent spawns each
+    # engine's child and runs jobs as subprocesses/in-process; the gateway's SERVING_URL/ASR_URL/
+    # BENTO_URL/EMBED_URL/TABULAR_URL/TRAINER_URL all point at it. With the trainer retired the
+    # supervised set is now just {agent, ui}; at lockfile retirement (T364) the interop shim also goes.
     "agent": {
         "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
         # Probe the LLM ENGINE, not just the process (Codex round 8, 018): the agent replaces the
@@ -73,14 +61,14 @@ _ALL = {
         "grace_s": float(os.getenv("UI_GRACE", "300")),
     },
 }
-# 018 T358: a legacy `serving` selection (a pre-fold-in .env override that predates the LLM
-# fold-in) now means the `agent`, which serves the LLM engine. Translate it — otherwise an
-# unchanged override silently drops `serving` (no longer in _ALL) AND never adds `agent`, leaving
-# LLM serving unsupervised while the gateway's SERVING_URL points at :8100 (Codex round 7, 018).
+# 018 T358/T362: a legacy `serving` OR `training` selection (a pre-fold-in .env override) now means
+# the `agent`, which serves those engines and the jobs surface. Translate both — otherwise an
+# unchanged override silently drops them (no longer in _ALL) AND never adds `agent`, leaving the
+# gateway's SERVING_URL/TRAINER_URL pointing at an unsupervised :8100 (Codex round 7, 018).
 _SELECTED = []
-for _n in os.getenv("SUPERVISE_DAEMONS", "agent,training,ui").split(","):
+for _n in os.getenv("SUPERVISE_DAEMONS", "agent,ui").split(","):
     _n = _n.strip()
-    _n = "agent" if _n == "serving" else _n
+    _n = "agent" if _n in ("serving", "training") else _n
     if _n in _ALL and _n not in _SELECTED:
         _SELECTED.append(_n)
 

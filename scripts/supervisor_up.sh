@@ -23,12 +23,13 @@ sys.exit(0 if ds and all(x["state"] == "healthy" for x in ds) else 1)
 '
 }
 
-# The daemon set supervise.py will select (its default already includes `agent` since T358). Used
-# only to detect a STALE pre-fold-in supervisor still up from before the gateway URL flip. Mirror
-# supervise.py's legacy mapping (a `serving` override now means `agent`) so the stale check below
-# fires even for an unchanged `SUPERVISE_DAEMONS=serving,...` override (Codex round 8, 018).
-DESIRED="${SUPERVISE_DAEMONS:-agent,training,ui}"
+# The daemon set supervise.py will select (default {agent, ui} since T362 folded the trainer in).
+# Used only to detect a STALE pre-fold-in supervisor still up from before a gateway URL flip. Mirror
+# supervise.py's legacy mapping (a `serving` OR `training` override now means `agent`) so the stale
+# check below fires even for an unchanged `SUPERVISE_DAEMONS=serving,training,...` (Codex round 8, 018).
+DESIRED="${SUPERVISE_DAEMONS:-agent,ui}"
 DESIRED="${DESIRED//serving/agent}"
+DESIRED="${DESIRED//training/agent}"
 
 # Is a named daemon present in the running supervisor's status?
 supervising() {

@@ -123,8 +123,11 @@ services:
       # AGENT_URL at T364; the other modalities still point at their legacy daemons for now.
       SERVING_URL: ${SERVING_URL:-http://host.docker.internal:8100/engines/llm}
       SERVING_MODEL: ${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}
-      # Native training daemon on the WSL GPU host (US4). serve_up.ps1 injects the Ubuntu IP.
-      TRAINER_URL: ${TRAINER_URL:-http://host.docker.internal:8091}
+      # 018 T362: the training/HPO/batch/shadow-replay jobs surface folded into the host agent —
+      # TRAINER_URL points at the agent ROOT, which serves the legacy /train|/study|/batch|
+      # /shadow-replay aliases + a superset /health byte-compatibly (FR-177). up_all.ps1 injects the
+      # Ubuntu IP. Collapses into AGENT_URL at T364.
+      TRAINER_URL: ${TRAINER_URL:-http://host.docker.internal:8100}
       # Native BentoML vision service (US1 vision/audio, CPU). serve_up.ps1 injects the Ubuntu IP.
       # 018 T360: the vision engine is served by the host agent's /engines/vision sub-path (was the
       # BentoML supervisor on :8092). Byte-compatible /readyz, /classify, /unload-now.

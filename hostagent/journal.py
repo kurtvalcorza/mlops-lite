@@ -49,9 +49,13 @@ class Journal:
                     rec["state"] = entry["to"]
                 if entry.get("reason") is not None:
                     rec["reason"] = entry["reason"]
-                for k in ("started_at", "ended_at", "result"):
-                    if entry.get(k) is not None:
-                        rec[k] = entry[k]
+                # Restore ALL non-control keys (018 T362): a terminal transition carries the kind's
+                # result fields (mlflow_run_id/model/metrics/summary/…) so a completed job's record
+                # is fully rebuilt after a restart — the gateway polls GET /train/{id} for the
+                # registered version off exactly these. record/from/to/ts/job_id are control keys.
+                for k, v in entry.items():
+                    if k not in ("record", "from", "to", "ts", "job_id") and v is not None:
+                        rec[k] = v
 
     def mark_interrupted(self, reason: str) -> int:
         """Startup pass (FR-173): every non-terminal job was killed with the previous agent —
@@ -73,16 +77,24 @@ class Journal:
                           "to": record.get("state", "queued"), "record": record})
 
     def transition(self, job_id: str, to: str, *, reason=None, started_at=None,
-                   ended_at=None, result=None) -> None:
+                   ended_at=None, result=None, fields=None) -> None:
+        """Journal a state change. `fields` (018 T362) carries arbitrary kind-specific outputs
+        (mlflow_run_id/model/metrics/summary/best/…) that must survive a restart alongside the
+        state — appended to the entry so `_replay` restores them; control keys can't be shadowed."""
         with self._lock:
             rec = self._jobs.setdefault(job_id, {"job_id": job_id})
             entry = {"ts": self.clock(), "job_id": job_id, "from": rec.get("state"), "to": to}
             rec["state"] = to
+            extra = dict(fields or {})
             for k, v in (("reason", reason), ("started_at", started_at),
                          ("ended_at", ended_at), ("result", result)):
                 if v is not None:
-                    rec[k] = v
-                    entry[k] = v
+                    extra[k] = v
+            for k, v in extra.items():
+                if k in ("record", "from", "to", "ts", "job_id") or v is None:
+                    continue  # never let a caller's field shadow a control key
+                rec[k] = v
+                entry[k] = v
             self._append(entry)
 
     def _append(self, entry: dict) -> None:

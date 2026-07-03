@@ -3,22 +3,22 @@
 # host.docker.internal (cross-distro), so we inject Ubuntu's current eth0 IP at compose-up time.
 #
 # Usage (PowerShell, from repo root), AFTER starting the native daemons in WSL:
-#   bash hostagent/run.sh            # GPU host agent — serves llm/asr/vision engines (018 T358-T360)
-#   bash training/run.sh             # training daemon (optional, for US4 /runs)
+#   bash hostagent/run.sh            # GPU host agent — serves all engines AND the jobs surface (T358-T362)
 #   ./scripts/serve_up.ps1
-param([string]$Distro = "Ubuntu", [int]$AgentPort = 8100, [int]$TrainerPort = 8091)
+param([string]$Distro = "Ubuntu", [int]$AgentPort = 8100)
 
 $ip = (wsl.exe -d $Distro hostname -I).Trim().Split(' ')[0]
 if (-not $ip) { Write-Error "Could not resolve $Distro IP"; exit 1 }
 
 $env:AGENT_URL = "http://${ip}:${AgentPort}"
-# 018 T358-T360: the LLM/ASR/vision engines are served by the host agent's /engines/<id> sub-paths
-# (was the standalone llama :8090 / whisper :8095 / bento :8092 daemons). Byte-compatible surfaces.
+# 018 T358-T362: the llm/asr/vision engines are the agent's /engines/<id> sub-paths, and the jobs
+# surface (train/study/batch/shadow-replay) is served at the agent ROOT — TRAINER_URL points there
+# (byte-compatible legacy aliases + superset /health). Was the standalone llama/whisper/bento/trainer
+# daemons. embed/tabular default via compose; up_all injects all six for a full bring-up.
 $env:SERVING_URL = "http://${ip}:${AgentPort}/engines/llm"
 $env:ASR_URL     = "http://${ip}:${AgentPort}/engines/asr"
 $env:BENTO_URL   = "http://${ip}:${AgentPort}/engines/vision"
-$env:TRAINER_URL = "http://${ip}:${TrainerPort}"
-Write-Host "host agent (llm/asr/vision) -> $env:AGENT_URL"
-Write-Host "training daemon             -> $env:TRAINER_URL"
+$env:TRAINER_URL = "http://${ip}:${AgentPort}"
+Write-Host "host agent (engines + jobs) -> $env:AGENT_URL"
 docker compose up -d
 docker compose ps
