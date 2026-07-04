@@ -60,12 +60,6 @@ class FakeS3:
             out["NextContinuationToken"] = str(start + self.page_size)
         return out
 
-    def head_object(self, Bucket, Key):
-        if Key not in self.buckets.get(Bucket, {}):
-            raise FakeClientError("404")
-        body, ct = self.buckets[Bucket][Key]
-        return {"ContentLength": len(body), "ContentType": ct}
-
     def get_object(self, Bucket, Key):
         if Key not in self.buckets.get(Bucket, {}):
             raise FakeClientError("NoSuchKey")
