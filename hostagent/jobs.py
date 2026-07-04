@@ -217,6 +217,14 @@ class JobManager:
                 record.setdefault(field, None)
             self.journal.submit(record)
             if key is not None:
+                # Prune keys whose job has aged out of the dedup window before recording this one, so
+                # _run_keys stays bounded to roughly the in-flight + recent set over a long agent
+                # uptime (review nit) — an out-of-window key can no longer dedupe anyway. Submits are
+                # infrequent (one per launch), so the O(n) sweep is negligible.
+                now = self.clock()
+                self._run_keys = {
+                    k: jid for k, jid in self._run_keys.items()
+                    if _within_idempotency_window(self.journal.get(jid), now, IDEMPOTENCY_WINDOW_S)}
                 self._run_keys[key] = job_id   # so a re-issued identical launch dedupes to this job
             self._active = job_id
             if kind == "batch" and modality in GPU_BATCH_MODALITIES:

@@ -46,12 +46,12 @@ def test_stale_completed_starts_fresh():
 
 
 # -- the JobManager.submit wiring ---------------------------------------------------------------
-def _jm(tmpdir, runner):
+def _jm(tmpdir, runner, clock=time.time):
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 20.0), lease=None)
     journal = Journal(os.path.join(tmpdir, "journal.jsonl"))
     runners = {k: runner for k in jobs_mod.KINDS}
-    return jobs_mod.JobManager(admission, journal, runners=runners)
+    return jobs_mod.JobManager(admission, journal, runners=runners, clock=clock)
 
 
 def test_reissued_launch_with_same_key_dedupes_to_the_active_job(tmp_path):
@@ -101,6 +101,27 @@ def test_reissued_launch_after_completion_dedupes_within_window(tmp_path):
 
     code3, body3 = jm.submit("finetune", {**FT_REQ, "idempotency_key": "k3"})
     assert code3 == 202 and body3["run_id"] != run_id   # a genuinely new retrain gets its own job
+
+
+def test_run_keys_do_not_grow_unbounded(tmp_path):
+    """019/US4 (review nit): a key whose job has aged out of the dedup window is pruned on the next
+    submit, so _run_keys stays bounded over a long agent uptime instead of growing per retrain."""
+    clk = {"t": 1000.0}
+
+    def instant_runner(jm, job_id, request):
+        return {}
+
+    jm = _jm(str(tmp_path), instant_runner, clock=lambda: clk["t"])
+    code, _ = jm.submit("finetune", {**FT_REQ, "idempotency_key": "old"})
+    assert code == 202
+    end = time.time() + 3
+    while time.time() < end and jm._active is not None:
+        time.sleep(0.02)                       # let the instant job finish and free the slot
+
+    clk["t"] += jobs_mod.IDEMPOTENCY_WINDOW_S + 10   # advance past the window → "old" is now stale
+    code, _ = jm.submit("finetune", {**FT_REQ, "idempotency_key": "new"})
+    assert code == 202
+    assert "old" not in jm._run_keys and jm._run_keys == {"new": jm._run_keys["new"]}  # pruned
 
 
 if __name__ == "__main__":
