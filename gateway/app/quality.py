@@ -11,26 +11,40 @@ Design (mirrors the siblings it lives beside):
   - **Prediction logging is the 006 tracing pattern** — fire-and-forget on a bounded daemon thread,
     lazy/best-effort, **fail-open**: a logging-store outage never alters or breaks the served response,
     and the write happens off the request path (Principle II / FR-119 / SC-075).
-  - **Records ride the existing MinIO `results` bucket** (`predictions/`, `labels/`, `quality/` prefixes,
-    mirroring `drift/`) — no new datastore (FR-121).
+  - **US4 (T374): the high-churn INDEX moves to the relational `gateway` DB** (`platformlib.store`):
+    a `predictions` row + a write-once `labels` row + a `capture_index` row per served prediction. The
+    **bulky/variable bodies stay in MinIO** — the prediction OUTPUT at `payload_ref`, the recoverable
+    input at `input_ref` — so scoring `window()` is one indexed predictions⋈labels join (FR-186,
+    SC-111) instead of listing + reading every object. Quality REPORTS + shadow verdicts stay objects
+    (no relational table). Write-once is now the `labels` PRIMARY KEY (FR-185) — the in-process
+    `_label_write_lock` is gone.
+  - **Fail posture (FR-164):** index-row WRITES fail-open with a dropped-counter (serving never
+    blocks); window/label READS fail loud (`QualityStoreError` → 502).
   - **Dependency-light** — pure-Python + 011's metric libs; no Evidently/pandas/scipy (Principle III).
   - The scoring/breach/cooldown logic is split into **pure functions** (`score_window`,
-    `evaluate_quality`, `is_breach`, cooldown helpers) so it unit-tests with no S3 and no GPU; the I/O
-    wrappers (`log_prediction`, `attach_label`, `compute_quality`) layer storage on top.
+    `evaluate_quality`, `is_breach`, cooldown helpers) so it unit-tests with no store and no GPU; the
+    I/O wrappers (`log_prediction`, `attach_label`, `compute_quality`) layer storage on top.
 """
 import json
 import os
 import random
-import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
-# prometheus_client, boto3 (via .datasets), and the evaluation module are imported lazily inside the
-# functions that touch them, so the pure scoring/breach/cooldown logic imports — and unit-tests — with
-# zero third-party deps (the same dependency-light stance as evaluation.py / monitoring.py).
+# prometheus_client, boto3 (via platformlib.s3io), and the evaluation module are imported lazily inside
+# the functions that touch them, so the pure scoring/breach/cooldown logic imports — and unit-tests —
+# with zero third-party deps (the same dependency-light stance as evaluation.py / monitoring.py).
+from platformlib import store as _store_mod
 
 RESULTS_BUCKET = os.getenv("RESULTS_BUCKET", "results")
+
+# The relational store module (US4). A module-level indirection so tests inject an in-memory fake
+# (`quality._store = FakeStore()`); production uses platformlib.store against the `gateway` DB.
+_store = _store_mod
+_conn_state = {"conn": None, "bootstrapped": False}
+_conn_lock = threading.Lock()
 
 # --- configuration (operator-settable) ------------------------------------------------------------
 
@@ -67,10 +81,6 @@ _log_sem = threading.BoundedSemaphore(_MAX_CONCURRENT_LOGS)
 
 _EVAL = None
 _GAUGES = None
-# Serializes the label check-then-write so concurrent submissions for the same id can't both pass the
-# duplicate check and the second overwrite the first (write-once, single-instance best-effort — S3 has no
-# native compare-and-swap; a multi-replica gateway would need conditional puts, out of scope here).
-_label_write_lock = threading.Lock()
 
 
 class QualityError(Exception):
@@ -84,18 +94,59 @@ class QualityStoreError(QualityError):
 
 def _eval():
     """The 011 evaluation module (metric registry + direction), imported lazily so the pure logic
-    stays dependency-free. evaluation.py is stdlib-only, so this works in-package and standalone."""
+    stays dependency-free. US4/FR-176 retired the standalone `from app import evaluation` sys.path
+    fallback — the trainer flows reach the cores through `platformlib` (T362.1), so quality.py is only
+    ever loaded in-package (gateway) now."""
     global _EVAL
     if _EVAL is None:
-        try:
-            from . import evaluation
-        except ImportError:  # loaded standalone (tests) — resolve via the gateway dir on sys.path
-            gw = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if gw not in sys.path:
-                sys.path.insert(0, gw)
-            from app import evaluation
+        from . import evaluation
         _EVAL = evaluation
     return _EVAL
+
+
+def _conn():
+    """A cached store connection for the index rows, opened lazily and FAIL-OPEN — returns None when
+    the store is unreachable (writes then drop with a counter; reads raise QualityStoreError). Bootstraps
+    the schema once on first success (idempotent). `quality._store` is swappable for an in-memory fake."""
+    with _conn_lock:
+        c = _conn_state["conn"]
+        if c is not None and not getattr(c, "closed", False):
+            return c
+        try:
+            c = _store.connect()
+            if not _conn_state["bootstrapped"]:
+                _store.bootstrap(c)
+                _conn_state["bootstrapped"] = True
+            _conn_state["conn"] = c
+            return c
+        except Exception:  # noqa: BLE001 — fail-open: a store outage never blocks serving/logging
+            _conn_state["conn"] = None
+            return None
+
+
+_DROPPED = None
+
+
+def _dropped(kind: str) -> None:
+    """Increment the fail-open drop counter (FR-164) when an index-row write is skipped/failed —
+    observability for a store outage without ever blocking serving. Lazy so the module imports without
+    prometheus_client."""
+    global _DROPPED
+    try:
+        if _DROPPED is None:
+            from prometheus_client import Counter
+            _DROPPED = Counter("gateway_quality_store_dropped_total",
+                               "Index-row writes dropped on a store outage (fail-open)", ["kind"])
+        _DROPPED.labels(kind=kind).inc()
+    except Exception:  # noqa: BLE001 — the counter itself must never break the fail-open path
+        pass
+
+
+def reset_store_conn() -> None:
+    """Test seam: drop the cached connection + bootstrap flag (so a test can swap `_store`)."""
+    with _conn_lock:
+        _conn_state["conn"] = None
+        _conn_state["bootstrapped"] = False
 
 
 def _gauges():
@@ -127,20 +178,38 @@ def log_prediction(model_name, model_version, modality, input_ref, prediction,
     pid = prediction_id or uuid.uuid4().hex
     if not QUALITY_LOGGING_ENABLED:
         return pid
+    ts = time.time()
+    captured_pred = prediction if QUALITY_CAPTURE_IO else None
+    payload_ref = f"{PRED_PREFIX}{pid}.json"
     record = {
         "prediction_id": pid, "model_name": model_name, "model_version": str(model_version),
-        "modality": modality, "ts": time.time(),
+        "modality": modality, "ts": ts,
         "input_ref": input_ref if QUALITY_CAPTURE_IO else None,
-        "prediction": prediction if QUALITY_CAPTURE_IO else None,
+        "prediction": captured_pred,
     }
     if not _log_sem.acquire(blocking=False):  # backpressure: store slow → drop this record
+        _dropped("prediction")
         return pid
 
     def _run():
+        # The OUTPUT body stays in MinIO (variable size); the INDEX row goes to the relational store so
+        # the scoring window is an indexed join, not an object scan (US4). A `streamed` prediction has no
+        # captured output → recorded with streamed=True, excluded from scoring by the caller.
         try:
-            _put_json(f"{PRED_PREFIX}{pid}.json", record)
+            _put_json(payload_ref, record)
         except Exception:  # noqa: BLE001 — logging must never affect serving (fail-open)
-            pass
+            _dropped("prediction")
+        try:
+            conn = _conn()
+            if conn is None:
+                _dropped("prediction")
+            else:
+                _store.log_prediction(
+                    conn, pid, model_name, str(model_version), modality,
+                    datetime.fromtimestamp(ts, timezone.utc),
+                    streamed=(captured_pred is None), payload_ref=payload_ref)
+        except Exception:  # noqa: BLE001 — a store outage drops the index row, never serving
+            _dropped("prediction")
         finally:
             _log_sem.release()
 
@@ -198,31 +267,29 @@ def _missing(e) -> bool:
 def attach_label(prediction_id: str, label) -> dict:
     """Attach a ground-truth label to a previously-logged prediction **by id** (FR-120). Supports
     delayed arrival; rejects an unknown id or a duplicate label cleanly — never overwriting served
-    history. Returns a status dict (`attached` / `unknown` / `duplicate`)."""
-    s3 = _s3()
-    pred_key = f"{PRED_PREFIX}{prediction_id}.json"
-    label_key = f"{LABEL_PREFIX}{prediction_id}.json"
+    history. Returns a status dict (`attached` / `unknown` / `duplicate`).
+
+    US4 (FR-185): write-once is now the `labels` PRIMARY KEY — a concurrent duplicate raises
+    `store.LabelExists`, so the in-process `_label_write_lock` (a single-instance best-effort guard) is
+    gone. Label writes are a READ-side operation (the operator expects a definite result), so a store
+    outage FAILS LOUD (QualityStoreError → 502), unlike the fire-and-forget prediction/capture writes."""
+    conn = _conn()
+    if conn is None:
+        raise QualityStoreError("store unreachable — cannot attach label")
     try:
-        s3.head_object(Bucket=RESULTS_BUCKET, Key=pred_key)
+        known = _store.prediction_exists(conn, prediction_id)
     except Exception as e:
-        if _missing(e):  # a real 404 → genuinely no such prediction
-            return {"prediction_id": prediction_id, "status": "unknown",
-                    "detail": "no logged prediction with this id"}
-        raise QualityStoreError(f"cannot check prediction {prediction_id}: {e}") from e  # transient → surface
-    # Serialize the duplicate-check + write so two concurrent submissions for the same id can't both
-    # see "no label" and the second overwrite the first (write-once, Codex P2).
-    with _label_write_lock:
-        try:  # reject a duplicate — a label is write-once, served history can't be silently overwritten
-            s3.head_object(Bucket=RESULTS_BUCKET, Key=label_key)
-            return {"prediction_id": prediction_id, "status": "duplicate",
-                    "detail": "this prediction already has a label"}
-        except Exception as e:
-            if not _missing(e):  # only a confirmed 404 means "no existing label" — never overwrite on a blip
-                raise QualityStoreError(f"cannot check existing label for {prediction_id}: {e}") from e
-        try:
-            _put_json(label_key, {"prediction_id": prediction_id, "label": label, "ts": time.time()})
-        except Exception as e:
-            raise QualityStoreError(f"cannot store label for {prediction_id}: {e}") from e
+        raise QualityStoreError(f"cannot check prediction {prediction_id}: {e}") from e
+    if not known:
+        return {"prediction_id": prediction_id, "status": "unknown",
+                "detail": "no logged prediction with this id"}
+    try:
+        _store.attach_label(conn, prediction_id, label, datetime.now(timezone.utc))
+    except _store.LabelExists:
+        return {"prediction_id": prediction_id, "status": "duplicate",
+                "detail": "this prediction already has a label"}
+    except Exception as e:
+        raise QualityStoreError(f"cannot store label for {prediction_id}: {e}") from e
     return {"prediction_id": prediction_id, "status": "attached"}
 
 
@@ -292,20 +359,33 @@ def capture_input(prediction_id: str, modality: str, recoverable_input, *, optio
             or not should_capture(roll=roll)):
         return
     ts = time.time()
+    mod = normalize_modality(modality)
     key = _input_key(modality, prediction_id, ts)
-    record = {"prediction_id": prediction_id, "modality": normalize_modality(modality),
+    record = {"prediction_id": prediction_id, "modality": mod,
               "input": recoverable_input, "ts": ts}
     if options:
         record["options"] = {k: v for k, v in options.items() if v is not None}
     if not _log_sem.acquire(blocking=False):  # backpressure: store slow → drop (serving unaffected)
+        _dropped("capture")
         return
 
     def _run():
+        # The recoverable input BODY stays in MinIO (`input_ref`); the `capture_index` row is the
+        # indexed handle the shadow-replay window joins on (US4). Both fail-open.
         try:
             _put_json(key, record)
-            _prune_inputs(normalize_modality(modality))  # bound storage (cap + TTL)
         except Exception:  # noqa: BLE001 — capture must never affect serving (fail-open)
-            pass
+            _dropped("capture")
+        try:
+            conn = _conn()
+            if conn is None:
+                _dropped("capture")
+            else:
+                _store.capture_input(conn, prediction_id, mod, key,
+                                     datetime.fromtimestamp(ts, timezone.utc))
+            _prune_inputs(mod)  # bound storage (cap + TTL) over the capture-index rows
+        except Exception:  # noqa: BLE001 — capture must never affect serving (fail-open)
+            _dropped("capture")
         finally:
             _log_sem.release()
 
@@ -316,19 +396,28 @@ def capture_input(prediction_id: str, modality: str, recoverable_input, *, optio
 
 
 def _prune_inputs(modality: str) -> None:
-    """Enforce the per-modality cap + TTL by deleting old `inputs/<modality>/` records (best-effort). The
-    ts is parsed from the key name (no per-record GET), so this stays cheap on the bounded corpus."""
+    """Enforce the per-modality cap + TTL by deleting old captures (best-effort). US4: the candidate set
+    is the indexed `capture_index` rows (no object listing); each pruned entry drops BOTH the index row
+    and its input-body object."""
+    conn = _conn()
+    if conn is None:
+        return  # a store blip just defers the prune; the corpus is capped again on the next capture
+    try:
+        rows = _store.capture_rows(conn, modality)
+    except Exception:  # noqa: BLE001 — prune is best-effort; never fail the capture
+        return
+    by_ref = {r["input_ref"]: r["prediction_id"] for r in rows}
+    records = [(r["input_ref"], r["captured_at"].timestamp()) for r in rows]
     s3 = _s3()
-    records = []
-    for key in _list_keys(s3, f"{INPUT_PREFIX}{modality}/"):
+    for ref in inputs_to_prune(records, now=time.time()):
+        pid = by_ref.get(ref)
+        if pid:
+            try:
+                _store.delete_capture(conn, pid)
+            except Exception:  # noqa: BLE001 — a prune miss is harmless
+                pass
         try:
-            _, ts, _ = parse_input_key(key)
-        except Exception:
-            continue
-        records.append((key, ts))
-    for key in inputs_to_prune(records, now=time.time()):
-        try:
-            s3.delete_object(Bucket=RESULTS_BUCKET, Key=key)
+            s3.delete_object(Bucket=RESULTS_BUCKET, Key=ref)
         except Exception:  # noqa: BLE001 — a prune miss is harmless; never fail the capture
             pass
 
@@ -398,40 +487,38 @@ def evaluate_quality(pairs: list, *, modality: str, model_version: str, baseline
 
 # --- US2: I/O wrapper — join from the store, compute, export, persist ------------------------------
 
-def _load_pairs(model_version: str, modality: str, model_name=None) -> list:
-    """Join logged predictions ↔ labels by id, chronologically (oldest→newest), for the **same model +
-    version + modality** — MLflow versions are per-model, so LLM v1 and vision v1 coexist; filtering on
-    version alone would score one model's rows against the other's metric (Codex P1). Only labeled
-    predictions become pairs; unlabeled stay pending (excluded). Records with **no captured prediction**
-    (streamed output, or `QUALITY_CAPTURE_IO=0`) are unscorable and excluded — never scored as "none"
-    (Codex P1)."""
-    s3 = _s3()
+def _load_pairs(model_version: str, modality: str, model_name=None, *, window_n: int = None) -> list:
+    """The labeled (prediction, label) window for the **same model + version + modality**, oldest→newest.
+
+    US4 (FR-186, SC-111): this is now ONE indexed predictions⋈labels join (`store.window`) returning the
+    newest `window_n` labeled rows — not a full object listing. The bulky OUTPUT body still lives at each
+    row's `payload_ref`, so only those bounded ≤`window_n` objects are fetched (vs reading every logged
+    prediction). MLflow versions are per-model, so the join filters model_name+version+modality (LLM v1 ≠
+    vision v1). Rows with **no captured prediction** (streamed / capture-off → `payload_ref` output is
+    None) are unscorable and excluded — never scored as "none"."""
+    conn = _conn()
+    if conn is None:
+        raise QualityStoreError("store unreachable — cannot load the quality window")
+    n = WINDOW_N if window_n is None else window_n
     try:
-        keys = _list_keys(s3, PRED_PREFIX)  # paginated — never truncates past 1000 (review §1)
+        rows = _store.window(conn, modality, model_name, str(model_version), n)  # DESC served_at LIMIT n
     except Exception as e:
-        raise QualityStoreError(f"cannot list predictions: {e}") from e
+        raise QualityStoreError(f"cannot query the quality window: {e}") from e
     pairs = []
-    for key in keys:
+    for r in rows:
+        ref = r.get("payload_ref")
+        if not ref:
+            continue
         try:
-            pred = _get_json(key)
+            pred = _get_json(ref)  # the OUTPUT body (bounded: only the ≤n windowed rows)
         except Exception:
-            continue
-        if str(pred.get("model_version")) != str(model_version):
-            continue
-        if pred.get("modality") != modality:
-            continue  # like-for-like: don't mix modalities that share a version string
-        if model_name and pred.get("model_name") != model_name:
-            continue
+            continue  # object pruned/missing → skip, never score a hole
         if pred.get("prediction") is None:
-            continue  # uncaptured (streamed / capture-off) → unscorable, excluded (never scored wrong)
-        pid = pred.get("prediction_id")
-        try:
-            label = _get_json(f"{LABEL_PREFIX}{pid}.json")
-        except Exception:
-            continue  # unlabeled → pending, excluded from scoring
-        pairs.append({"prediction": pred.get("prediction"), "label": label.get("label"),
-                      "ts": pred.get("ts", 0)})
-    pairs.sort(key=lambda p: p["ts"])
+            continue  # streamed / capture-off → unscorable, excluded
+        served = r.get("served_at")
+        pairs.append({"prediction": pred.get("prediction"), "label": r.get("label"),
+                      "ts": served.timestamp() if served is not None else 0})
+    pairs.reverse()  # the query is newest-first; score_window slices the tail, so give it oldest→newest
     return pairs
 
 
@@ -463,7 +550,7 @@ def compute_quality(model_name, model_version, modality, *, baseline=None, windo
                     min_pairs: int = MIN_PAIRS, drop_pct: float = DROP_PCT, store: bool = True) -> dict:
     """Compute windowed quality for a model version from the store, export the gauges, and persist a
     QualityReport to the `results` bucket. The breach baseline defaults to the 011 eval baseline."""
-    pairs = _load_pairs(model_version, modality, model_name=model_name)
+    pairs = _load_pairs(model_version, modality, model_name=model_name, window_n=window_n)
     if baseline is None:
         baseline = _resolve_baseline(model_name, model_version, modality)
     report = evaluate_quality(pairs, modality=modality, model_version=model_version, baseline=baseline,
