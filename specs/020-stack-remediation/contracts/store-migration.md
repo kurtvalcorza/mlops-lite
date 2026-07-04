@@ -1,0 +1,51 @@
+# Contract: object-store migration + cutover (US1)
+
+## `scripts/migrate_store.py` CLI
+
+```
+python scripts/migrate_store.py \
+  --source-endpoint URL --source-key K --source-secret S \
+  --dest-endpoint URL   --dest-key K   --dest-secret S \
+  [--buckets datasets,models,results,mlflow]   # default: all four
+  [--reverse]                                  # swap source/dest roles (rollback re-mirror)
+  [--report PATH]                              # default: stdout; JSON MigrationReport
+```
+
+- **Idempotent**: an object is copied only if absent at dest or size differs; a clean re-run
+  reports `copied == 0` everywhere (SC-127).
+- **Bidirectional**: `--reverse` is the same code path with roles swapped (FR-199/FR-200).
+- **Streaming**: objects stream source→dest (no full-file buffering; the models bucket carries
+  multi-GB artifacts on a constrained drive).
+- **Pagination-safe**: listings page past 1,000 keys (the platformlib.store discipline).
+- **Report**: exact `MigrationReport` shape per data-model.md; exit code 0 only when
+  `parity == true`.
+- **Concurrent-write note**: live writes during migration are expected; the FINAL pre-cutover
+  run must land `copied == 0…small-delta` and is repeated until clean (edge case in spec).
+
+## Cutover env contract
+
+One seam, three consumers (gateway container, MLflow server, host venv):
+
+| Variable | Pre-cutover | Post-cutover |
+|---|---|---|
+| `MLFLOW_S3_ENDPOINT_URL` | `http://minio:9000` (container) / host equivalent | `http://garage:3900` / host equivalent |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | MinIO root pair | Garage key pair (gen_secrets-provisioned) |
+| `AWS_DEFAULT_REGION` | `us-east-1` | unchanged — `garage.toml s3_region` matches it (R2) |
+
+Rollback (until decommission confirmed): flip the three variables back; run `--reverse` first if
+any writes landed post-cutover. Bucket names and every prefix are identical on both stores
+(FR-198) — no client code change is permitted as part of cutover.
+
+## Bootstrap contract (`infra/garage/init.sh`, the createbuckets replacement)
+
+One-shot compose service; idempotent; creates layout (single node, zone `local`,
+`replication_factor = 1`), the four buckets, one access key, and read+write grants per bucket.
+Re-run on an initialized node exits 0 without changes. `scripts/gen_secrets` provisions/records
+the key pair the same way it does the MinIO pair today.
+
+## Decommission checklist (FR-201 — the LAST task, operator-confirmed)
+
+- compose: `minio` + `createbuckets` services, volumes, and the pinned digests removed
+- `.env.example` / `scripts/gen_secrets`: MinIO credential wiring removed
+- docs: README + runbook references updated; the frozen-digest CVE note retired
+- final state: `docker compose config` contains zero references to the retired store
