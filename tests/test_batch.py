@@ -5,21 +5,20 @@ one output per input row, record-and-continue on per-row failures, abort-thresho
 content-addressed results, and fail-fast on an empty/unreadable dataset. The GPU-lease discipline
 (acquire-once/release) lives in the native flow and is asserted on hardware (SC-082).
 """
-import importlib.util
 import io
 import json
 import os
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _pkgload import fresh_package, load_in_package  # noqa: E402
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location(
-        "batch_ut", os.path.join(REPO, "gateway", "app", "batch.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    # Load batch.py as a package member so its FR-176 package-relative `from .validation import
+    # parse_rows` resolves (the standalone sys.path fallback was retired).
+    return load_in_package(fresh_package(), "batch")
 
 
 b = _load()

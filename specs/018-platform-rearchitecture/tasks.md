@@ -200,11 +200,11 @@ runs against trainer *or* agent jobs surface.
 
 **Independent Test**: quickstart.md §US4; [HW] SC-111.
 
-- [ ] **T373** [US4] Relational client: `platformlib/store.py` gains `connect()` +
+- [x] **T373** [US4] Relational client: `platformlib/store.py` gains `connect()` +
   idempotent `bootstrap()` DDL per contracts/store-schema.md; `psycopg[binary]` added to
   `gateway/requirements.txt` + host venv lock; schema mirrored in
   `infra/postgres/init.sql`; `tests/test_store_client.py`.
-- [ ] **T374** [US4] Cutover — predictions/labels/capture: `gateway/app/quality.py`
+- [x] **T374** [US4] Cutover — predictions/labels/capture: `gateway/app/quality.py`
   `log_prediction`/`attach_label`/`capture_input` write rows (write-once = unique constraint ⇒
   `LabelExists`, FR-185; fail-open + dropped-counter on store outage); `window()` query
   replaces `_load_pairs` and `shadow.resolve_window`'s join (FR-186);

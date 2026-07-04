@@ -234,14 +234,9 @@ def test_json_to_a_multipart_only_engine_is_415():
         server.shutdown()
 
 
-def test_unload_now_idle_payload_is_byte_compatible():
-    # not resident -> exactly {"status": "idle"} (no shared-lifecycle `drained` key)
-    server, base, _ = _serve(FakeLLM())
-    try:
-        code, body = _req(base, "/engines/llm/unload-now", "POST", {"drain_timeout_s": 1})
-        assert code == 200 and body == {"status": "idle"}
-    finally:
-        server.shutdown()
+# NOTE: the byte-compatible `/engines/<id>/unload-now` relic was retired at T364 (its callers, the
+# gateway swap, went away at T363); operators use `/control/unload`. The stale 200-idle test that the
+# T364 merge left behind — which now (correctly) 404s — was removed here.
 
 
 if __name__ == "__main__":

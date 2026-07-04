@@ -6,13 +6,12 @@ driven against the in-memory FakeS3 with a synchronous-thread shim (deterministi
 on → a recoverable input is stored under `inputs/<modality>/`; capture off (or a non-replayable modality)
 → nothing; the per-modality cap is enforced by the prune-on-write.
 """
-import io
 import os
 import sys
 import threading as _real_threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _quality import FakeS3, load_quality  # noqa: E402
+from _quality import FakeS3, install_store, load_quality  # noqa: E402
 
 
 class _ThreadingShim:
@@ -50,6 +49,7 @@ _ThreadingShim.Thread = SyncThread
 
 def _wire(mod, s3, **flags):
     mod._s3 = lambda: s3
+    install_store(mod)  # a FakeStore for the capture_index rows the prune reads (US4)
     mod.threading = _ThreadingShim()  # rebind the module's ref — do NOT mutate global threading.Thread
     mod.QUALITY_LOGGING_ENABLED = flags.get("logging", True)
     mod.QUALITY_CAPTURE_IO = flags.get("capture", True)

@@ -8,7 +8,7 @@ keyed stack) are exercised in test_ui/integration; here the logic is pinned with
 import json
 import sys
 
-from _quality import FakeClientError, install_fakes, load_quality
+from _quality import install_fakes, load_quality
 
 q = load_quality()
 
@@ -97,9 +97,17 @@ def test_capture_toggle_omits_bodies(monkeypatch):
 # --- label ingestion + join (fake store) ----------------------------------------------------------
 
 def _seed_prediction(fake, q, pid, version, modality, pred, ts):
-    fake.objs[f"{q.PRED_PREFIX}{pid}.json"] = json.dumps({
+    """Seed a served prediction the way `log_prediction` does under US4: the OUTPUT body in the object
+    store + the index row in the relational store (model_name None, matching the `_load_pairs` queries
+    below)."""
+    from datetime import datetime, timezone
+    ref = f"{q.PRED_PREFIX}{pid}.json"
+    fake.objs[ref] = json.dumps({
         "prediction_id": pid, "model_version": version, "modality": modality,
         "prediction": pred, "ts": ts}).encode()
+    q._store.log_prediction(q._conn(), pid, None, str(version), modality,
+                            datetime.fromtimestamp(ts, timezone.utc),
+                            streamed=(pred is None), payload_ref=ref)
 
 
 def test_attach_label_unknown_duplicate_and_attached():
@@ -108,8 +116,8 @@ def test_attach_label_unknown_duplicate_and_attached():
     assert q.attach_label("missing", "cat")["status"] == "unknown"
     assert q.attach_label("p1", "cat")["status"] == "attached"
     assert q.attach_label("p1", "dog")["status"] == "duplicate"  # write-once, no overwrite
-    stored = json.loads(fake.objs[f"{q.LABEL_PREFIX}p1.json"])
-    assert stored["label"] == "cat"  # the duplicate did NOT overwrite served history
+    # US4: the label is relational (write-once PK), not an object — the duplicate did NOT overwrite it.
+    assert q._store.labels["p1"]["label"] == "cat"
 
 
 def test_join_excludes_unlabeled_and_late_label_counts():
@@ -159,12 +167,13 @@ def test_load_pairs_excludes_uncaptured_predictions():
 
 
 def test_attach_label_transient_error_raises_store_error_not_unknown(monkeypatch):
-    # a non-404 store error must surface as QualityStoreError (→502, retryable), not "unknown".
-    fake = install_fakes(q)
+    # a store error while checking the id must surface as QualityStoreError (→502, retryable), not
+    # "unknown" — the relational-store equivalent of the old non-404 read error.
+    install_fakes(q)
 
-    def boom(Bucket, Key):
-        raise FakeClientError("500")   # transient, not a 404
-    monkeypatch.setattr(fake, "head_object", boom)
+    def boom(conn, pid):
+        raise RuntimeError("gateway DB connection reset")   # transient, not a clean "absent"
+    monkeypatch.setattr(q._store, "prediction_exists", boom)
     try:
         q.attach_label("p1", "cat")
     except q.QualityStoreError:         # subclass of QualityError → the router maps it to 502
@@ -173,15 +182,14 @@ def test_attach_label_transient_error_raises_store_error_not_unknown(monkeypatch
         raise AssertionError("expected QualityStoreError on a transient store error")
 
 
-def test_store_outage_is_store_error_bad_input_is_plain_error():
+def test_store_outage_is_store_error_bad_input_is_plain_error(monkeypatch):
     # compute_quality over an unreachable store → QualityStoreError (→502); an unknown modality is a
     # plain QualityError (→400). The router keys the status code off this distinction.
     install_fakes(q)
 
-    class DeadS3:
-        def list_objects_v2(self, *a, **k):
-            raise FakeClientError("500")
-    q._s3 = lambda: DeadS3()
+    def boom(*a, **k):
+        raise q._store.StoreError("gateway DB down")
+    monkeypatch.setattr(q._store, "window", boom)   # the scoring window read fails
     try:
         q.compute_quality("m", "3", "image-classification", store=False)
     except q.QualityStoreError:
