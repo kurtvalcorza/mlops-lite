@@ -16,6 +16,7 @@ idle-release keep the scale-to-zero shape — only RAM here.
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -50,7 +51,15 @@ def _load_model():
     return model, source
 
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(app):
+    # Start the idle-release watcher at APP startup, not module import (review, PR#55): merely
+    # importing this module from a test/tool must not spin a forever-thread that polls S3/MLflow.
+    threading.Thread(target=_idle_watcher, daemon=True).start()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 _model = None
 _source = None
@@ -74,8 +83,6 @@ def _idle_watcher():
             if _model is not None and (time.time() - _last_used) > IDLE_TIMEOUT:
                 _model = _source = None  # drop RAM; nothing to release (off-lease)
 
-
-threading.Thread(target=_idle_watcher, daemon=True).start()
 
 
 class EmbedRequest(BaseModel):

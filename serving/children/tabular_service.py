@@ -15,6 +15,7 @@ import io
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 
 import boto3
 import joblib
@@ -58,7 +59,15 @@ def _s3():
         config=Config(signature_version="s3v4"))
 
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(app):
+    # Start the idle-release watcher at APP startup, not module import (review, PR#55): merely
+    # importing this module from a test/tool must not spin a forever-thread that polls S3/MLflow.
+    threading.Thread(target=_idle_watcher, daemon=True).start()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 _bundle = None  # {"booster", "features"}
 _last_used = 0.0
@@ -85,8 +94,6 @@ def _idle_watcher():
             if _bundle is not None and (time.time() - _last_used) > IDLE_TIMEOUT:
                 _bundle = None  # drop RAM; nothing to release (off-lease)
 
-
-threading.Thread(target=_idle_watcher, daemon=True).start()
 
 
 class PredictRequest(BaseModel):
