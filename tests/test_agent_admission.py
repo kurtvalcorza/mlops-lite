@@ -150,7 +150,8 @@ def test_no_unconsolidated_vram_budget_literal():
             if rel in ("platformlib/topology.py", "tests/test_agent_admission.py"):
                 continue
             text = open(path, encoding="utf-8", errors="replace").read()
-            if re.search(r"getenv\(\s*['\"]VRAM_GB['\"]\s*,", text):
+            # both idioms: os.getenv("VRAM_GB", ...) AND os.environ.get("VRAM_GB", ...)
+            if re.search(r"(?:getenv|environ\.get)\(\s*['\"]VRAM_GB['\"]\s*,", text):
                 offenders.append(rel)
     assert offenders == [], f"un-consolidated VRAM_GB default literals: {offenders}"
     run_sh = open(os.path.join(REPO, "hostagent", "run.sh"), encoding="utf-8").read()
