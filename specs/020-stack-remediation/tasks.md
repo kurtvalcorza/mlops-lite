@@ -76,18 +76,18 @@ components and a proven rollback story (now moot).
 **Goal**: same bytes from slim children; `bentoml` out of the venv (SC-131).
 **Independent test**: quickstart §US2 per child (capture → swap → replay byte-parity).
 
-- [ ] **T407** [P] [US2] Vision child: `serving/children/vision_service.py` + run script —
+- [x] **T407** [P] [US2] Vision child: `serving/children/vision_service.py` + run script —
   FastAPI multipart `POST /classify` + `GET /readyz`, dynamic-port launch contract unchanged
   (contracts/children-api.md); the torch/torchvision MobileNet code moves verbatim from
   `serving/bento/service.py` (no lease/unload remnants — the agent owns admission).
-- [ ] **T408** [P] [US2] CPU children: `serving/children/embed_service.py` (+run) and
+- [x] **T408** [P] [US2] CPU children: `serving/children/embed_service.py` (+run) and
   `serving/children/tabular_service.py` (+run) — JSON `POST /embed` / `POST /predict` +
   `/readyz`; sentence-transformers / LightGBM code moves verbatim from the bento siblings.
-- [ ] **T409** [US2] Golden tooling: `scripts/capture_goldens.py` per contracts/children-api.md —
+- [x] **T409** [US2] Golden tooling: `scripts/capture_goldens.py` per contracts/children-api.md —
   `--engine <e>` capture to `tests/goldens/<e>/` (request, status, content type, body bytes,
   probe) and `--replay` byte-diff at the agent boundary; offline unit tests with a fake child
   (capture/replay round-trip, diff detection on a 1-byte drift).
-- [ ] **T410** [US2] Adapter launch flips: `hostagent/adapters/vision.py` +
+- [x] **T410** [US2] Adapter launch flips: `hostagent/adapters/vision.py` +
   `_bento_cpu.py` → `_child_cpu.py` (launch path + `unavailable` pip-hint strings ONLY — the
   adapter contract, verbs, and error vocabulary untouched); offline adapter/contract suites
   updated for the rename and pass unchanged otherwise.
