@@ -96,16 +96,20 @@ def test_capture_toggle_omits_bodies(monkeypatch):
 
 # --- label ingestion + join (fake store) ----------------------------------------------------------
 
+# A real model_name for the seeded rows (NOT None): the store filters `WHERE model_name = %s`, which
+# never matches a NULL param against real Postgres — so the `_load_pairs` queries below pass MODEL too.
+MODEL = "m"
+
+
 def _seed_prediction(fake, q, pid, version, modality, pred, ts):
     """Seed a served prediction the way `log_prediction` does under US4: the OUTPUT body in the object
-    store + the index row in the relational store (model_name None, matching the `_load_pairs` queries
-    below)."""
+    store + the index row in the relational store."""
     from datetime import datetime, timezone
     ref = f"{q.PRED_PREFIX}{pid}.json"
     fake.objs[ref] = json.dumps({
         "prediction_id": pid, "model_version": version, "modality": modality,
         "prediction": pred, "ts": ts}).encode()
-    q._store.log_prediction(q._conn(), pid, None, str(version), modality,
+    q._store.log_prediction(q._conn(), pid, MODEL, str(version), modality,
                             datetime.fromtimestamp(ts, timezone.utc),
                             streamed=(pred is None), payload_ref=ref)
 
@@ -128,7 +132,7 @@ def test_join_excludes_unlabeled_and_late_label_counts():
     _seed_prediction(fake, q, "c", "3", "vision", "cat", 3.0)
     q.attach_label("c", "cat")            # newer prediction labeled first
     q.attach_label("a", "bird")           # late label for the older prediction
-    pairs = q._load_pairs("3", "vision")
+    pairs = q._load_pairs("3", "vision", model_name=MODEL)
     assert len(pairs) == 2                # unlabeled "b" excluded (pending, never scored — SC-076)
     assert [p["ts"] for p in pairs] == [1.0, 3.0]   # chronological; the late label still joined
 
@@ -139,7 +143,7 @@ def test_load_pairs_filters_by_model_version():
     _seed_prediction(fake, q, "b", "4", "vision", "cat", 2.0)  # different version
     q.attach_label("a", "cat")
     q.attach_label("b", "cat")
-    assert len(q._load_pairs("3", "vision")) == 1   # model-version skew: v4's pair excluded (FR-121)
+    assert len(q._load_pairs("3", "vision", model_name=MODEL)) == 1  # v4's pair excluded (FR-121)
 
 
 def test_load_pairs_filters_by_modality_and_model_name():
@@ -149,9 +153,9 @@ def test_load_pairs_filters_by_modality_and_model_name():
     _seed_prediction(fake, q, "t", "1", "text-generation", "hello", 2.0)
     q.attach_label("v", "cat")
     q.attach_label("t", "hello")
-    vis = q._load_pairs("1", "image-classification")
+    vis = q._load_pairs("1", "image-classification", model_name=MODEL)
     assert len(vis) == 1 and vis[0]["prediction"] == "cat"   # only the vision row
-    llm = q._load_pairs("1", "text-generation")
+    llm = q._load_pairs("1", "text-generation", model_name=MODEL)
     assert len(llm) == 1 and llm[0]["prediction"] == "hello"  # only the LLM row
 
 
@@ -162,7 +166,7 @@ def test_load_pairs_excludes_uncaptured_predictions():
     _seed_prediction(fake, q, "stream", "3", "text-generation", None, 2.0)  # uncaptured output
     q.attach_label("ok", "answer")
     q.attach_label("stream", "answer")
-    pairs = q._load_pairs("3", "text-generation")
+    pairs = q._load_pairs("3", "text-generation", model_name=MODEL)
     assert len(pairs) == 1 and pairs[0]["prediction"] == "answer"  # the None-prediction row excluded
 
 
@@ -197,6 +201,26 @@ def test_store_outage_is_store_error_bad_input_is_plain_error(monkeypatch):
     else:
         raise AssertionError("expected QualityStoreError on a store outage")
     assert issubclass(q.QualityStoreError, q.QualityError)  # 502-mapped is still a QualityError
+
+
+def test_store_error_invalidates_conn_so_a_blip_self_heals(monkeypatch):
+    # A broken connection must be dropped on the failing op so the NEXT call reconnects — a transient DB
+    # blip self-heals instead of every read failing loud (502) until a manual reset_store_conn().
+    install_fakes(q)
+    assert q._conn() is not None                       # a live cached connection
+    n = {"calls": 0}
+
+    def flaky_window(*a, **k):
+        n["calls"] += 1
+        raise q._store.StoreError("connection reset by peer")
+    monkeypatch.setattr(q._store, "window", flaky_window)
+    try:
+        q._load_pairs("3", "vision", model_name=MODEL)
+    except q.QualityStoreError:
+        pass
+    assert q._conn_state["conn"] is None                # invalidated: the stale connection was dropped
+    monkeypatch.undo()                                  # the "DB" is back
+    assert q._conn() is not None and n["calls"] == 1    # next call reconnects (recovery), no manual reset
 
 
 def test_list_keys_paginates_past_one_page():

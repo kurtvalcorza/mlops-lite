@@ -52,7 +52,7 @@ def test_concurrent_duplicate_labels_store_exactly_one():
     for trial in range(100):  # 100-trial style: the race must resolve the same way every time
         install_fakes(q)  # fresh FakeStore each trial
         pid = f"p{trial}"
-        q._store.log_prediction(q._conn(), pid, None, "1", "vision",
+        q._store.log_prediction(q._conn(), pid, "m", "1", "vision",
                                 datetime.now(timezone.utc), payload_ref=f"predictions/{pid}.json")
         results = _race_attach(q, pid, n=8)
         assert results.count("attached") == 1, results          # exactly one winner

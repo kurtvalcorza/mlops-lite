@@ -132,6 +132,7 @@ def resolve_window(name, version, modality, *, window_n=None, now=None, ttl_s=No
         rows = quality._store.replay_window(conn, modality, name, str(version), window_n,
                                             ttl_cutoff=ttl_cutoff)
     except Exception as e:
+        quality._invalidate_conn()  # a broken connection self-heals on the next replay
         raise ShadowError(f"shadow-replay window query failed: {e}") from e
     input_recs, predictions, labels = [], {}, {}
     for r in rows:
@@ -164,7 +165,11 @@ def has_captured_inputs(modality) -> bool:
     conn = quality._conn()
     if conn is None:
         raise ShadowError("shadow-replay store unreachable — cannot check the capture corpus")
-    return quality._store.has_captures(conn, modality)
+    try:
+        return quality._store.has_captures(conn, modality)
+    except Exception as e:
+        quality._invalidate_conn()  # reconnect on the next check rather than propagate a stale-conn error
+        raise ShadowError(f"shadow-replay corpus check failed: {e}") from e
 
 
 # --- guards: decide whether a replay can run (US3) ------------------------------------------------

@@ -79,13 +79,18 @@ class FakeStore:
     def __init__(self):
         import threading
         self._lock = threading.Lock()
+        self.closed = False
         self.predictions = {}  # pid -> {model_name, version, modality, served_at, streamed, payload_ref}
         self.labels = {}       # pid -> {label, submitted_at}
         self.captures = {}     # pid -> {modality, input_ref, captured_at}
 
     # -- connection lifecycle (no-ops over the in-memory dicts) ------------------------------------
     def connect(self, dsn_str=None, *, autocommit=True):
+        self.closed = False  # a fresh/reconnected connection (mirrors _invalidate_conn → reconnect)
         return self
+
+    def close(self):
+        self.closed = True
 
     def bootstrap(self, conn=None):
         return None
@@ -116,7 +121,9 @@ class FakeStore:
     def window(self, conn, modality, model_name, version, n):
         rows = []
         for pid, p in self.predictions.items():
-            if (p["modality"] != modality or p["model_name"] != model_name
+            # SQL parity: real `WHERE model_name = %s` never matches when the param is NULL (three-valued
+            # logic), even against a NULL column — so a None arg matches NOTHING here too, not None==None.
+            if (p["modality"] != modality or model_name is None or p["model_name"] != model_name
                     or p["version"] != str(version) or pid not in self.labels):
                 continue
             lab = self.labels[pid]
@@ -134,7 +141,8 @@ class FakeStore:
             p, lab = self.predictions.get(pid), self.labels.get(pid)
             if not p or not lab:
                 continue  # inner join: needs both a prediction row and a label
-            if p["model_name"] != model_name or p["version"] != str(version):
+            # SQL parity: a NULL model_name param matches nothing (see window()).
+            if model_name is None or p["model_name"] != model_name or p["version"] != str(version):
                 continue
             if ttl_cutoff is not None and c["captured_at"] < ttl_cutoff:
                 continue  # expired per the retention window (WHERE clause)
