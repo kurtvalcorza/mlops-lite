@@ -20,6 +20,8 @@ import subprocess
 import time
 import urllib.request
 
+from platformlib.topology import vram_budget_gb
+
 from hostagent.adapters._common import engine_health, free_port
 
 DEFAULT_MODEL = "~/models/gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
@@ -44,7 +46,7 @@ class LlamaAdapter:
         self.alias = os.getenv("MODEL_ALIAS", DEFAULT_ALIAS)
         self.ngl = os.getenv("NGL", "999")
         self.ctx = os.getenv("CTX", "4096")
-        self.vram_budget_gb = float(os.getenv("VRAM_GB", "12"))
+        self.vram_budget_gb = vram_budget_gb()  # FR-207: the single shared budget resolver
         self._admission = admission
         self._port = None  # set on spawn(); the child's dynamic port
 

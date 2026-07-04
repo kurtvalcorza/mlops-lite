@@ -29,9 +29,9 @@ from hostagent import swap as swap_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 from hostagent.metrics import REGISTRY  # noqa: E402
 from platformlib.store import StoreError  # noqa: E402
-from platformlib.topology import AGENT_PORT, STATE_DIR  # noqa: E402
+from platformlib.topology import AGENT_PORT, STATE_DIR, vram_budget_gb  # noqa: E402
 
-VRAM_GB = float(os.getenv("VRAM_GB", "12"))
+VRAM_GB = vram_budget_gb()  # 020 US4 (FR-207): single shared resolver, no duplicated default
 # Codex review (018): the gateway + Prometheus reach the agent via host.docker.internal / an
 # injected WSL IP — a loopback-only bind would make AGENT_URL unreachable from the containers the
 # moment a fold-in flips traffic here. Default matches the legacy daemons; override to tighten.

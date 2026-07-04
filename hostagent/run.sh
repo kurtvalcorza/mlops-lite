@@ -12,7 +12,10 @@ REPO="$(cd "$DIR/.." && pwd)"
 # Auto-load local secrets if present (FR-017) — same pattern as the retired training/run.sh.
 [[ -f "$REPO/.env" ]] && { set -a; . "$REPO/.env"; set +a; }
 
-export VRAM_GB="${VRAM_GB:-12}"
+# VRAM_GB pass-through only (020 US4, FR-207): the default lives in ONE place —
+# platformlib.topology.vram_budget_gb() — so an unset knob cannot leave this script and the
+# agent on divergent duplicated defaults. Set it in .env / hardware-profile.md to retarget.
+if [[ -n "${VRAM_GB:-}" ]]; then export VRAM_GB; fi
 export MLOPS_STATE_DIR="${MLOPS_STATE_DIR:-$HOME/.mlops-lite}"
 # 018 T375: the durable job journal (+ the US4 monitoring store) lives in the `gateway` DB on the
 # resident Postgres. This NATIVE agent reaches it at the host-PUBLISHED port (127.0.0.1:$POSTGRES_PORT),

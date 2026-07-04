@@ -461,6 +461,17 @@ python tests/test_portability.py # asserts the retarget contract + runs the smok
 agent's `pynvml`/`psycopg`), the GPU gate-zero check, and the LLM weight download; it **verifies** the
 one-time `llama.cpp` CUDA build (and prints the recipe if missing).
 
+**Every knob a different-GPU machine needs (020 US4, FR-207/SC-133)** — configuration only, zero
+code edits:
+
+| Knob | Where | Notes |
+|---|---|---|
+| `VRAM_GB` | `.env` (via `hardware-profile.md` + `bootstrap.sh`) | The GPU budget. ONE default lives in `platformlib.topology.vram_budget_gb()`; live NVML reads stay primary, the static fallback refuses above `VRAM_GB × 0.95`. Model-size estimates (`*_EST_GB`) are env-tunable beside it. |
+| Native builds | `~/llama.cpp` (cmake, set `CMAKE_CUDA_ARCHITECTURES` to YOUR sm), `bash serving/whispercpp/build.sh` | Per-GPU compute capability — the one-time prerequisites above. |
+| CUDA wheels | `scripts/native_env.lock` (torch/torchvision `cu128` index) | A different CUDA generation may need a different index; `bootstrap.sh` installs from the lock. |
+| Secrets | `./scripts/gen_secrets.ps1` (or `.sh`) | Fresh `.env` incl. the Garage RPC/admin secrets; the Garage S3 pair records post-bootstrap via `--record-garage`. |
+| Renamed host | nothing | The agent's state dir + beacon are host-name independent (`MLOPS_STATE_DIR`, fixed); a renamed WSL host self-heals when idle (018 FR-166). |
+
 ## API
 
 OpenAPI is exported to

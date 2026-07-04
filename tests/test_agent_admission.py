@@ -108,6 +108,57 @@ def test_ttl_cache_bounds_reader_calls():
     assert len(reads) == 3                   # admission always forces a fresh read
 
 
+def test_budget_knob_moves_static_fallback_threshold(monkeypatch):
+    """020 US4 (FR-207/SC-133): with the GPU unreadable and VRAM_GB=16, the static-fallback
+    refusal threshold is 16 × 0.95 = 15.2 GB — a 15.0 GB estimate is admitted, a 15.5 GB one
+    refused. The threshold MOVES with the knob (it would sit at 11.4 on the old default)."""
+    from platformlib.topology import vram_budget_gb
+
+    monkeypatch.setenv("VRAM_GB", "16")
+    budget = vram_budget_gb()
+    assert budget == 16.0
+    a = adm.Admission(vram_budget_gb=budget,
+                      gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: None))  # unreadable
+    a.acquire("llm", "serving", est_gb=15.0)          # 15.0 <= 15.2 → admitted at the NEW budget
+    a.release("llm")
+    try:
+        a.acquire("llm", "serving", est_gb=15.5)      # 15.5 > 15.2 → refused at the NEW budget
+    except adm.VramExceeded as e:
+        assert "static" in str(e) and "16" in str(e)
+    else:
+        raise AssertionError("expected the moved threshold to refuse 15.5GB at VRAM_GB=16")
+
+
+def test_no_unconsolidated_vram_budget_literal():
+    """020 US4 (FR-207) grep regression: the ONLY `VRAM_GB` default literal in python lives in
+    platformlib.topology.vram_budget_gb — a consumer carrying its own `os.getenv("VRAM_GB", …)`
+    default could be left on a stale value when the knob moves. hostagent/run.sh must be a pure
+    pass-through (no `:-12` duplicate) for the same reason. (scripts/bootstrap.sh legitimately
+    reads the hardware-profile with an env fallback — it *produces* the knob, tested by
+    test_portability.)"""
+    import re
+
+    offenders = []
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d not in
+                   (".git", ".venv", "node_modules", "__pycache__", "specs", "docs")]
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, REPO).replace(os.sep, "/")
+            if rel in ("platformlib/topology.py", "tests/test_agent_admission.py"):
+                continue
+            text = open(path, encoding="utf-8", errors="replace").read()
+            if re.search(r"getenv\(\s*['\"]VRAM_GB['\"]\s*,", text):
+                offenders.append(rel)
+    assert offenders == [], f"un-consolidated VRAM_GB default literals: {offenders}"
+    run_sh = open(os.path.join(REPO, "hostagent", "run.sh"), encoding="utf-8").read()
+    # `${VRAM_GB:-}` (empty guard) is fine; `${VRAM_GB:-12}` (a duplicated VALUE) is not.
+    assert not re.search(r"VRAM_GB:-\d", run_sh), \
+        "hostagent/run.sh re-grew a duplicated VRAM_GB default value"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

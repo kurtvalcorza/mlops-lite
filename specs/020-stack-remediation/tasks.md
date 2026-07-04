@@ -131,7 +131,7 @@ components and a proven rollback story (now moot).
 
 ## Phase 6: User Story 4 — GPU-budget portability (P3)
 
-- [ ] **T416** [P] [US4] Budget-knob audit + consolidation + regression: repo audit pins that the
+- [x] **T416** [P] [US4] Budget-knob audit + consolidation + regression: repo audit pins that the
   only VRAM-budget literals are `VRAM_GB` env fallbacks — today `"12"` is duplicated across
   `hostagent/main.py`, `hostagent/jobs.py`, and the three adapters (`llama.py`, `vision.py`,
   `whisper.py`); **consolidate them to a single resolver** so no consumer can be left on a stale
@@ -139,7 +139,7 @@ components and a proven rollback story (now moot).
   unreadable + budget 16: a **15.0 GB** estimate is admitted, a **15.5 GB** one refused (the
   static-fallback threshold is 16 × 0.95 = **15.2 GB** and moves with the knob — SC-133); a grep
   regression asserts no un-consolidated budget literal remains.
-- [ ] **T417** [US4] New-machine bring-up checklist in `README.md` (coordinated with 018's
+- [x] **T417** [US4] New-machine bring-up checklist in `README.md` (coordinated with 018's
   T379 refresh so the README is edited once): `VRAM_GB`, native builds
   (llama.cpp / whisper.cpp `build.sh`), CUDA-index torch/torchvision wheels,
   `scripts/gen_secrets`, renamed-host beacon self-heal note.
