@@ -25,7 +25,10 @@ import time
 
 from prometheus_client import Counter
 
-from platformlib.topology import trainer_url
+# T364: the trainer folded into the host agent; agent_url() is the single endpoint, and the agent
+# serves the legacy /train + /train/{id} aliases byte-compatibly (FR-177). Kept as a top-level
+# platformlib import (not ..settings) so this scheduler stays standalone-loadable.
+from platformlib.topology import agent_url
 
 from . import policies, quality
 
@@ -454,7 +457,7 @@ def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> di
     body["idempotency_key"] = _idempotency_key(policy["model_name"], policy["modality"],
                                                dataset_name, dataset_version)
     with httpx.Client(timeout=15) as client:
-        r = client.post(f"{trainer_url()}/train", json=body)
+        r = client.post(f"{agent_url()}/train", json=body)
     if r.status_code == 409:
         raise Busy(r.text[:200])
     if r.status_code not in (200, 202):
@@ -471,7 +474,7 @@ def _default_watch(run_id: str) -> dict:
     # until a gateway restart.
     try:
         with httpx.Client(timeout=10) as client:
-            r = client.get(f"{trainer_url()}/train/{run_id}")
+            r = client.get(f"{agent_url()}/train/{run_id}")
         return r.json() if r.status_code == 200 else {"status": "unknown"}
     except Exception:
         return {"status": "unknown"}
