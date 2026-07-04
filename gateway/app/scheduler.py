@@ -540,19 +540,14 @@ def _default_shadow(model: str, version: str, modality: str):
             matches.append((modified, key, v))
     if not matches:
         return None
-    # FAIL-CLOSED on an untrustworthy timestamp (019/US9, FR-197): newest-by-LastModified is the
-    # contract, but if a MATCHING verdict has no LastModified we cannot establish which is newest —
-    # and silently picking a timestamped (possibly older) verdict could auto-promote a shadow-LOSER
-    # or veto a winner on a stale window. Real S3 always stamps LastModified, so this only fires on a
-    # non-conforming store; raise (the tick's per-policy containment keeps the watch and retries next
-    # tick) rather than guess, exactly like a listing failure — never a silent stale pick.
-    if any(modified is None for modified, _key, _v in matches):
-        raise RuntimeError(
-            f"shadow verdict listing for {model} v{version} is missing LastModified on a matching "
-            f"verdict — cannot order by recency (non-conforming store); refusing to risk a stale "
-            f"promotion signal")
-    # Newest by time; the (uuid) object key breaks an exact-timestamp tie deterministically.
-    matches.sort(key=lambda m: (m[0], m[1]))
+    # Newest by LastModified, via a TOTAL, deterministic key (019/US9, FR-197): a verdict WITH a
+    # timestamp always outranks one without (so a real recency signal is never lost to a missing
+    # one), newest timestamp wins among those, and the (uuid) object key breaks any tie — including
+    # an all-missing-timestamp set, which the prior fused predicate picked in listing order
+    # (effectively random). Real S3 always stamps LastModified, so the timestamp-absent branch is a
+    # non-conforming-store fallback, not a production path. Sorting `(has_ts, ts, key)` never
+    # compares None to a datetime, so it can't raise on a mixed set.
+    matches.sort(key=lambda m: (m[0] is not None, m[0], m[1]))
     return matches[-1][2]
 
 
