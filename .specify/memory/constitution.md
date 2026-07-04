@@ -13,8 +13,10 @@ no Kubernetes, no multi-node assumptions.
 
 ### II. Single-GPU, On-Demand Serving (NON-NEGOTIABLE)
 At most ONE GPU tenant may be resident in GPU VRAM at any instant — any GPU-resident modality (LLM,
-vision, ASR, …) **or** a training run — enforced by a **single, race-free GPU lease**: a
-single-slot admission mechanism with no time-of-check/time-of-use window, so two callers can never both
+vision, ASR, …) **or** a training run — enforced by a **single, race-free admission lease**, since
+**018** realized by the GPU host agent's **in-process admission** (`hostagent/admission.py`): one
+re-entrant lock makes the holder check and the claim a single critical section — no
+time-of-check/time-of-use window and no cross-process lockfile to reclaim — so two callers can never both
 proceed onto the GPU. CPU-only models (e.g. embeddings, tabular) hold no lease and are exempt. Tenants load on
 request and release VRAM after use (idle-release); a **serving** tenant may additionally be released by an
 **operator-confirmed preemptive swap** (evict the holder → free → load the target, strictly sequential — still
@@ -94,7 +96,7 @@ lifecycle stage — requires a documented amendment with explicit justification 
 implementation. Complexity must always be justified against Principles II and III. All plans
 and task lists are reviewed for compliance with these principles.
 
-**Version**: 1.4.1 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-01
+**Version**: 1.5.0 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-04
 
 <!-- v1.1.0: genericized — machine-specific values extracted to hardware-profile.md; constraints
      now expressed relative to VRAM_GB / RAM_GB / FREE_DISK_GB.
@@ -114,5 +116,11 @@ and task lists are reviewed for compliance with these principles.
      an OPERATOR-CONFIRMED PREEMPTIVE SWAP (evict→free→load, strictly sequential), in addition to idle-release;
      a running training/HPO/batch job is NEVER preempted. This is a PATCH-level clarification, not a rule
      change: at most one GPU tenant resident at any instant is unchanged and still NON-NEGOTIABLE (008's
-     earlier "cooperative, no swap/evict" *description* is superseded; the one-tenant invariant is not). -->
+     earlier "cooperative, no swap/evict" *description* is superseded; the one-tenant invariant is not).
+     v1.5.0 (018-platform-rearchitecture): Principle II mechanism sentence now names the lease's REALIZATION —
+     the single race-free lease is the GPU host agent's **in-process admission** (`hostagent/admission.py`, one
+     re-entrant lock guarding the holder-check + claim), superseding the pre-018 cross-process file lockfile
+     (`serving/gpu_lease.py`, retired at T364). MINOR: the mechanism DESCRIPTION changed (cross-process lockfile
+     → in-process lock); the RULE — at most one GPU tenant resident at any instant — is UNCHANGED and still
+     NON-NEGOTIABLE. -->
 

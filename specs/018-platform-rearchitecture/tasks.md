@@ -233,7 +233,7 @@ runs against trainer *or* agent jobs surface.
 
 ## Phase 6: Polish & governance
 
-- [ ] **T378** Constitution **v1.5.x wording refresh** (R8) — operator decision, mirrors 017's
+- [x] **T378** Constitution **v1.5.0 wording refresh** (R8, ratified 2026-07-04) — mirrors 017's
   T342: Principle II mechanism sentence names the host agent's in-process admission as the
   lease realization (rule text unchanged). Update `.specify/memory/constitution.md` history
   note on ratification.
