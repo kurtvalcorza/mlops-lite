@@ -5,6 +5,8 @@ all three daemons' reachability via the gateway without knowing their injected W
 same daemon URLs the gateway already proxies to. Open (no API key) — it's a probe, like /healthz.
 """
 
+import os
+
 import httpx
 
 from . import settings
@@ -38,11 +40,19 @@ _OPTIONAL = {"asr"}
 _SERVABLE_STATES = {"cold", "loading", "ready"}
 
 
+# The agent's /health probes each RESIDENT engine's `ready()` serially (~2s each); with several
+# engines mid-cold-start (CPU embed/tabular are off-lease, so >1 can load at once) the read can
+# exceed a tight bound. A generous single timeout keeps a stampede from tripping _agent_health to
+# None — which, unlike the old per-daemon probes, marks EVERY daemon down at once (@claude PR#37).
+# Deeper fix (a non-blocking agent /health) is a follow-up.
+_AGENT_HEALTH_TIMEOUT_S = float(os.getenv("PLATFORM_HEALTH_TIMEOUT_S", "8"))
+
+
 async def _agent_health():
     """One read of the agent's root /health; None if unreachable / non-200 / unparseable. Broadly
     best-effort — a health aggregator must never itself 500 on a probe failure."""
     try:
-        async with httpx.AsyncClient(timeout=3) as client:
+        async with httpx.AsyncClient(timeout=_AGENT_HEALTH_TIMEOUT_S) as client:
             r = await client.get(f"{AGENT_URL}/health")
         return r.json() if r.status_code == 200 else None
     except Exception:  # noqa: BLE001 — probe, never propagate

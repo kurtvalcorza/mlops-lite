@@ -34,8 +34,10 @@ def refresh() -> None:
         return
     SERVING_UP.set(1)
     TRAINER_UP.set(1)
-    # `engines.llm == "ready"` ⇒ the LLM model is resident (the old supervisor's `resident` flag).
-    SERVING_RESIDENT.set(1 if h.get("engines", {}).get("llm") == "ready" else 0)
+    # Resident ⇔ the LLM child is alive — `ready` OR `loading` (@claude PR#37: the old supervisor's
+    # `resident` flag was child-alive, true during cold-start too; keying on `ready` alone read 0 in
+    # the spawned-but-not-ready window where the old gauge read 1).
+    SERVING_RESIDENT.set(1 if h.get("engines", {}).get("llm") in ("ready", "loading") else 0)
     TRAINER_BUSY.set(1 if h.get("busy") else 0)
     if h.get("gpu_free_mib") is not None:
         GPU_FREE.set(h["gpu_free_mib"])

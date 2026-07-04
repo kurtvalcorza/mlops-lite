@@ -119,6 +119,22 @@ def test_preempt_refuses_job_holder_structurally():
         server.shutdown()
 
 
+def test_preempt_refuses_batch_driven_serving_holder():
+    # @claude PR#37 (FR-155): a GPU batch drives a serving engine WITHOUT a kind="job" slot — the
+    # engine holds admission as kind="serving", so the job-holder check misses it. The agent threads
+    # JobManager._gpu_batch_active into preempt_for, which refuses evicting a batch-driven holder.
+    server, base, admission, jobs = _serve()
+    try:
+        jobs._gpu_batch_active = True                      # a GPU batch is driving a serving engine
+        _post(base, "/engines/llm/go")                     # llm holds admission as kind="serving"
+        assert admission.holder()["kind"] == "serving"
+        code, body = _post(base, "/engines/vision/go?preempt=true")
+        assert code == 409 and "batch" in body["error"].lower()
+        assert admission.holder()["tenant"] == "llm"       # batch-driven holder untouched
+    finally:
+        server.shutdown()
+
+
 def test_preempt_flag_parses_only_truthy_values():
     server, base, admission, _ = _serve()
     try:
