@@ -148,6 +148,9 @@ services:
     image: prom/prometheus:v3.5.4  # 007 US2: pin (was :latest, captured T118)
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # 018 FR-174: file_sd target for the native host agent — up_all.ps1 writes the injected WSL IP
+      # here so the DIRECT agent scrape works cross-distro; Prometheus hot-reloads it (no restart).
+      - ./infra/prometheus/targets:/etc/prometheus/targets:ro
     extra_hosts:
       # 018 (FR-174): direct scrape of the native host agent (:8100) — same host-gateway mapping
       # the gateway uses to reach the native daemons.

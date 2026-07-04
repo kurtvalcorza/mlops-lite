@@ -1,0 +1,1 @@
+[{"targets": ["host.docker.internal:8100"], "labels": {"note": "same-distro default; up_all.ps1 overwrites this with the injected WSL agent IP on cross-distro setups — do not commit the runtime IP"}}]

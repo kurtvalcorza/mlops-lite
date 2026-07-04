@@ -144,7 +144,7 @@ SC-106..110 at completion.
   and the `require_*` reachability fixtures in `tests/conftest.py` to the `{agent, ui}` daemon
   set; single `AGENT_URL` replaces the six daemon URLs in compose + settings; free ports
   8090–8095/8099 removed from `platformlib.topology`.
-- [ ] **T365** [US2] **[HW]** On-hardware sweep SC-106..110 per quickstart (process count,
+- [x] **T365** [US2] **[HW]** On-hardware sweep SC-106..110 per quickstart (process count,
   latency parity vs runbook baselines, swap-contention stress incl. `scripts/swap_stress.py`,
   restart-journal drill, gateway-down scrape + zero-fork watch); record results in
   `docs/on-hardware-validation-018.md`.
