@@ -156,12 +156,46 @@ agent).
 
 ## T377 — durable monitoring state (SC-111)
 
-### ☐ SC-111 — 10k-prediction window < 5 s; concurrent-label write-once; restart with intact history
+### ☑ SC-111 — 10k-prediction window < 5 s; concurrent-label write-once; restart with intact history — **PASS** (2026-07-04)
 
-**BLOCKED on US4 (T373–377).** SC-111's target — a quality/shadow window over ≥10,000 predictions
-resolving in **under 5 seconds** (from minutes today) — is the whole *point* of the US4 relational
-state store that replaces the current O(N) MinIO object scans. Until US4 lands the store, the
-monitoring path still does the object-scan it is meant to eliminate, so the < 5 s criterion cannot be
-met. T377 is a **US4 [HW]** task by construction (tasks.md: "US4 (T373..T377)"); it will be appended
-here once US4 is built. The restart-with-intact-history half is already corroborated by SC-109 (the
-agent journal survives a crash); the gateway-restart + relational-history half needs the US4 store.
+US4 (T373–376) landed the relational store, so this ran on the RTX 5070 Ti box against the live
+gateway Postgres (127.0.0.1:55432). All three parts pass; the restart drill **found + fixed a real
+crash-loop bug** (below).
+
+**Part 1 — window over ≥10,000 predictions < 5 s.** Bulk-seeded **12,000** predictions+labels for one
+`(modality, model, version)`, then timed `store.window()` (the indexed `predictions⋈labels …
+served_at DESC LIMIT n` join that replaces the O(N) MinIO scan):
+
+| window `n` | rows | time |
+|---|---|---|
+| 200 (realistic) | 200 | **1.8 ms** |
+| 12,000 (full) | 12,000 | **40.5 ms** |
+
+40.5 ms ≪ 5 000 ms — the composite `ix_pred_window` index makes it a bounded index scan, not a
+listing. (The pre-US4 object scan took *minutes* at this size.)
+
+**Part 2 — concurrent duplicate labels → exactly one stored, 100%.** 25 trials × 8 threads (each its
+own connection) racing `attach_label` on the same `prediction_id`: **25/25** stored exactly one label,
+the other 7 each got `LabelExists` — the write-once PRIMARY KEY (FR-185) holds under contention with
+no in-process lock.
+
+**Part 3 — restart with intact history (gateway + agent).** Seeded one of each durable record
+(policy / prediction+label / a **queued** job / suggestion), then:
+- `docker restart mlops-lite-gateway-1` → healthy in 3 s; every relational row survived (it lives in
+  the separate persistent `postgres` container; the gateway re-`bootstrap()`s the idempotent schema
+  and re-reads).
+- restarted the **native agent** → it hydrated the `jobs` table and flipped the crash-orphaned
+  `queued` job to `interrupted (reason="agent restart")` in one atomic `mark_jobs_interrupted`
+  (FR-173) — the durable row confirmed post-restart. History intact across both restarts.
+
+> **Bug found + fixed during Part 3 (agent DB unreachable → crash loop).** The native WSL agent's
+> `Journal()` (T375-B) connects to the gateway DB via `store.dsn()`, whose default host is the
+> in-container `postgres` — **unresolvable from a native WSL process**. Since T375-B made the DB a hard
+> startup dependency, the agent had been crash-looping (`OperationalError: failed to resolve host
+> 'postgres'` → fail-loud exit → supervisor relaunch, **660 restarts** observed) the whole time —
+> durable job state was silently non-functional on the real deployment. The intended injection the
+> compose comment described (`up_all.ps1`) was never actually implemented. **Fix:** `hostagent/run.sh`
+> now exports `GATEWAY_DB_HOST=127.0.0.1` + `GATEWAY_DB_PORT=${POSTGRES_PORT:-55432}` (the
+> host-published port), so `store.dsn()` targets the reachable Postgres. Post-fix: agent healthy 5/5
+> polls, single process, hydrate + `mark_interrupted` working (above). The compose comment was
+> corrected to point at `run.sh`.

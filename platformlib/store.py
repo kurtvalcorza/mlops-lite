@@ -27,8 +27,9 @@ Relational design notes:
 
 Connection: `GATEWAY_DB_URL` (a full DSN) wins; else built from `POSTGRES_USER`/`POSTGRES_PASSWORD`
 + `GATEWAY_DB_HOST`/`GATEWAY_DB_PORT`/`GATEWAY_DB_NAME`. The gateway container reaches Postgres at
-`postgres:5432`; the native WSL host (agent, tests) at `127.0.0.1:55432` — so the compose file and
-`up_all.ps1` each inject the context-correct `GATEWAY_DB_URL`.
+`postgres:5432` (compose injects `GATEWAY_DB_URL`); the native WSL host agent reaches it at the
+host-published `127.0.0.1:$POSTGRES_PORT` — `hostagent/run.sh` sets `GATEWAY_DB_HOST`/`GATEWAY_DB_PORT`
+for that (T375/T377), since the in-container `postgres` hostname is unresolvable from WSL.
 """
 import os
 import threading

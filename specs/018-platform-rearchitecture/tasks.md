@@ -220,8 +220,12 @@ runs against trainer *or* agent jobs surface.
   (idempotent re-run). Predictions/labels/capture + policies/pending/status/suggestions +
   the folded journal → jobs; non-clobber (DB is source of truth post-migration); added the
   symmetric `store.capture_exists`. Live-DB test confirms idempotency (2nd run inserts 0).
-- [ ] **T377** [US4] **[HW]** SC-111: 10k-prediction window <5s; concurrent-label trial;
-  restart drill (gateway + agent) with intact history; append to the runbook doc.
+- [x] **T377** [US4] **[HW]** SC-111 **PASS** (RTX 5070 Ti, 2026-07-04): 12k-prediction window in
+  **40.5 ms** (<5 s); 25/25 concurrent-label trials stored exactly one; gateway+agent restart with
+  intact relational history (agent hydrates + `mark_interrupted` flips the crash-orphan). **Found +
+  fixed** a real crash-loop: the native agent couldn't resolve the in-container `postgres` host for
+  its T375-B DB dependency (660 restarts) — `hostagent/run.sh` now sets `GATEWAY_DB_HOST/PORT` to the
+  host-published port. Recorded in `docs/on-hardware-validation-018.md`.
 
 **Checkpoint**: no O(N) object scans on any monitoring path; restarts lose nothing.
 

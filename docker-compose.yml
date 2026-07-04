@@ -106,8 +106,9 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # 018 US4 (T373): the relational monitoring store lives in the `gateway` DB on the resident
       # Postgres (predictions/labels/capture/jobs/policies/suggestions). platformlib.store.bootstrap()
-      # applies the schema idempotently at startup. The native WSL host reaches Postgres at
-      # 127.0.0.1:55432 instead — up_all.ps1 injects that DSN for the agent's job writes (T375).
+      # applies the schema idempotently at startup. The native WSL host agent reaches Postgres at
+      # 127.0.0.1:$POSTGRES_PORT instead — hostagent/run.sh sets GATEWAY_DB_HOST/PORT for its job
+      # writes (T375), since the in-container `postgres` hostname is unresolvable from WSL.
       GATEWAY_DB_URL: "postgresql://${POSTGRES_USER:-mlops}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/gateway"
       # 006 inference tracing — pass the .env toggles INTO the container so they actually take effect
       # (default-on when unset, matching app/tracing.py defaults). FR-052 / SC-034.

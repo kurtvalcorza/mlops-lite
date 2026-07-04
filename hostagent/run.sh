@@ -14,6 +14,12 @@ REPO="$(cd "$DIR/.." && pwd)"
 
 export VRAM_GB="${VRAM_GB:-12}"
 export MLOPS_STATE_DIR="${MLOPS_STATE_DIR:-$HOME/.mlops-lite}"
+# 018 T375: the durable job journal (+ the US4 monitoring store) lives in the `gateway` DB on the
+# resident Postgres. This NATIVE agent reaches it at the host-PUBLISHED port (127.0.0.1:$POSTGRES_PORT),
+# NOT the in-container `postgres:5432` the gateway uses — so point store.dsn() there (its default host
+# is `postgres`, unresolvable from WSL, which crash-loops the agent on hydrate). Overridable if set.
+export GATEWAY_DB_HOST="${GATEWAY_DB_HOST:-127.0.0.1}"
+export GATEWAY_DB_PORT="${GATEWAY_DB_PORT:-${POSTGRES_PORT:-55432}}"
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"   # platformlib + hostagent importable
 # Training env the folded-in jobs need (was training/run.sh's block): MLflow/MinIO + flow knobs.
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:5500}"
