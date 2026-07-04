@@ -78,21 +78,20 @@ def _engine_error_status(exc: BaseException) -> int:
     return 502      # child/backend inference failure
 
 
-def _admit(manager, rt, engine_id: str, preempt: bool, gpu_batch_active: bool = False) -> float:
+def _admit(manager, rt, engine_id: str, preempt: bool, batch_active_fn=None) -> float:
     """Return cold-start ms, making room for the engine. `preempt=true` (T363: the gateway swap
     thinned to just forwarding this flag) runs the agent's transactional evict→admit — the single
     admission lock is the authority now, a `kind="job"` holder is refused structurally (FR-172), and
-    a GPU batch's serving holder is refused via `gpu_batch_active` (FR-155 — the structural
-    replacement for the deleted gateway batch probe). No network probe. Called under the runtime
-    lock so it can't be reaped before the forward."""
+    a GPU batch's serving holder is refused via `batch_active_fn` (FR-155 — the structural
+    replacement for the deleted gateway batch probe, read fresh at the decision point). No network
+    probe. Called under the runtime lock so it can't be reaped before the forward."""
     if preempt:
-        r = swap_mod.preempt_for(manager, engine_id, gpu_batch_active=gpu_batch_active)
-        return r["load_ms"]
+        return swap_mod.preempt_for(manager, engine_id, batch_active_fn=batch_active_fn)["load_ms"]
     return rt.ensure_loaded()
 
 
 def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, multipart=False,
-                         preempt=False, gpu_batch_active=False):
+                         preempt=False, batch_active_fn=None):
     """Shared lifecycle wrapper for an engine forward (contracts/agent-api.md): resolve, verb-check,
     ensure-admitted (cold-load, or a `preempt=true` swap) UNDER the runtime lock, delegate the
     engine-specific call, stamp `last_used`. Returns (status_code, payload). Framework-free so it is
@@ -113,7 +112,7 @@ def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, mult
         return 415, {"error": f"engine {engine_id!r} does not accept {kind} for verb {verb!r}"}
     try:
         with rt.lock:
-            load_ms = _admit(manager, rt, engine_id, preempt, gpu_batch_active)
+            load_ms = _admit(manager, rt, engine_id, preempt, batch_active_fn)
             result = do_forward(rt.adapter, load_ms)
             rt.touch()
         return 200, result
@@ -125,23 +124,23 @@ def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, mult
 
 
 def forward_engine(manager, engine_id: str, verb: str, body: dict, *, preempt=False,
-                   gpu_batch_active=False):
+                   batch_active_fn=None):
     """JSON inference passthrough (llm/asr/embed/tabular): forward a parsed dict body."""
     return _forward_under_lease(
         manager, engine_id, verb,
         lambda ad, load_ms: ad.forward(verb, body, load_ms),
-        preempt=preempt, gpu_batch_active=gpu_batch_active)
+        preempt=preempt, batch_active_fn=batch_active_fn)
 
 
 def forward_engine_multipart(manager, engine_id: str, verb: str, raw_body: bytes,
-                             content_type: str, *, preempt=False, gpu_batch_active=False):
+                             content_type: str, *, preempt=False, batch_active_fn=None):
     """Binary/multipart inference passthrough (vision classify): relay the raw multipart body + its
     Content-Type to the engine's child unchanged (byte-compat, FR-177). The adapter opts in by
     implementing `forward_multipart(verb, raw_body, content_type, load_ms)`."""
     return _forward_under_lease(
         manager, engine_id, verb,
         lambda ad, load_ms: ad.forward_multipart(verb, raw_body, content_type, load_ms),
-        multipart=True, preempt=preempt, gpu_batch_active=gpu_batch_active)
+        multipart=True, preempt=preempt, batch_active_fn=batch_active_fn)
 
 
 def _refresh_metrics(admission, journal, manager) -> None:
@@ -351,7 +350,10 @@ def make_handler(admission, journal, manager, jobs):
                 # and a GPU batch's serving holder refuses via `gpu_batch_active` — FR-155).
                 preempt = (parse_qs(urlparse(self.path).query).get("preempt")
                            or [""])[0].lower() in ("1", "true", "yes")
-                batch_active = jobs.health_fields()["gpu_batch_active"] if preempt else False
+                # A callable (read fresh inside preempt_for at the decision point, not a stale
+                # snapshot — @claude PR#37) reporting whether a GPU batch is driving the holder.
+                batch_active_fn = (lambda: jobs.health_fields()["gpu_batch_active"]) if preempt \
+                    else None
                 rt = manager.runtimes.get(eid)
                 if rt is None:
                     return self._send(404, {"error": f"unknown engine {eid!r}"})
@@ -385,7 +387,7 @@ def make_handler(admission, journal, manager, jobs):
                     raw = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0)
                     code, payload = forward_engine_multipart(
                         manager, eid, verb, raw, ctype, preempt=preempt,
-                        gpu_batch_active=batch_active)
+                        batch_active_fn=batch_active_fn)
                     return self._send(code, payload)
                 body = self._read_body()
                 if body is None:
@@ -396,7 +398,7 @@ def make_handler(admission, journal, manager, jobs):
                                                          f"verb {verb!r}"})
                     try:
                         with rt.lock:  # held across the whole generation (one model in VRAM)
-                            load_ms = _admit(manager, rt, eid, preempt, batch_active)
+                            load_ms = _admit(manager, rt, eid, preempt, batch_active_fn)
                             gen = rt.adapter.stream(verb, body, load_ms)
                             try:
                                 self._stream(gen)
@@ -411,7 +413,7 @@ def make_handler(admission, journal, manager, jobs):
                         self._send(_engine_error_status(e), {"error": str(e)})
                     return
                 code, payload = forward_engine(manager, eid, verb, body, preempt=preempt,
-                                               gpu_batch_active=batch_active)
+                                               batch_active_fn=batch_active_fn)
                 return self._send(code, payload)
             self._send(404, {"error": "unknown path"})
 

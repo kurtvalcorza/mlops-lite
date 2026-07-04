@@ -13,6 +13,7 @@ import sys
 import types
 
 import pytest
+from prometheus_client import REGISTRY as _PROM
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -21,12 +22,18 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _isolate_app_modules():
     """These tests stub `app.settings` + load `app.platform_*` into sys.modules. Snapshot & restore
     the `app*` entries so the stub can't leak into other suites (e.g. test_policy_scheduler reads
-    the real settings) — a real test-ordering bug when this file sorts before them."""
+    the real settings) — a real test-ordering bug when this file sorts before them. Also unregister
+    any Prometheus collectors a `platform_metrics` (re)load added, so a second load doesn't hit a
+    duplicate-timeseries error in the global default registry."""
     saved = {k: sys.modules[k] for k in list(sys.modules) if k == "app" or k.startswith("app.")}
+    collectors = set(_PROM._collector_to_names)
     yield
     for k in [k for k in list(sys.modules) if k == "app" or k.startswith("app.")]:
         sys.modules.pop(k, None)
     sys.modules.update(saved)
+    for c in list(_PROM._collector_to_names):
+        if c not in collectors:
+            _PROM.unregister(c)
 
 
 def _load(mod_name):
@@ -128,6 +135,26 @@ def test_metrics_refresh_derives_gauges_from_agent_health(monkeypatch):
     assert mod.SERVING_RESIDENT._value.get() == 1            # engines.llm == ready
     assert mod.TRAINER_BUSY._value.get() == 1 and mod.GPU_FREE._value.get() == 4096
     assert mod.SERVING_UP._value.get() == 1 and mod.TRAINER_UP._value.get() == 1
+
+
+def test_metrics_serving_resident_true_while_loading(monkeypatch):
+    # @claude PR#37: the child-alive `resident` flag was true during cold-start — SERVING_RESIDENT
+    # must read 1 for `loading`, not just `ready` (else the gauge dips to 0 mid-cold-start).
+    mod = _load("platform_metrics")
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            return _Resp(200, {"engines": {"llm": "loading"}, "busy": False})
+
+    monkeypatch.setattr(mod.httpx, "Client", lambda **kw: _Client())
+    mod.refresh()
+    assert mod.SERVING_RESIDENT._value.get() == 1            # loading child is resident
 
 
 if __name__ == "__main__":
