@@ -107,14 +107,14 @@ components and a proven rollback story (now moot).
 **Goal**: evidence-recorded runtime choice; streaming baselines met (SC-132).
 **Independent test**: quickstart §US3 (dual-runtime drill on hardware).
 
-- [ ] **T413** [US3] Dual-runtime switch: `AGENT_RUNTIME=stdlib|uvicorn` in `hostagent/main.py`
+- [x] **T413** [US3] Dual-runtime switch: `AGENT_RUNTIME=stdlib|uvicorn` in `hostagent/main.py`
   (default `stdlib`) — the ASGI app reuses the framework-free handlers
   (`forward_engine`/`forward_engine_multipart`/jobs/health/metrics/control) with SSE framing,
   `AGENT_BIND`, `X-Agent-Control`, and the error vocabulary preserved
   (contracts/children-api.md §runtime; FR-206); uvicorn imported lazily only when selected.
   Parameterize `tests/test_agent_http.py` (+ the streaming/multipart agent tests) to run the
   SAME assertions on both runtimes — transport drift is a test failure.
-- [ ] **T414** [P] [US3] Drill tool: `scripts/agent_stream_drill.py` — stream TTFT + stall count
+- [x] **T414** [P] [US3] Drill tool: `scripts/agent_stream_drill.py` — stream TTFT + stall count
   under concurrent `/health` polling, multipart RTT, mid-stream client disconnect (next request
   clean), preempt-during-stream (409-vs-drain per lease semantics); appends a
   RuntimeBaselineRecord (data-model.md) to the runbook doc; offline smoke against a fake SSE
