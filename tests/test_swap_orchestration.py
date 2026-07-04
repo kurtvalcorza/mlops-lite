@@ -9,7 +9,6 @@ and the target loaded; refuse-if-held holds without the flag; a job holder is re
 import json
 import os
 import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -26,6 +25,7 @@ from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from _agentstore import FakeJobStore  # noqa: E402
 
 
 class FakeGpuEngine:
@@ -62,7 +62,7 @@ class FakeGpuEngine:
 def _serve():
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 10.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="swap-"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     # idle_timeout inf + no reaper thread started (make_handler doesn't) → engines stay resident.
     rts = {eid: lifecycle.EngineRuntime(FakeGpuEngine(eid), admission, idle_timeout_s=float("inf"))
            for eid in ("llm", "vision")}

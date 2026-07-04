@@ -211,9 +211,10 @@ runs against trainer *or* agent jobs surface.
   `tests/test_label_write_once.py`; retire the in-process `_label_write_lock` and the
   dual-runtime `sys.path` hacks in `gateway/app/{quality,batch,shadow}.py` (FR-176 — shared
   code now lives in `platformlib`).
-- [ ] **T375** [US4] Cutover — jobs/policies/suggestions: agent `journal.py` writes `jobs` rows
+- [x] **T375** [US4] Cutover — jobs/policies/suggestions: agent `journal.py` writes `jobs` rows
   directly (clarify Q4; JSONL path retired after import); `policies.py` + suggestion state move
-  to their tables; gateway job reads via store.
+  to their tables; gateway job reads via store. **Split into T375-A (policies/pending/status/
+  suggestions → store, merged #45) + T375-B (agent journal → `jobs` table, this PR).**
 - [ ] **T376** [P] [US4] Backfill: `scripts/backfill_store.py` (objects → rows,
   `ON CONFLICT DO NOTHING`, counts report, journal import); `tests/test_backfill.py`
   (idempotent re-run).

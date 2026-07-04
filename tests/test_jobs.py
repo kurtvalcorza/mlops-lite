@@ -18,6 +18,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from _agentstore import FakeJobStore  # noqa: E402
 from hostagent import admission as adm  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
@@ -30,8 +31,10 @@ def _admission(free_gb=20.0):
                          gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: free_gb))
 
 
-def _journal(tmp_path):
-    return Journal(str(tmp_path / "journal.jsonl"))
+def _journal(tmp_path=None):
+    # US4 T375-B: the journal is Postgres-backed now — a fresh in-memory FakeJobStore per journal
+    # (tmp_path is vestigial; kept so the many call sites don't churn).
+    return Journal(store=FakeJobStore())
 
 
 def _const_runners(update):
@@ -195,7 +198,7 @@ def test_terminal_journal_write_precedes_slot_release(tmp_path):
                 seen["holder"] = a.holder()
             return super().transition(job_id, to, **kw)
 
-    jm = jobs_mod.JobManager(a, SpyJournal(str(tmp_path / "j.jsonl")),
+    jm = jobs_mod.JobManager(a, SpyJournal(store=FakeJobStore()),
                              runners=_const_runners({"status": "completed"}))
     _, p = jm.submit("finetune", dict(FT_REQ))
     assert _wait_state(jm, p["run_id"], "completed")
@@ -204,6 +207,41 @@ def test_terminal_journal_write_precedes_slot_release(tmp_path):
     assert seen["holder"] is not None and seen["holder"]["kind"] == "job"
     # and afterwards the slot is freed (no strand)
     assert a.holder() is None and jm._active is None
+
+
+# ---- store blips must never strand the slot/lease (@claude PR#46, US4 T375-B) -----------------
+def test_submit_store_failure_releases_gpu_lease(tmp_path):
+    """The journal write is a networked Postgres upsert now — if it fails AFTER the GPU lease is
+    taken, `submit` must release the lease before propagating, else the next submit is wrongly 409'd
+    by a lease no live job holds."""
+    a = _admission()
+    store = FakeJobStore()
+    jm = jobs_mod.JobManager(a, Journal(store=store),         # hydrated while the store is up
+                             runners=_const_runners({"status": "completed"}))
+    store.fail = True                                         # the store goes down mid-submit
+    with pytest.raises(store.StoreError):
+        jm.submit("finetune", dict(FT_REQ))
+    assert a.holder() is None and jm._active is None          # lease + slot freed, not stranded
+
+
+def test_worker_running_transition_failure_frees_slot(tmp_path):
+    """The worker's first `transition(running)` is the same networked write. A blip there fires
+    BEFORE the terminal try/finally, so without the guard the daemon thread would die holding the
+    slot + GPU lease → every later submit 409s forever. The guard frees them; the durable record
+    stays `queued` for the next restart's `mark_interrupted` to reconcile."""
+    class FailRunningStore(FakeJobStore):
+        def upsert_job(self, conn, record):
+            if record.get("state") == "running":             # queued-write ok, running-write blips
+                raise self.StoreError("blip on running-transition (fake)")
+            return super().upsert_job(conn, record)
+
+    a = _admission()
+    jm = jobs_mod.JobManager(a, Journal(store=FailRunningStore()),
+                             runners=_const_runners({"status": "completed"}))
+    code, p = jm.submit("finetune", dict(FT_REQ))
+    assert code == 202                                        # the queued-write landed
+    assert _wait(lambda: a.holder() is None and jm._active is None, 3.0)   # slot/lease freed
+    assert (jm.get(p["run_id"]) or {})["state"] == "queued"   # record never advanced past queued
 
 
 # ---- subprocess runner plumbing (real _run_finetune, fake Popen) ------------------------------
@@ -249,15 +287,15 @@ def test_shadow_uses_client_shadow_id(tmp_path):
 
 
 # ---- durable journal lifecycle + restart replay -----------------------------------------------
-def test_journal_records_and_replays(tmp_path):
-    path = str(tmp_path / "j.jsonl")
-    jm = jobs_mod.JobManager(_admission(), Journal(path),
+def test_journal_records_and_replays():
+    store = FakeJobStore()
+    jm = jobs_mod.JobManager(_admission(), Journal(store=store),
                              runners=_const_runners({"status": "completed", "mlflow_run_id": "r9",
                                                      "model": {"version": "4"}}))
     code, p = jm.submit("finetune", dict(FT_REQ))
     _wait_state(jm, p["run_id"], "completed")
-    # A fresh Journal folding the same file rebuilds the terminal record incl. the result fields.
-    replayed = Journal(path).get(p["run_id"])
+    # A fresh Journal hydrating the same table rebuilds the terminal record incl. the result fields.
+    replayed = Journal(store=store).get(p["run_id"])
     assert replayed["state"] == "completed" and replayed["mlflow_run_id"] == "r9"
     assert replayed["model"]["version"] == "4"
 

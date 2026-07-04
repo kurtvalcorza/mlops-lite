@@ -8,7 +8,6 @@ jobs fold-in added: the new `POST /jobs` (+ `GET /jobs?kind`), the legacy traine
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -24,6 +23,7 @@ from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from _agentstore import FakeJobStore  # noqa: E402
 
 
 def _instant_runners(update):
@@ -35,7 +35,7 @@ def _instant_runners(update):
 def _serve(update):
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 8.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-jobs-"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     jobs = jobs_mod.JobManager(admission, journal, runners=_instant_runners(update))
     manager = lifecycle.EngineManager(admission, runtimes={})
     server = ThreadingHTTPServer(
@@ -130,6 +130,20 @@ def test_health_superset_carries_trainer_fields():
         for k in ("busy", "active", "gpu_batch_active", "gpu_free_mib", "vram_budget_gb"):
             assert k in h, f"missing trainer-compat health field {k!r}"
         assert h["gpu_free_mib"] == int(8.0 * 1024) and h["busy"] is False
+    finally:
+        server.shutdown()
+
+
+def test_post_jobs_store_blip_maps_to_502():
+    # @claude PR#46: JobManager.submit can raise StoreError now (the journal write is a Postgres
+    # upsert). do_POST must map it to a clean 502, not let it escape as a dropped connection.
+    server, base, jobs = _serve({"status": "completed"})
+    try:
+        jobs.journal._store.fail = True                    # the gateway DB goes unreachable
+        code, body = _req(base + "/jobs", method="POST", body={
+            "kind": "finetune", "modality": "llm",
+            "request": {"dataset_name": "d", "dataset_version": "1", "output_name": "o"}})
+        assert code == 502 and "error" in body
     finally:
         server.shutdown()
 
