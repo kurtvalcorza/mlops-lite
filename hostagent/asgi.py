@@ -11,8 +11,8 @@ thread-affine — so each stream gets ONE dedicated pump thread that drives the 
 (acquire, yield, close/release all on that thread). Frames hand off to the event loop over an
 `asyncio.Queue` via `call_soon_threadsafe`, bounded by a semaphore the consumer releases — so the
 async side `await`s natively (fully cancellable) and NO shared executor thread is parked per
-stream (@claude PR#56: parking `q.get` calls on the default executor could exhaust the pool that
-also dispatches `handle_get`/`handle_post` under enough hung/disconnected streams). The first
+stream — parking per-stream `q.get` calls on the default executor could exhaust the pool that
+also dispatches `handle_get`/`handle_post` under enough hung/disconnected streams. The first
 frame is pulled before headers are sent, so a pre-stream failure still answers a JSON error with
 the mapped status (same as the stdlib transport). A client disconnect stops the pump between
 frames; the pump's `finally` closes the generator on its own thread, which releases the lock —
