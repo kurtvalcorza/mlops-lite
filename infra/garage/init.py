@@ -116,8 +116,11 @@ def ensure_buckets() -> dict:
 
 
 def ensure_key() -> tuple:
+    # Only 404 means "no such key" (probed live against the pinned v2.3.0: unknown search and
+    # unknown id both return 404). Anything else — a real server error, or an ambiguous
+    # multi-match — must fail loud, NOT mint a duplicate key (the idempotence guarantee).
     status, info = call(
-        "GET", f"/v2/GetKeyInfo?search={KEY_NAME}&showSecretKey=true", ok=(200, 400, 404, 500)
+        "GET", f"/v2/GetKeyInfo?search={KEY_NAME}&showSecretKey=true", ok=(200, 404)
     )
     if status == 200 and info:
         print(f"garage-init: key '{KEY_NAME}' exists ({info['accessKeyId']})")

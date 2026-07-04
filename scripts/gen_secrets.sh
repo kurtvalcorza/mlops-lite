@@ -52,6 +52,13 @@ record_garage() {
   local existing_key existing_secret
   existing_key="$(env_get GARAGE_ACCESS_KEY_ID)"
   existing_secret="$(env_get GARAGE_SECRET_ACCESS_KEY)"
+  if [[ -n "$existing_key" && -z "$existing_secret" ]] || [[ -z "$existing_key" && -n "$existing_secret" ]]; then
+    # Half a pair (hand-edit or an interrupted append): appending now would leave a duplicate
+    # line for the var that already exists. Fail loud; the operator reconciles .env first.
+    echo "ERROR: .env holds a PARTIAL Garage pair (one of GARAGE_ACCESS_KEY_ID /" >&2
+    echo "GARAGE_SECRET_ACCESS_KEY without the other). Remove the stale line, then re-run." >&2
+    exit 1
+  fi
   if [[ -n "$existing_key" && -n "$existing_secret" ]]; then
     if [[ "$existing_key" == "$key" ]]; then
       echo "Garage key pair already recorded ($key) and matches the store — unchanged."

@@ -79,6 +79,11 @@ if ($RecordGarage) {
     if (-not $key -or -not $secret) { Write-Error "garage-init emitted no key pair — inspect: docker compose run --rm garage-init" }
     $existingKey = Get-EnvValue 'GARAGE_ACCESS_KEY_ID'
     $existingSecret = Get-EnvValue 'GARAGE_SECRET_ACCESS_KEY'
+    if (($existingKey -and -not $existingSecret) -or (-not $existingKey -and $existingSecret)) {
+        # Half a pair (hand-edit or an interrupted append): appending now would duplicate the
+        # var that already exists. Fail loud; the operator reconciles .env first.
+        Write-Error ".env holds a PARTIAL Garage pair (one of GARAGE_ACCESS_KEY_ID / GARAGE_SECRET_ACCESS_KEY without the other). Remove the stale line, then re-run."
+    }
     if ($existingKey -and $existingSecret) {
         if ($existingKey -eq $key) {
             Write-Host "Garage key pair already recorded ($key) and matches the store — unchanged." -ForegroundColor Green
