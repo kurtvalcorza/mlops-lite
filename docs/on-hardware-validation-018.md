@@ -153,7 +153,8 @@ manual invocations between breach detection and the promotion suggestion** — t
 4. Retrain **completed + registered `vision-mobilenet` v2** through the agent's jobs surface (one
    `kind=job` GPU tenant); the loop **auto-scored the candidate** via the 015 gate.
 5. **Verdict correctly withheld a suggestion** for a candidate whose incumbent had no comparable eval
-   baseline (`gate=warn, reason="incumbent has no logged eval metric"` → `promotions{mode="not_green"}`)
+   baseline (`gate=warn, reason="incumbent has no logged eval metric (missing-metric policy)"` →
+   `promotions{mode="not_green"}`)
    — a not-green candidate must not get a one-click promote (FR-183). After giving the incumbent a
    like-for-like accuracy baseline (0.20), the next autonomous cycle produced a **green** candidate v3
    (`gate verdict="pass"`, candidate 0.25 > incumbent 0.20, delta 0.05, no shadow window) → an **OPEN
