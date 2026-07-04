@@ -518,7 +518,13 @@ def _default_shadow(model: str, version: str, modality: str):
         token = page.get("NextContinuationToken") if page.get("IsTruncated") else None
         if not token:
             break
-    best, best_at = None, None
+    # Collect the MATCHING verdicts, then pick the newest — decoupled (019/US9, FR-197). Fusing the
+    # match with the newest-by-time tie-break in one AND (the prior code) meant that once a matching
+    # verdict with a real LastModified was chosen, a genuinely-newer match whose LastModified was
+    # absent could never replace it (`modified is not None` failed) — and an all-missing-timestamp set
+    # was picked in listing order (effectively random). Real S3 always stamps LastModified, so this
+    # bites only a non-conforming store/mock, but selection must be total, not order-dependent.
+    matches = []
     for key, modified in entries:
         try:
             v = quality._get_json(key)
@@ -530,10 +536,24 @@ def _default_shadow(model: str, version: str, modality: str):
                 and str((v.get("challenger") or {}).get("version")) == str(version)
                 and (incumbent is None or champ is None or champ == incumbent)
                 and (modality is None or v.get("modality") is None
-                     or v.get("modality") == MODALITY_TASK.get(modality, modality))
-                and (best_at is None or (modified is not None and modified > best_at))):
-            best, best_at = v, modified
-    return best
+                     or v.get("modality") == MODALITY_TASK.get(modality, modality))):
+            matches.append((modified, key, v))
+    if not matches:
+        return None
+    # FAIL-CLOSED on an untrustworthy timestamp (019/US9, FR-197): newest-by-LastModified is the
+    # contract, but if a MATCHING verdict has no LastModified we cannot establish which is newest —
+    # and silently picking a timestamped (possibly older) verdict could auto-promote a shadow-LOSER
+    # or veto a winner on a stale window. Real S3 always stamps LastModified, so this only fires on a
+    # non-conforming store; raise (the tick's per-policy containment keeps the watch and retries next
+    # tick) rather than guess, exactly like a listing failure — never a silent stale pick.
+    if any(modified is None for modified, _key, _v in matches):
+        raise RuntimeError(
+            f"shadow verdict listing for {model} v{version} is missing LastModified on a matching "
+            f"verdict — cannot order by recency (non-conforming store); refusing to risk a stale "
+            f"promotion signal")
+    # Newest by time; the (uuid) object key breaks an exact-timestamp tie deterministically.
+    matches.sort(key=lambda m: (m[0], m[1]))
+    return matches[-1][2]
 
 
 def _current_serving_version(model: str):

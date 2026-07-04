@@ -2,11 +2,12 @@
 
 **Input**: Design documents from `specs/019-review-remediation-018/` (spec.md, plan.md).
 
-> **Status (2026-07-03):** P1 (US1–US4, T382–T392) **BUILT** with regression tests — the four CONFIRMED
-> live correctness bugs are fixed. P2/P3 (US5–US9, T393–T400) remain. IDs continue the shared space
-> (FR-188..197, SC-117..126, T382..T400). Each fix is TDD: the regression test fails on the pre-fix code
-> and passes after. Offline suites (`test_agent_journal`, `test_lockfile_interop`, `test_swap_orchestration`
-> core, `test_train_idempotency`) are green; the prometheus/httpx-backed suites run in CI.
+> **Status (2026-07-03):** ALL of US1–US9 (T382–T400) **BUILT** with regression tests — every one of the
+> ten findings is fixed. IDs continue the shared space (FR-188..197, SC-117..126, T382..T400). Each fix is
+> TDD: the regression test fails on the pre-fix code and passes after. Offline suites are green here
+> (`test_agent_journal`, `test_lockfile_interop`, `test_swap_orchestration` core, `test_train_idempotency`,
+> `test_agent_lifecycle`, `test_agent_swap_txn`, `test_agent_http`, `test_agent_adapters`); the
+> prometheus/httpx-backed suites (`test_policy_scheduler`, `test_promotion_modes`) run in CI.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -88,11 +89,13 @@ and double store-write failure each launch exactly one run; a genuinely-failed l
 **Checkpoint**: SC-120 green — no duplicate GPU training runs.
 
 > **Realized as** a stable per-retrain **idempotency key** (`scheduler._idempotency_key`, a hash of
-> model+modality+dataset+resolved-version) added to the `/train` body, which the trainer dedupes
-> (`trainer._idempotent_hit` + `_run_keys`, gated by `_active`): a re-issued identical launch (lost
-> response, or a park retry after a store blip) returns the existing run instead of starting a second on
-> the single GPU — covering both failure modes at their shared root (no trainer-honored key) rather than
-> patching each store-write race. Tests: `tests/test_train_idempotency.py` (the dedup decision) and
+> model+modality+dataset+resolved-version) added to the `/train` body, which the agent's job launcher
+> dedupes — post-T362 the trainer folded into `hostagent.jobs.JobManager`, so the dedup lives there
+> (`jobs._within_idempotency_window` + `JobManager._run_keys`, gated by `_active`): a re-issued identical
+> launch (lost response, or a park retry after a store blip) returns the existing job instead of starting
+> a second on the single GPU — covering both failure modes at their shared root (no agent-honored key)
+> rather than patching each store-write race. Tests: `tests/test_train_idempotency.py` (the dedup
+> decision + `JobManager.submit` wiring) and
 > `tests/test_policy_scheduler.py::test_idempotency_key_is_stable_per_retrain_identity` (a stable key).
 > Manual `/train` callers omit the key → today's behavior unchanged.
 
@@ -103,10 +106,10 @@ and double store-write failure each launch exactly one run; a genuinely-failed l
 **Goal**: No unlocked read releases admission mid-load (FR-193). **Test**: interleaved load/unload never
 double-admits.
 
-- [ ] **T393** [P] [US5] `tests/test_agent_lifecycle.py` — interleave `ensure_loaded` and hard-cut `unload`
+- [x] **T393** [P] [US5] `tests/test_agent_lifecycle.py` — interleave `ensure_loaded` and hard-cut `unload`
   so the `_loading` read races the flag set; assert admission is never released while a load holds the lock
   and two models never co-reside.
-- [ ] **T394** [US5] `hostagent/lifecycle.py` `unload()`: read `_loading` and decide teardown under
+- [x] **T394** [US5] `hostagent/lifecycle.py` `unload()`: read `_loading` and decide teardown under
   `self.lock`; the failed-acquire hard-cut path must not read the guard or call `admission.release()` outside
   the lock.
 
@@ -119,10 +122,10 @@ double-admits.
 **Goal**: Concurrent same-target swaps are serialized; `end_swap` never drops a still-held reservation
 (FR-194). **Test**: two concurrent `begin_swap("vision")` never overlap.
 
-- [ ] **T395** [P] [US6] `tests/test_agent_swap_txn.py` — two concurrent same-target `begin_swap` calls →
+- [x] **T395** [P] [US6] `tests/test_agent_swap_txn.py` — two concurrent same-target `begin_swap` calls →
   the second is rejected-or-queued; a completing swap does not clear a reservation the other still holds.
   MUST fail on current `HEAD`.
-- [ ] **T396** [US6] `hostagent/admission.py` `begin_swap`/`end_swap`: make the reservation single-flight per
+- [x] **T396** [US6] `hostagent/admission.py` `begin_swap`/`end_swap`: make the reservation single-flight per
   target and refcount-safe (reject-or-wait a concurrent same-target begin; `end_swap` releases only when the
   last holder finishes).
 
@@ -135,10 +138,10 @@ double-admits.
 **Goal**: `/health` and `/engines` round-trip through `AgentHealth`/`EngineState` (FR-195). **Test**:
 contract `from_json` on live payloads preserves GPU state and validates.
 
-- [ ] **T397** [P] [US7] `tests/test_agent_http.py` — `AgentHealth.from_json(<agent /health body>)` yields
+- [x] **T397** [P] [US7] `tests/test_agent_http.py` — `AgentHealth.from_json(<agent /health body>)` yields
   non-default `gpu_free_gb/holder/holder_kind/wedged`; `EngineState.from_json(<an /engines row>)` validates
   without raising. Both MUST fail on current `HEAD`.
-- [ ] **T398** [US7] `hostagent/main.py`: flatten the `/health` GPU fields to top-level
+- [x] **T398** [US7] `hostagent/main.py`: flatten the `/health` GPU fields to top-level
   `gpu_free_gb`/`holder`/`holder_kind`/`wedged`; include `engine_id` in each `/engines` row (and, while
   here, compute `engine_states()` once per `/health` rather than twice).
 
@@ -150,11 +153,11 @@ contract `from_json` on live payloads preserves GPU state and validates.
 
 **Goal**: Per-engine startup/idle tuning (FR-196) and timestamp-independent verdict selection (FR-197).
 
-- [ ] **T399** [P] [US8] `hostagent/adapters/__init__.py` `build_runtimes`: thread a per-engine
+- [x] **T399** [P] [US8] `hostagent/adapters/__init__.py` `build_runtimes`: thread a per-engine
   `ready_wait_s` (and per-engine idle timeout) from the registry/env into each `EngineRuntime`, restoring the
   slow-bento cold-start grace; test in `tests/test_agent_adapters.py` that a slow-first-load engine is not
   killed at 60 s and a per-engine idle setting is honored (SC-124).
-- [ ] **T400** [P] [US9] `gateway/app/scheduler.py` `_default_shadow`: make newest-verdict selection total —
+- [x] **T400** [P] [US9] `gateway/app/scheduler.py` `_default_shadow`: make newest-verdict selection total —
   break ties on a secondary key (object key / uuid) when `LastModified` is absent, or fail-closed rather than
   silently choose a stale verdict; test in `tests/test_promotion_modes.py` with a listing whose newest object
   omits `LastModified` (SC-125).

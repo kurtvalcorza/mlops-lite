@@ -8,6 +8,8 @@ idle-reap unloads and frees the slot.
 """
 import os
 import sys
+import threading
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
@@ -290,6 +292,44 @@ def test_hard_cut_refuses_while_a_load_is_in_progress():
     assert not loader.is_alive() and rt.state()["state"] == "ready"
     res = rt.unload(drain_timeout_s=5)        # after the load settles, unload works normally
     assert res["status"] == "unloaded" and a.holder() is None
+
+
+def test_hard_cut_refuses_while_a_loader_is_blocked_acquiring_the_lock():
+    """019/US5 (FR-193): the narrower window the prior fix left open. ensure_loaded now sets
+    _loading BEFORE it blocks on self.lock, so a concurrent hard-cut unload observes the load even
+    while the loader is still WAITING for the lock. With the old set-INSIDE-the-lock ordering the
+    loader had not set _loading yet while blocked, so the unlocked read in unload() saw False and
+    tore down / released the (about-to-be-acquired) admission slot."""
+    rt, eng, a = _rt()
+
+    released = []
+    real_release = a.release
+    a.release = lambda eid: (released.append(eid), real_release(eid))[1]
+
+    held = threading.Event()
+    let_go = threading.Event()
+
+    def holder():                              # a DISTINCT thread pins self.lock (≠ loader, ≠ main)
+        with rt.lock:
+            held.set()
+            let_go.wait(2.0)
+
+    h = threading.Thread(target=holder)
+    h.start()
+    assert held.wait(2.0)
+
+    b = threading.Thread(target=rt.ensure_loaded)
+    b.start()
+    time.sleep(0.15)                           # B set _loading (its first statement) then blocked on the lock
+
+    res = rt.unload(drain_timeout_s=0.05)      # main ≠ holder ≠ loader → acquire times out
+    assert res["status"] == "busy"             # a load is in progress → refuse, don't tear down
+    assert released == []                       # the loader's admission slot was NOT released
+
+    let_go.set()
+    b.join(2.0)
+    h.join(2.0)
+    assert a.holder() and a.holder()["tenant"] == "fake"   # the load then completed cleanly
 
 
 if __name__ == "__main__":

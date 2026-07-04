@@ -115,10 +115,18 @@ class Admission:
     # reservation is up, acquire() admits only the reserved target; the swap itself never holds
     # this lock across engine operations, so no lock-order cycle exists.
     def begin_swap(self, target: str) -> None:
-        """Reserve the slot for `target` for the duration of a swap. Raises Held if another swap
-        is already in flight (one transaction at a time)."""
+        """Reserve the slot for `target` for the duration of a swap. Raises Held if ANY swap is
+        already in flight — one transaction at a time (FR-171).
+
+        Rejecting a concurrent swap for the SAME target too (019/US6, FR-194): the prior guard only
+        refused a *different* target, so two same-target swaps both passed and both set the shared
+        `_swap_target`; the first to finish then ran `end_swap(target)` and dropped the reservation
+        while the second was still mid-transaction (between evict and re-load) — reopening the
+        evict→re-acquire window the reservation exists to close. Serializing on any in-flight swap
+        keeps the reservation single-flight; the refused caller retries (the gateway maps it to a
+        409/PreemptRefused), by which point the first transaction has ended."""
         with self.lock:
-            if self._swap_target is not None and self._swap_target != target:
+            if self._swap_target is not None:
                 raise Held({"tenant": self._swap_target, "kind": "swap-reservation"})
             self._swap_target = target
 

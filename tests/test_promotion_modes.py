@@ -192,6 +192,34 @@ def test_default_shadow_picks_newest_verdict_by_last_modified():
     assert best["winner"] == "champion" and best["shadow_id"] == "aaaaaa"  # newest, not max-id
 
 
+def test_default_shadow_fails_closed_when_a_matching_verdict_lacks_last_modified():
+    """019/US9 (FR-197): the prior newest-by-LastModified tie-break could never replace a chosen
+    timestamped verdict with a newer one whose LastModified was absent — so a non-conforming store
+    (or mock) could make selection silently pick a STALE verdict, auto-promoting a shadow-loser or
+    vetoing a winner. If a MATCHING verdict has no LastModified, recency is unorderable → fail closed
+    (raise; containment retries) instead of guessing."""
+    import datetime as _dt
+
+    from app import quality as appq
+
+    stamped = {"winner": "champion", "name": "qa-demo", "modality": "text-generation",
+               "challenger": {"version": "9"}, "shadow_id": "aaaaaa"}
+    unstamped = {"winner": "challenger", "name": "qa-demo", "modality": "text-generation",
+                 "challenger": {"version": "9"}, "shadow_id": "zzzzzz"}
+    fake = _ListingS3({
+        f"{appq.SHADOW_PREFIX}aaaaaa.json": (stamped, _dt.datetime(2026, 7, 1)),
+        f"{appq.SHADOW_PREFIX}zzzzzz.json": (unstamped, None),   # no timestamp — recency unknowable
+    })
+    try:
+        _with_shadow_env(fake, None,
+                         lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
+    except RuntimeError as e:
+        assert "LastModified" in str(e)
+    else:
+        raise AssertionError("a matching verdict without LastModified must fail closed, not pick a "
+                             "possibly-stale timestamped verdict")
+
+
 def test_default_shadow_listing_failure_raises_never_reads_as_green():
     # Codex round 4 / internal review (018): the whole-scan try/except returned None on ANY
     # failure, and None means "no shadow window exists" — GREEN. A transient store outage could

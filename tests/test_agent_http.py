@@ -22,6 +22,8 @@ from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from platformlib.contracts import AgentHealth, EngineState  # noqa: E402
+from test_agent_lifecycle import FakeEngine  # noqa: E402 — the shared fake adapter
 
 
 def _serve():
@@ -61,6 +63,52 @@ def test_jobs_routing_query_filter_and_exact_match():
         assert code == 404
         code, _ = _get(base, "/health")
         assert code == 200
+    finally:
+        server.shutdown()
+
+
+def _serve_with_engine():
+    admission = adm.Admission(vram_budget_gb=12.0,
+                              gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
+    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-http-h"), "journal.jsonl"))
+    rt = lifecycle.EngineRuntime(FakeEngine("fake"), admission, sleep=lambda s: None)
+    manager = lifecycle.EngineManager(admission, runtimes={"fake": rt})
+    rt.ensure_loaded()                                # holder=fake, engine ready
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), agent_main.make_handler(
+            admission, journal, manager, jobs_mod.JobManager(admission, journal)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def test_health_conforms_to_agenthealth_contract():
+    """019/US7 (FR-195): GET /health round-trips through AgentHealth with the GPU fields FLAT — a
+    consumer must read the real holder/free-VRAM, not the defaults the prior nested `gpu` object was
+    silently dropped to by the contract's unknown-field filter."""
+    server, base = _serve_with_engine()
+    try:
+        code, body = _get(base, "/health")
+        assert code == 200
+        h = AgentHealth.from_json(body)
+        assert h.holder == "fake"                     # flat field parsed (was None under the nesting)
+        assert h.holder_kind == "serving"
+        assert h.gpu_free_gb == 10.0
+        assert h.wedged is False
+        assert h.engines.get("fake") == "ready"
+    finally:
+        server.shutdown()
+
+
+def test_engines_rows_conform_to_enginestate_contract():
+    """019/US7 (FR-195): each GET /engines row carries engine_id so EngineState.from_json validates
+    instead of raising ContractError on a bare {state: …} value."""
+    server, base = _serve_with_engine()
+    try:
+        code, body = _get(base, "/engines")
+        assert code == 200
+        es = EngineState.from_json(body["engines"]["fake"])   # raised ContractError pre-fix
+        assert es.engine_id == "fake" and es.state == "ready"
+        assert es.gpu is True and es.optional is False
     finally:
         server.shutdown()
 
