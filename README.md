@@ -16,7 +16,7 @@ a heavier reference platform, sized to a laptop.
 > **relational monitoring/job state on Postgres** — predictions·labels·capture·jobs·policies·suggestions
 > as indexed table reads, replacing the O(N) object scans (a 10k-prediction window resolves in ~40 ms).
 > Constitution
-> `v1.4.1`. Reference stack on MLflow `3.14.0`.
+> `v1.5.0`. Reference stack on MLflow `3.14.0`.
 >
 > **In flight:** **020 stack-remediation** (object-store exit, "Bento-ectomy", agent-runtime
 > measurement) is **spec/plan/tasks complete but not yet built** — see the section below.
@@ -66,7 +66,7 @@ flowchart LR
 ```
 
 **One GPU tenant under a single race-free admission lock (Principle II, non-negotiable; constitution
-v1.4.1).** At most one tenant holds the GPU at any instant — **LLM**, **vision**, **ASR**, *or* a
+v1.5.0).** At most one tenant holds the GPU at any instant — **LLM**, **vision**, **ASR**, *or* a
 **training/HPO/batch/shadow job**. Since **018 (T364)** this is enforced **in-process**: the agent's
 `Admission` makes the free-VRAM read, the holder check, and the claim all under one re-entrant lock
 (`hostagent/admission.py`) — race-free by construction, no time-of-check/time-of-use window, and no
@@ -488,6 +488,6 @@ and served live at `http://localhost:8080/docs`.
 | 015 | on-demand-version-loading | Score-at-registration: every fine-tune logs its eval metric in-process; gate/compare/HPO read logged metrics; `/evaluate` guard (closes SC-068) |
 | 016 | shadow-replay | Production-traffic champion-challenger: bounded recoverable-input capture + advisory verdict (never gates) |
 | 017 | swap-on-demand | Operator-confirmed preemptive GPU swap for serving (`preempt=true`; training never preempted; default = 008 refuse-if-held) |
-| 018 | platform-rearchitecture | GPU host agent (in-process admission, T364), one lifecycle + thin adapters, transactional swap, durable job journal, jobs fold-in (T362), shared `platformlib` contracts, closed declarative policy loop; constitution v1.4.1 |
+| 018 | platform-rearchitecture | GPU host agent (in-process admission, T364), one lifecycle + thin adapters, transactional swap, durable job journal, jobs fold-in (T362), shared `platformlib` contracts, closed declarative policy loop; constitution v1.5.0 |
 | 019 | review-remediation-018 | Ten verified fixes to the 018 fold-in: journal durability, admission self-recovery, swap target-probe, idempotent retrains, lifecycle race, single-flight swap, contract conformance, per-engine budgets, deterministic verdict selection |
 | 020 | stack-remediation | **Draft** — object-store exit (MinIO → Garage/SeaweedFS), "Bento-ectomy", agent HTTP-runtime measurement; no new capability |
