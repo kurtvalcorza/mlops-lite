@@ -69,8 +69,9 @@ class FakeS3:
     def get_object(self, Bucket, Key):
         if Key not in self.buckets.get(Bucket, {}):
             raise FakeClientError("NoSuchKey")
-        body, _ = self.buckets[Bucket][Key]
-        return {"Body": io.BytesIO(body)}
+        body, ct = self.buckets[Bucket][Key]
+        # ContentType rides on the GET (like real boto3) — the mirror reads it here, no HEAD.
+        return {"Body": io.BytesIO(body), "ContentLength": len(body), "ContentType": ct}
 
     def upload_fileobj(self, Fileobj, Bucket, Key, ExtraArgs=None):
         ct = (ExtraArgs or {}).get("ContentType", "application/octet-stream")

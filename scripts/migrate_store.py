@@ -18,6 +18,12 @@ Concurrent-write note (contract §concurrent-write): live writes during migratio
 repeat forward runs until the delta is small, then quiesce writers and run the FINAL pass,
 which must land `copied == 0` everywhere. Un-quiesced runs never gate anything.
 
+Deletion note (@claude PR#54): this is an additive-only mirror — it never deletes at dest. A
+key deleted from SOURCE after it was copied leaves a stale dest copy, and parity then reports
+false (dest > source) on every re-run — deliberately non-converging, so a delete racing the
+migration can't be papered over. The operator resolves it explicitly (delete the stale dest
+key, or accept it pre-quiesce and let the final quiesced pass gate) — relevant to T405/T406.
+
 Usage:
   python scripts/migrate_store.py \
     --source-endpoint URL --source-key K --source-secret S \
@@ -85,13 +91,12 @@ def mirror_bucket(source, dest, bucket: str) -> dict:
         if dest_inv.get(key) == src_inv[key]:
             skipped += 1
             continue
-        head = source.head_object(Bucket=bucket, Key=key)
-        extra = {}
-        if head.get("ContentType"):
-            extra["ContentType"] = head["ContentType"]
-        body = source.get_object(Bucket=bucket, Key=key)["Body"]
+        # ContentType rides on the GET itself (@claude PR#54): no separate HEAD round trip per
+        # copied object, and no HEAD→GET TOCTOU window.
+        obj = source.get_object(Bucket=bucket, Key=key)
+        extra = {"ContentType": obj["ContentType"]} if obj.get("ContentType") else None
         # upload_fileobj streams (multipart past its threshold) — no full-object buffering.
-        dest.upload_fileobj(body, bucket, key, ExtraArgs=extra or None)
+        dest.upload_fileobj(obj["Body"], bucket, key, ExtraArgs=extra)
         copied += 1
     # Parity is counted AFTER the copy pass, on both sides (data-model.md note) — a live writer
     # racing this run shows up as a source/dest delta here, never as silent agreement.
