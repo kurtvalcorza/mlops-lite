@@ -27,8 +27,9 @@ class BentoCpuAdapter:
     run_script = None   # e.g. "embed_run.sh"
     _pip = ""           # extra deps named in the `unavailable` hint
 
-    def __init__(self, lease=None):
-        # `lease` is accepted for a uniform factory signature but unused — CPU engines are off-lease.
+    def __init__(self, admission=None):
+        # `admission` is accepted for a uniform factory signature but unused — CPU engines are
+        # off-lease (they hold no VRAM, so their /health carries no holder field).
         self.venv = os.path.expanduser(os.getenv("VENV", "~/mlops-train"))
         self.bentoml_bin = os.path.join(self.venv, "bin", "bentoml")
         self.run_sh = os.path.join(_REPO, "serving", "bento", self.run_script)

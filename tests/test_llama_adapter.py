@@ -135,14 +135,14 @@ def test_stream_emits_byte_compatible_frames(tmp_path, monkeypatch):
 def test_health_shape_byte_compatible(tmp_path, monkeypatch):
     a = _adapter(tmp_path, monkeypatch)
 
-    class FakeLease:
-        def current_holder(self):
-            return {"tenant": "vision"}   # a DIFFERENT tenant holds the global lockfile
+    class FakeAdmission:
+        def holder(self):
+            return {"tenant": "vision"}   # a DIFFERENT tenant holds the single GPU slot
 
-        def free_vram_gb(self):
+        def free_gb(self):
             return 7.2
 
-    a._lease = FakeLease()
+    a._admission = FakeAdmission()   # T364: health reads admission (was the lockfile lease)
     h = a.health(resident=True)
     assert h["ok"] is True and h["resident"] is True and h["model"] == a.alias
     assert h["lease_holder"] == "vision" and h["vram_free_gb"] == 7.2 and h["fits"] is True
@@ -150,8 +150,8 @@ def test_health_shape_byte_compatible(tmp_path, monkeypatch):
                       "vram_free_gb", "lease_holder"}
 
 
-def test_health_without_lease_reports_no_holder(tmp_path, monkeypatch):
-    a = _adapter(tmp_path, monkeypatch)  # lease=None
+def test_health_without_admission_reports_no_holder(tmp_path, monkeypatch):
+    a = _adapter(tmp_path, monkeypatch)  # admission=None
     h = a.health(resident=False)
     assert h["lease_holder"] is None and h["vram_free_gb"] is None and h["resident"] is False
 

@@ -120,14 +120,14 @@ def test_ready_true_on_any_http_response(tmp_path, monkeypatch):
 def test_health_shape_byte_compatible(tmp_path, monkeypatch):
     a = _adapter(tmp_path, monkeypatch)
 
-    class FakeLease:
-        def current_holder(self):
+    class FakeAdmission:
+        def holder(self):
             return {"tenant": "llm"}
 
-        def free_vram_gb(self):
+        def free_gb(self):
             return 6.0
 
-    a._lease = FakeLease()
+    a._admission = FakeAdmission()   # T364: health reads admission (was the lockfile lease)
     h = a.health(resident=True)
     assert h["ok"] is True and h["model"] == a.alias and h["lease_holder"] == "llm"
     assert set(h) >= {"ok", "resident", "model", "vram_budget_gb", "est_vram_gb", "fits",

@@ -8,7 +8,7 @@ Runs in WSL (it manages native processes). Stdlib-only. SKIPs cleanly if the dae
 healthy (prerequisites — venv / llama build / model — not present), so it never blocks a bare repo.
 
   python3 tests/test_supervisor.py
-  SUPERVISE_DAEMONS=training python3 tests/test_supervisor.py   # faster single-daemon check
+  SUPERVISE_DAEMONS=agent python3 tests/test_supervisor.py   # faster single-daemon check
 """
 import json
 import os
@@ -20,7 +20,7 @@ import urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATUS_URL = f"http://localhost:{os.getenv('SUPERVISE_STATUS_PORT', '8099')}/status"
-DAEMONS = [d.strip() for d in os.getenv("SUPERVISE_DAEMONS", "agent,training,vision").split(",")
+DAEMONS = [d.strip() for d in os.getenv("SUPERVISE_DAEMONS", "agent,ui").split(",")
            if d.strip()]
 VICTIM = os.getenv("SUP_VICTIM", DAEMONS[0])
 HEALTHY_TIMEOUT = int(os.getenv("SUP_HEALTHY_TIMEOUT", "180"))

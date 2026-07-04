@@ -15,10 +15,10 @@ Contract (kept dead simple so the daemon parses it robustly even if the process 
           (hard crash / OOM-kill / CUDA abort), the daemon treats the absent file as a failed run and
           surfaces the captured stderr tail — no partial version is registered (FR-032/FR-097).
 
-All flow logs go to stdout/stderr (the daemon redirects them to a per-run log file); the machine-
-readable result travels only through <result_json_path>, so logs never corrupt it. This process does
-**not** touch `gpu_lease` — the daemon holds the lease and records THIS pid as the lease's vram owner,
-so the lease liveness tracks the real GPU holder (this process) and frees on its death.
+All flow logs go to stdout/stderr (the agent redirects them to a per-run log file); the machine-
+readable result travels only through <result_json_path>, so logs never corrupt it. This process
+touches no GPU admission itself — the agent holds the single job slot (`kind="job"`) for the whole
+run and this process is its child, so the one-GPU-tenant invariant covers it (T364).
 """
 import json
 import os

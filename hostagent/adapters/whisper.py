@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from hostagent.adapters._common import free_port, gpu_lease_health
+from hostagent.adapters._common import engine_health, free_port
 
 DEFAULT_MODEL = "~/models/whisper/ggml-base.en.bin"
 DEFAULT_ALIAS = "whisper-base.en"
@@ -37,7 +37,7 @@ class WhisperAdapter:
     verbs = ("transcribe",)   # POST /engines/asr/transcribe
     stream_verbs = ()         # no streaming
 
-    def __init__(self, lease=None):
+    def __init__(self, admission=None):
         self.whisper_bin = os.path.expanduser(
             os.getenv("WHISPER_BIN", "~/whisper.cpp/build/bin/whisper-server"))
         self.model = os.path.expanduser(os.getenv("WHISPER_MODEL", DEFAULT_MODEL))
@@ -46,7 +46,7 @@ class WhisperAdapter:
         # accepts audio/*, so default it on. An operator whose build/ffmpeg lacks it can disable.
         self.convert = os.getenv("WHISPER_CONVERT", "1") not in ("", "0", "false", "False")
         self.vram_budget_gb = float(os.getenv("VRAM_GB", "12"))
-        self._lease = lease
+        self._admission = admission
         self._port = None
 
     # -- lifecycle interface --------------------------------------------------------------------
@@ -120,8 +120,8 @@ class WhisperAdapter:
     def health(self, resident: bool) -> dict:
         ok, reason = self.available()
         est = self.estimate_vram() if os.path.isfile(self.model) else None
-        return gpu_lease_health(self._lease, ok=ok, reason=reason, resident=resident,
-                                model=self.alias, vram_budget_gb=self.vram_budget_gb, est_vram=est)
+        return engine_health(self._admission, ok=ok, reason=reason, resident=resident,
+                             model=self.alias, vram_budget_gb=self.vram_budget_gb, est_vram=est)
 
     def _url(self, path: str) -> str:
         return f"http://127.0.0.1:{self._port}{path}"

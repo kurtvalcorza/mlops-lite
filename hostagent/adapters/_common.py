@@ -73,19 +73,19 @@ def http_200(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def gpu_lease_health(lease, *, ok, reason, resident, model, vram_budget_gb, est_vram) -> dict:
-    """The byte-compatible GPU-lease-tenant /health payload the retired llama + whisper supervisors
-    both returned (gateway `serving.gpu_state` / the transcribe health probe read
-    `ok`/`resident`/`model`/`lease_holder`). During the strangler migration `lease` (the legacy
-    lockfile module) supplies the GLOBAL holder + free VRAM — the vision/other legacy daemons still
-    share that lockfile, so the agent's in-process admission holder is not the whole truth; `lease`
-    is None once the lockfile retires (T364) and the source flips to admission.
+def engine_health(admission, *, ok, reason, resident, model, vram_budget_gb, est_vram) -> dict:
+    """The byte-compatible GPU-tenant /health payload the retired llama + whisper supervisors both
+    returned (gateway `serving.gpu_state` / the transcribe health probe read
+    `ok`/`resident`/`model`/`lease_holder`). `admission` (the single in-process GPU authority)
+    supplies the GLOBAL holder + free VRAM — the `lease_holder` field keeps its legacy wire name for
+    byte-compat but now reports `admission.holder()` (T364 retired the cross-process lockfile that
+    used to be the shared source; with one owner, admission IS the whole truth).
 
     `ok` is the caller's `available()` result (Codex round 7, 018): an engine whose binary/model is
     missing must report NOT ok so the gateway readiness aggregator + swap target-probe don't treat an
     unavailable engine as usable. A cold/idle-but-available engine stays `ok`."""
-    holder = lease.current_holder() if lease else None
-    free = lease.free_vram_gb() if lease else None
+    holder = admission.holder() if admission else None
+    free = admission.free_gb() if admission else None
     payload = {
         "ok": ok,
         "resident": resident,

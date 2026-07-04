@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """GPU host agent HTTP surface (018 US2, T352 — contracts/agent-api.md).
 
-The single stable endpoint (`platformlib.topology.AGENT_PORT`, :8100 during migration). The
-skeleton serves the read surface (health/metrics/engines — open, like today's probes) and the
-control surface (`POST /control/unload`, opt-in `X-Agent-Control` secret, research R6). Engine
-inference passthrough arrives with each fold-in (T358+); the jobs surface arrives at T362.
+The single stable endpoint (`platformlib.topology.AGENT_PORT`, :8100). The agent serves the read
+surface (health/metrics/engines — open, like the retired per-daemon probes), the control surface
+(`POST /control/unload`, opt-in `X-Agent-Control` secret, research R6), engine inference
+passthrough (`/engines/<id>/<verb>`, + the byte-compatible legacy paths, FR-177), and the jobs
+surface (`/jobs` + the legacy trainer aliases). T364 retired the last legacy daemon and the
+lockfile interop shim: admission is the single in-process authority for the one GPU tenant.
 
-Stdlib-only. The engine table starts EMPTY in the skeleton — adapters register per fold-in
-phase; until then the legacy daemons keep serving and the agent coexists via the lockfile
-interop shim (FR-166).
+Stdlib-only (the agent carries no pip deps).
 """
 import json
 import os
@@ -35,32 +35,23 @@ VRAM_GB = float(os.getenv("VRAM_GB", "12"))
 # injected WSL IP — a loopback-only bind would make AGENT_URL unreachable from the containers the
 # moment a fold-in flips traffic here. Default matches the legacy daemons; override to tighten.
 AGENT_BIND = os.getenv("AGENT_BIND", "0.0.0.0")
+# `SWAP_CONTROL_SECRET` is still accepted as a fallback (a deployment that set it pre-018 keeps
+# working) but the agent's state-changing routes standardize on the agent-control secret.
 CONTROL_SECRET = os.getenv("AGENT_CONTROL_SECRET") or os.getenv("SWAP_CONTROL_SECRET", "")
-# The gateway swap (017) still fronts preemption during migration and calls the holder's
-# `unload-now` with X-Swap-Control — so the byte-compatible per-engine `/engines/<id>/unload-now`
-# route below honors SWAP_CONTROL_SECRET specifically (not the agent-control secret). Retires when
-# the gateway swap thins to the agent's `/control/unload` at T363.
-SWAP_CONTROL_SECRET = os.getenv("SWAP_CONTROL_SECRET", "")
 JOURNAL_PATH = os.path.join(STATE_DIR, "journal.jsonl")
 
 _started_at = time.time()
 _interrupted_at_start = 0
 
 
-def build_agent(lease=None):
-    """Wire the agent's components. `lease` = the legacy lockfile module for migration interop
-    (None once the lockfile retires at T364)."""
-    if lease is None:
-        sys.path.insert(0, os.path.join(_REPO, "serving"))
-        import gpu_lease  # noqa: E402 — the interop shim's target (FR-166)
-
-        gpu_lease.verify_shared_state_dir("hostagent")  # 018/FR-166: fail loud on divergence
-        lease = gpu_lease
-    admission = adm.Admission(vram_budget_gb=VRAM_GB, lease=lease)
+def build_agent():
+    """Wire the agent's components. Admission is the single in-process GPU authority (T364 retired
+    the cross-process lockfile shim)."""
+    admission = adm.Admission(vram_budget_gb=VRAM_GB)
     journal = Journal(JOURNAL_PATH)
     from hostagent import adapters  # one runtime per registered engine adapter (T358+)
 
-    manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission, lease))
+    manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission))
     jobs = jobs_mod.JobManager(admission, journal)  # 018 T362: the trainer folded in
     return admission, journal, manager, jobs
 
@@ -339,9 +330,9 @@ def make_handler(admission, journal, manager, jobs):
                     return self._send(400, {"error": "invalid JSON"})
                 code, payload = jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
                 return self._send(code, payload)
-            # Inference passthrough: /engines/<id>/<verb> (+ /stream, + `?preempt=true`), and the
-            # byte-compatible /engines/<id>/unload-now (its gateway-swap caller was removed at T363;
-            # kept as an operator-invocable control relic alongside /control/unload — retires T364).
+            # Inference passthrough: /engines/<id>/<verb> (+ /stream, + `?preempt=true`). The
+            # byte-compatible /engines/<id>/unload-now relic retired at T364 (its only caller, the
+            # gateway swap, was removed at T363); operators use /control/unload.
             segs = path.strip("/").split("/")
             if len(segs) >= 3 and segs[0] == "engines":
                 eid, verb = segs[1], segs[2]
@@ -363,23 +354,6 @@ def make_handler(admission, journal, manager, jobs):
                 stream = len(segs) == 4 and segs[3] == "stream"
                 if not (len(segs) == 3 or stream):
                     return self._send(404, {"error": "unknown path"})
-                if verb == "unload-now" and len(segs) == 3:
-                    if SWAP_CONTROL_SECRET and \
-                            self.headers.get("X-Swap-Control", "") != SWAP_CONTROL_SECRET:
-                        return self._send(401, {"error": "unauthorized unload-now "
-                                                         "(bad or missing X-Swap-Control)"})
-                    body = self._read_body()
-                    if body is None:
-                        return self._send(400, {"error": "invalid JSON"})
-                    result = rt.unload(drain_timeout_s=float(body.get("drain_timeout_s", 10)))
-                    # Byte-compat with the retired supervisor's /unload-now (Codex round 7, 018): it
-                    # returned exactly {"status": "idle"} for the not-resident/stale-snapshot no-op,
-                    # without the shared lifecycle's extra `drained` key. Gateway swap reads only
-                    # `status`, but this route is the advertised byte-compatible endpoint.
-                    if result.get("status") == "idle":
-                        result = {"status": "idle"}
-                    code = 200 if result.get("status") in ("unloaded", "idle") else 409
-                    return self._send(code, result)
                 # Binary/multipart engines (vision classify) send multipart, not JSON — relay the
                 # raw body + Content-Type through to the child unchanged (byte-compat, FR-177).
                 ctype = self.headers.get("Content-Type", "")

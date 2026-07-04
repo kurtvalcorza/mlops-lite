@@ -27,7 +27,7 @@ FT_REQ = {"dataset_name": "d", "dataset_version": "1", "output_name": "o"}
 
 def _admission(free_gb=20.0):
     return adm.Admission(vram_budget_gb=12.0,
-                         gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: free_gb), lease=None)
+                         gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: free_gb))
 
 
 def _journal(tmp_path):

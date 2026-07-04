@@ -21,22 +21,15 @@ if (-not (Test-Path "$repo/.env")) {
     exit 1
 }
 
-# 1. Resolve the (dynamic) WSL IP and wire the gateway -> daemon URLs.
+# 1. Resolve the (dynamic) WSL IP and wire the gateway -> the single host agent.
 $ip = (wsl.exe -d $Distro hostname -I).Trim().Split(' ')[0]
 if (-not $ip) { Write-Error "Could not resolve $Distro IP"; exit 1 }
-$env:AGENT_URL   = "http://${ip}:${AgentPort}"
-# 018 T358-T362: ALL five inference engines (llm/asr/vision/embed/tabular) AND the jobs surface
-# (fine-tune/HPO/batch/shadow-replay) are served by the host agent. Each engine URL points at the
-# agent's /engines/<id> sub-path; TRAINER_URL points at the agent ROOT — the agent serves the legacy
-# /train|/study|/batch|/shadow-replay aliases + a superset /health byte-compatibly (FR-177). The
-# trainer daemon is retired. At T364 these all collapse to the single AGENT_URL.
-$env:SERVING_URL = "http://${ip}:${AgentPort}/engines/llm"
-$env:ASR_URL     = "http://${ip}:${AgentPort}/engines/asr"
-$env:BENTO_URL   = "http://${ip}:${AgentPort}/engines/vision"
-$env:EMBED_URL   = "http://${ip}:${AgentPort}/engines/embed"
-$env:TABULAR_URL = "http://${ip}:${AgentPort}/engines/tabular"
-$env:TRAINER_URL = "http://${ip}:${AgentPort}"
-Write-Host "engines + jobs @ agent=$env:AGENT_URL (trainer folded in)" -ForegroundColor Cyan
+# 018 T364: ALL five inference engines (llm/asr/vision/embed/tabular) AND the jobs surface
+# (fine-tune/HPO/batch/shadow-replay) are served by the ONE host agent, so a single AGENT_URL is all
+# the gateway needs — it derives each `${AGENT_URL}/engines/<id>` base + the legacy byte-compatible
+# paths itself (gateway/app/settings.py). The six per-engine *_URL vars retired with the lockfile.
+$env:AGENT_URL = "http://${ip}:${AgentPort}"
+Write-Host "engines + jobs @ agent=$env:AGENT_URL (single endpoint)" -ForegroundColor Cyan
 
 # 2. Bring up the Compose infra (gateway inherits the daemon URLs above).
 Write-Host "`n[1/3] docker compose up ..." -ForegroundColor Green

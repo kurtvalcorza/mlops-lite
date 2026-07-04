@@ -6,7 +6,7 @@ every engine a supervised child process behind one tenant lifecycle with per-eng
 (`journal.py`), and a directly-scraped metrics endpoint (`metrics.py` + `main.py`).
 
 Stdlib-only, like the supervisors it replaces (Principle III; the optional `pynvml` accelerates
-GPU reads when present — research R1). During the strangler migration the agent participates in
-the legacy lockfile protocol (`serving/gpu_lease.py`) so the one-tenant invariant holds across
-the boundary; the interop shim and the lockfile are deleted together at T364.
+GPU reads when present — research R1). The strangler migration is complete (T364): the legacy
+daemons and the cross-process lockfile are gone, so the agent's in-process admission is the sole
+authority for the one-tenant invariant.
 """

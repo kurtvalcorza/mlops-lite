@@ -17,7 +17,7 @@ import json
 import os
 import urllib.request
 
-from hostagent.adapters._common import bento_spawn, gpu_lease_health, http_200
+from hostagent.adapters._common import bento_spawn, engine_health, http_200
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,14 +29,14 @@ class VisionAdapter:
     verbs = ("classify",)
     stream_verbs = ()
 
-    def __init__(self, lease=None):
+    def __init__(self, admission=None):
         self.venv = os.path.expanduser(os.getenv("VENV", "~/mlops-train"))
         self.bentoml_bin = os.path.join(self.venv, "bin", "bentoml")
         self.run_sh = os.path.join(_REPO, "serving", "bento", "run.sh")
         self.model_name = os.getenv("VISION_MODEL", "vision-mobilenet")
         self.est_gb = float(os.getenv("VISION_EST_GB", "1.0"))
         self.vram_budget_gb = float(os.getenv("VRAM_GB", "12"))
-        self._lease = lease
+        self._admission = admission
         self._port = None
 
     # -- lifecycle interface --------------------------------------------------------------------
@@ -73,9 +73,9 @@ class VisionAdapter:
 
     def health(self, resident: bool) -> dict:
         ok, reason = self.available()
-        return gpu_lease_health(self._lease, ok=ok, reason=reason, resident=resident,
-                                model=self.model_name, vram_budget_gb=self.vram_budget_gb,
-                                est_vram=self.est_gb if ok else None)
+        return engine_health(self._admission, ok=ok, reason=reason, resident=resident,
+                             model=self.model_name, vram_budget_gb=self.vram_budget_gb,
+                             est_vram=self.est_gb if ok else None)
 
     def _url(self, path: str) -> str:
         return f"http://127.0.0.1:{self._port}{path}"

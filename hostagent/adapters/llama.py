@@ -10,11 +10,9 @@ the retired supervisor's, so the gateway's serving router + `/infer/stream` prox
 only. The SSE `done` frame in particular must keep the exact `"event": "done"` marker the gateway's
 stream proxy scans for.
 
-Migration note (T358→T364): `lease` is the legacy lockfile module, read ONLY to build the
-byte-compatible `/engines/llm/health` GLOBAL holder + free-VRAM fields. During the strangler
-migration the vision/asr/training legacy daemons still hold the same lockfile, so the agent's
-in-process admission holder is not the whole truth — the lockfile is. At lockfile retirement (T364)
-the health source flips to `admission.holder()` and the `lease` argument goes away.
+Health source (T364): `admission` is the single in-process GPU authority, read ONLY to build the
+byte-compatible `/engines/llm/health` GLOBAL holder + free-VRAM fields (the retired lockfile used
+to be the shared cross-process source; with one owner, admission is the whole truth).
 """
 import json
 import os
@@ -22,7 +20,7 @@ import subprocess
 import time
 import urllib.request
 
-from hostagent.adapters._common import free_port, gpu_lease_health
+from hostagent.adapters._common import engine_health, free_port
 
 DEFAULT_MODEL = "~/models/gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
 DEFAULT_ALIAS = "qwen2.5-7b-instruct-q4_k_m"
@@ -39,7 +37,7 @@ class LlamaAdapter:
     verbs = ("infer",)         # POST /engines/llm/infer
     stream_verbs = ("infer",)  # POST /engines/llm/infer/stream (SSE)
 
-    def __init__(self, lease=None):
+    def __init__(self, admission=None):
         self.llama_bin = os.path.expanduser(
             os.getenv("LLAMA_BIN", "~/llama.cpp/build/bin/llama-server"))
         self.model = os.path.expanduser(os.getenv("MODEL", DEFAULT_MODEL))
@@ -47,7 +45,7 @@ class LlamaAdapter:
         self.ngl = os.getenv("NGL", "999")
         self.ctx = os.getenv("CTX", "4096")
         self.vram_budget_gb = float(os.getenv("VRAM_GB", "12"))
-        self._lease = lease
+        self._admission = admission
         self._port = None  # set on spawn(); the child's dynamic port
 
     # -- lifecycle interface (data-model.md §EngineAdapter) --------------------------------------
@@ -142,13 +140,13 @@ class LlamaAdapter:
                            "model": self.alias})
 
     def health(self, resident: bool) -> dict:
-        """Byte-compatible with the retired supervisor's `/health` — the shared GPU-lease payload
-        (see `_common.gpu_lease_health`); gateway `serving.gpu_state` reads
+        """Byte-compatible with the retired supervisor's `/health` — the shared GPU-tenant payload
+        (see `_common.engine_health`); gateway `serving.gpu_state` reads
         `ok`/`resident`/`model`/`lease_holder`."""
         ok, reason = self.available()
         est = self.estimate_vram() if os.path.isfile(self.model) else None
-        return gpu_lease_health(self._lease, ok=ok, reason=reason, resident=resident,
-                                model=self.alias, vram_budget_gb=self.vram_budget_gb, est_vram=est)
+        return engine_health(self._admission, ok=ok, reason=reason, resident=resident,
+                             model=self.alias, vram_budget_gb=self.vram_budget_gb, est_vram=est)
 
     # -- helpers ---------------------------------------------------------------------------------
     def _chat_payload(self, body: dict, *, stream: bool):

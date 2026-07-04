@@ -61,7 +61,7 @@ class FakeGpuEngine:
 
 def _serve():
     admission = adm.Admission(vram_budget_gb=12.0,
-                              gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 10.0), lease=None)
+                              gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 10.0))
     journal = Journal(os.path.join(tempfile.mkdtemp(prefix="swap-"), "journal.jsonl"))
     # idle_timeout inf + no reaper thread started (make_handler doesn't) → engines stay resident.
     rts = {eid: lifecycle.EngineRuntime(FakeGpuEngine(eid), admission, idle_timeout_s=float("inf"))
