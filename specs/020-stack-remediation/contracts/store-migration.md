@@ -73,9 +73,12 @@ re-validated, never re-minted).
 - **source defaults**: the hardcoded `minio`/`:9000` endpoint fallbacks are repointed to Garage
   (`garage:3900`) or dropped so a missing env fails loud — `platformlib/store.py`,
   `platformlib/s3io.py` (fallback default), `hostagent/run.sh`, `training/flows/finetune.py`,
-  `training/flows/_common.py`, the seed scripts, and any surviving `serving/` default
-  (the `serving/bento/*` copies leave with US2). The `serving/children/*` run scripts land on the
-  Garage host port, not `9000`.
+  `training/flows/_common.py`, the seed scripts (`scripts/seed_vision_model.py`,
+  `scripts/seed_tabular_model.py`), the bootstrap/reseed scripts (`scripts/bootstrap.sh:112`,
+  `scripts/reseed_registry.sh:29`), the `"minio live"` health-check string in
+  `tests/test_foundation.py`, and any surviving `serving/` default (the `serving/bento/*` copies
+  leave with US2). The `serving/children/*` run scripts land on the Garage host port, not `9000`.
+  This list is illustrative — the source-tree grep below is the authoritative gate.
 - final state: **both** `docker compose config` **and** a source-tree `grep -rin 'minio\|:9000'`
   (excluding `specs/`, `docs/` history, and CHANGELOG-style records) contain zero live references
   to the retired store — SC-129's "zero references" is enforced across code, not just compose

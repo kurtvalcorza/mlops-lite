@@ -62,7 +62,9 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
   gen_secrets + .env.example wiring, README/runbook refs, CVE-digest note retired, **and the
   hardcoded `minio`/`:9000` source-default endpoints repointed to Garage or dropped —
   `platformlib/store.py`, `platformlib/s3io.py`, `hostagent/run.sh`, `training/flows/*`, seed
-  scripts**); **both** `docker compose config` **and** a source-tree `grep -rin 'minio\|:9000'`
+  scripts, `scripts/bootstrap.sh`, `scripts/reseed_registry.sh`, and the `"minio live"`
+  health-check string in `tests/test_foundation.py`**); **both** `docker compose config` **and** a
+  source-tree `grep -rin 'minio\|:9000'`
   (excluding `specs/`/`docs/` history) have zero live references to the retired store (SC-129);
   stack restarts clean on Garage alone.
 
