@@ -35,7 +35,7 @@ def _req(method, path, body=None, timeout=60):
 def main() -> int:
     _, h = _req("GET", "/predict/health")
     if not h.get("reachable"):
-        print("[SKIP] tabular service not running (bash serving/bento/tabular_run.sh)")
+        print("[SKIP] tabular service not running (serving/children/tabular_run.sh)")
         return 0
     print(f"[OK] tabular service reachable ({h.get('backend')})")
 

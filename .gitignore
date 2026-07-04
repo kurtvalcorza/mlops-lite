@@ -9,3 +9,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv/
+
+# 020 US2 (R6): golden request/response sets are per-machine session artifacts, never fixtures.
+tests/goldens/

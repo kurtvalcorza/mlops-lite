@@ -3,7 +3,8 @@
 Classifies an image through the gateway → BentoML service (model packaged from the MinIO models
 bucket). Asserts a well-formed top-5 result. SKIPs cleanly if the bento isn't running.
 
-Requires: stack up + `bash serving/bento/run.sh` (after seeding via scripts/seed_vision_model.py).
+Requires: stack up + the agent's vision child (serving/children/run.sh — spawned on demand;
+seed first via scripts/seed_vision_model.py).
 Exits non-zero on failure.
 """
 import json

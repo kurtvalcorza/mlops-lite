@@ -1,0 +1,60 @@
+{
+  "direction": "forward",
+  "started_at": 1783206912.9433656,
+  "finished_at": 1783206913.0714803,
+  "buckets": [
+    {
+      "name": "datasets",
+      "source": {
+        "objects": 30,
+        "bytes": 59724
+      },
+      "dest": {
+        "objects": 30,
+        "bytes": 59724
+      },
+      "copied": 0,
+      "skipped": 30
+    },
+    {
+      "name": "models",
+      "source": {
+        "objects": 31,
+        "bytes": 2125520536
+      },
+      "dest": {
+        "objects": 31,
+        "bytes": 2125520536
+      },
+      "copied": 0,
+      "skipped": 31
+    },
+    {
+      "name": "results",
+      "source": {
+        "objects": 383,
+        "bytes": 3029884
+      },
+      "dest": {
+        "objects": 383,
+        "bytes": 3029884
+      },
+      "copied": 0,
+      "skipped": 383
+    },
+    {
+      "name": "mlflow",
+      "source": {
+        "objects": 96,
+        "bytes": 367324478
+      },
+      "dest": {
+        "objects": 96,
+        "bytes": 367324478
+      },
+      "copied": 0,
+      "skipped": 96
+    }
+  ],
+  "parity": true
+}

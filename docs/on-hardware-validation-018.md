@@ -215,3 +215,81 @@ no in-process lock.
 > host-published port), so `store.dsn()` targets the reachable Postgres. Post-fix: agent healthy 5/5
 > polls, single process, hydrate + `mark_interrupted` working (above). The compose comment was
 > corrected to point at `run.sh`.
+
+## 020 T404 — Garage candidate spike (FR-202 gate; SC-130)
+
+**PASS — Garage clears every checklist item; no SeaweedFS fallback needed.** Pinned
+`dxflrs/garage` v2.3.0 (digest in compose), single node, `replication_factor=1`, bootstrap via
+the token-authed Admin API (`infra/garage/init.py` — the image is scratch-based, no shell for
+CLI scripting; research R2 adjusted).
+
+Direct S3-surface legs (boto3 against `:3900`, recorded by `t404_spike.py`):
+
+| Leg | Result |
+|---|---|
+| 300 MB multipart round-trip (upload_fileobj/download_fileobj) | PASS — 1.0 s up / 0.5 s down, bytes identical |
+| Pagination past 1,000 keys (1,100 seeded, truncation protocol) | PASS — 1,100 listed, ordered |
+| Prefix listing + CommonPrefixes | PASS |
+| 404 discrimination (`head_object`/`get_object` on missing keys) | PASS — clean 404/NoSuchKey codes |
+| Duplicate-PUT (last-write-wins, no error) | PASS |
+| Delete idempotency (delete of a missing key) | PASS |
+
+Env-seam flip rehearsal (empty candidate, per quickstart §US1.1): gateway + MLflow flipped by a
+temporary compose override — **`S3_ENDPOINT_URL` asserted unset, gateway's *resolved*
+`client.meta.endpoint_url` moved to `http://garage:3900`** — then dataset register landed on
+Garage only, MLflow artifact round-trip via the serve-artifacts proxy passed, a live `/infer`
+logged its prediction payload to Garage, and the **full offline suite passed under the flipped
+env (454 passed)**. Flipped back; every rehearsal artifact wiped (buckets to 0, PG row, MLflow
+experiment).
+
+**Idle RSS (SC-130, `docker stats --no-stream` at rest): Garage 6.8 MiB vs MinIO 161.5 MiB —
+~24× smaller.** Gate: ≤ incumbent — PASS by a wide margin.
+
+## 020 T405 — migrate → cutover → rollback proof → soak (FR-199/200; SC-127/128)
+
+**PASS.** Reports: [forward](migration-report-020-forward.json) ·
+[idempotent re-run](migration-report-020-forward-idempotent.json) ·
+[reverse (rollback re-mirror)](migration-report-020-reverse-rollback.json).
+
+- **Forward migration**: 540 objects / ~2.5 GB across `datasets/models/results/mlflow` —
+  `parity: true` on every bucket. **Re-run: `copied: 0` everywhere (SC-127).**
+- **Cutover** (contract §cutover, both rough edges asserted): `S3_ENDPOINT_URL` unset; container
+  resolved endpoint `http://garage:3900`; host consumer resolved endpoint
+  `http://localhost:3900` (the `.env` cutover block overrides the baked `:9000` defaults);
+  agent restarted to inherit the flip.
+- **Golden flows on the cutover**: dataset list/read (migrated data), vision classify (slim
+  child loading MobileNet **from Garage**, CUDA), `/infer` + **live preempt swap**
+  (vision→llm, 017 semantics), PSI drift check over migrated datasets (report written), quality
+  check (report written), and a **full 1-epoch vision fine-tune through the jobs path** —
+  dataset read + MLflow artifact write + registration (v4) all on Garage. Throwaway v4 cleaned
+  from the registry + both stores afterward.
+- **Full offline suite on the cutover: 491 passed / 19 skipped (SC-128).**
+- **Rollback proof**: reverse mirror carried the 7 post-cutover objects back (`parity: true`),
+  config flip alone returned service to MinIO (resolved endpoint verified; datasets + the
+  carried-back v4 artifact served), then flipped forward again. The rollback window works.
+
+## 020 T411 — per-child golden gates ×3 (FR-203)
+
+**PASS ×3 — byte-identical at the agent boundary.** The launch flip was already merged (PR #55),
+so git was the swap lever: pre-flip adapters restored (`70278a7`) → agent restarted on the OLD
+BentoML children → `capture_goldens.py` captured vision/embed/tabular (fixed-boundary multipart,
+canonical JSON verbs, health-probe ok) → master adapters restored → agent restarted on the slim
+FastAPI children → replay: **vision PASS, embed PASS, tabular PASS** (status + content type +
+body bytes). Vision ran on the GPU box with the model loading from Garage.
+
+## 020 T412 — Bento-ectomy retirement (FR-204; SC-131)
+
+**PASS.** `serving/bento/` deleted; model-runtime pins moved to
+`serving/children/requirements.txt`; `bootstrap.sh` + seed-script hints repointed. Venv:
+**216 → 195 packages** (bentoml + 20 exclusive transitive deps removed — computed by
+reverse-dependency closure, `t412_orphans.py` method); `pip list | grep -i bento` → empty;
+critical imports (pynvml/fastapi/uvicorn/sentence-transformers/lightgbm/joblib/multipart) OK.
+`pip check` reports only the two **pre-existing** items: the documented fsspec hold
+(`native_env.lock`) and openai-whisper's 010-era no-deps install. Goldens replayed
+byte-identical on FRESH child spawns post-uninstall; full suite 491 passed.
+
+> **Latent dependency found + fixed (SC-133-adjacent):** `nvidia-ml-py` — the dist that ships
+> `pynvml.py`, i.e. the agent's live-VRAM admission reader — was installed ONLY as a bentoml
+> transitive dep; no requirements file named it. A naive "remove bentoml + its exclusive deps"
+> would have silently degraded admission to the static-budget fallback. It is now pinned
+> first-party in `serving/children/requirements.txt`.

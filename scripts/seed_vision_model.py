@@ -67,7 +67,7 @@ def main() -> int:
     c.set_registered_model_alias(NAME, "serving", mv.version)
     print(f"registered {NAME} v{mv.version} -> {source}  (task=image-classification, "
           f"serving_engine=bentoml, promoted @serving)")
-    print("done. start the bento:  bash serving/bento/run.sh")
+    print("done. start the vision child:  bash serving/children/run.sh")
     return 0
 
 

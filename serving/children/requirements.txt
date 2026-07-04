@@ -1,15 +1,24 @@
-# 020 T402 — the single FastAPI+uvicorn pin shared by the US2 slim children
-# (vision/embed/tabular, serving/children/*_service.py) and US3's optional agent ASGI runtime
-# (AGENT_RUNTIME=uvicorn), per research R5/R7. Same versions the gateway container pins
+# 020 T402/T412 — the host-venv pins for the slim children (vision/embed/tabular,
+# serving/children/*_service.py) and US3's optional agent ASGI runtime (AGENT_RUNTIME=uvicorn),
+# per research R5/R7. FastAPI/uvicorn match the gateway container's pins
 # (gateway/requirements.txt) — one HTTP idiom, one version story.
 #
 # Install into the native WSL host venv:
 #   ~/mlops-train/bin/pip install -r serving/children/requirements.txt
-#
-# Model runtimes (torch/torchvision, sentence-transformers, lightgbm, pillow) keep their
-# existing pins in serving/bento/requirements.txt until T412 retires that file with the
-# framework — this file deliberately adds NOTHING beyond the shared HTTP pin.
 fastapi==0.138.1
 uvicorn[standard]==0.49.0
 # vision child only: FastAPI's UploadFile/File(...) multipart parsing (the /classify route).
 python-multipart==0.0.20
+
+# Model-runtime pins (T412 — moved here from the retired serving/bento/requirements.txt, minus
+# the framework). torchvision is NOT here: it must come from the same CUDA index as torch —
+# bootstrap.sh installs both from scripts/native_env.lock (torchvision==0.26.0+cu128).
+pillow==12.2.0
+sentence-transformers==3.3.1
+lightgbm==4.5.0
+joblib==1.4.2
+
+# The agent's NVML provider (live-VRAM admission reads `import pynvml`). Before T412 this rode
+# in SILENTLY as a bentoml transitive dep — the platform's GPU reads depended on a package no
+# requirements file named. Pinned first-party now (the nvidia-ml-py dist ships pynvml.py).
+nvidia-ml-py==13.610.43
