@@ -221,8 +221,8 @@ def _fold_journal(path) -> list:
                 jobs[job_id] = rec
             if entry.get("to"):
                 rec["state"] = entry["to"]
-            if entry.get("reason") is not None:
-                rec["reason"] = entry["reason"]
+            # every non-control key (incl. `reason` + the kind's result fields) folds in; control
+            # keys (record/from/to/ts/job_id) never shadow the record.
             for k, v in entry.items():
                 if k not in ("record", "from", "to", "ts", "job_id") and v is not None:
                     rec[k] = v
@@ -284,9 +284,9 @@ def main(argv=None) -> int:
     journal_path = args.journal or os.path.join(STATE_DIR, "journal.jsonl")
 
     conn = _store.connect(args.dsn)
-    _store.bootstrap(conn)
-    s3 = _store.s3_client()
     try:
+        _store.bootstrap(conn)
+        s3 = _store.s3_client()             # inside the try so a client-init failure can't leak conn
         report = backfill_all(s3, conn, journal_path=journal_path)
     finally:
         conn.close()

@@ -179,5 +179,20 @@ def test_backfill_migrates_every_table_and_is_idempotent(db, tmp_path):
             cur.execute("DELETE FROM jobs WHERE job_id = %s", (ids["job_id"],))
 
 
+def test_backfill_counts_errors_on_orphan_object(db):
+    """A malformed/orphan object increments `errors` (and drives main()'s non-zero exit) without
+    aborting the run: an orphan label — no matching prediction row — hits the FK and is counted, not
+    raised. Nothing is inserted, so there's no residue to clean."""
+    sfx = uuid.uuid4().hex[:10]
+    pid = f"bf-orphan-{sfx}"
+    s3 = FakeS3()
+    s3.put_object(Bucket=bf.RESULTS_BUCKET, Key=f"labels/{pid}.json",
+                  Body=json.dumps({"prediction_id": pid, "label": {"y": 1},
+                                   "ts": time.time()}).encode())
+    report = bf.backfill_all(s3, db, journal_path=None)
+    assert report["labels"] == {"scanned": 1, "inserted": 0, "skipped": 0, "errors": 1}
+    assert any(c["errors"] for c in report.values())        # ⇒ main() would exit non-zero
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
