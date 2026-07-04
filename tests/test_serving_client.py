@@ -51,8 +51,9 @@ class _Resp:
 
 
 class _Client:
-    def __init__(self, resp):
+    def __init__(self, resp, seen=None):
         self._resp = resp
+        self._seen = seen
 
     async def __aenter__(self):
         return self
@@ -61,12 +62,26 @@ class _Client:
         return False
 
     async def post(self, url, json=None):
+        if self._seen is not None:
+            self._seen["url"] = url
         return self._resp
 
 
-def _run_inference_with(mod, resp):
-    mod.httpx.AsyncClient = lambda **kw: _Client(resp)
-    return asyncio.run(mod.run_inference("hello"))
+def _run_inference_with(mod, resp, *, preempt=False, seen=None):
+    mod.httpx.AsyncClient = lambda **kw: _Client(resp, seen)
+    return asyncio.run(mod.run_inference("hello", preempt=preempt))
+
+
+def test_preempt_appends_query_to_agent_url():
+    # T363: the gateway thinned its swap to forwarding the flag — run_inference must append
+    # `?preempt=true` so the AGENT orchestrates the eviction; the default path stays a bare /infer.
+    mod = _load_serving()
+    seen = {}
+    _run_inference_with(mod, _Resp(200, {"text": "x"}), preempt=True, seen=seen)
+    assert seen["url"].endswith("/infer?preempt=true")
+    seen.clear()
+    _run_inference_with(mod, _Resp(200, {"text": "x"}), seen=seen)
+    assert seen["url"].endswith("/infer") and "preempt" not in seen["url"]
 
 
 def test_409_maps_to_serving_busy_error():

@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import background, quality, registry, swap
+from .. import background, quality, registry
 from ..settings import BENTO_URL
 
 router = APIRouter()
@@ -63,12 +63,14 @@ async def classify(req: ClassifyRequest):
         raw = base64.b64decode(req.image_b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="image_b64 is not valid base64")
-    if req.preempt:
-        await swap.preempt_or_409("vision")
+    # T363: forward `preempt` to the AGENT (`?preempt=true`), which orchestrates the swap under its
+    # single admission lock (a `kind="job"` holder refuses structurally → the agent 409s below). The
+    # gateway no longer brokers the eviction.
+    url = f"{BENTO_URL}/classify" + ("?preempt=true" if req.preempt else "")
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             r = await client.post(
-                f"{BENTO_URL}/classify",
+                url,
                 files={"image": ("image.png", raw, "image/png")},
             )
         except httpx.HTTPError as e:

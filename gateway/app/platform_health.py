@@ -9,6 +9,7 @@ import httpx
 
 from . import settings
 
+AGENT_URL = settings.AGENT_URL
 SERVING_URL = settings.SERVING_URL
 TRAINER_URL = settings.TRAINER_URL
 BENTO_URL = settings.BENTO_URL
@@ -16,38 +17,53 @@ EMBED_URL = settings.EMBED_URL
 TABULAR_URL = settings.TABULAR_URL
 ASR_URL = settings.ASR_URL
 
-# name -> health URL. Bento services expose /readyz; the supervised GPU daemons expose /health.
-# 009: each new modality is a per-modality reachability target (FR-085) — embeddings + tabular (CPU,
-# off-lease, Bento /readyz) and ASR (whisper.cpp GPU-lease supervisor, /health).
-_TARGETS = {
-    "serving": f"{SERVING_URL}/health",
-    "training": f"{TRAINER_URL}/health",
-    "vision": f"{BENTO_URL}/readyz",
-    "embed": f"{EMBED_URL}/readyz",
-    "tabular": f"{TABULAR_URL}/readyz",
-    "asr": f"{ASR_URL}/health",
+# T363: every engine + the jobs surface is now the ONE host agent, so instead of fanning out 6
+# serial probes (all pointed at the agent anyway) read the agent's single `/health` once and derive
+# each daemon's reachability from its `engines: {id: state}` map (+ the agent being up for jobs).
+# name -> (engine id in the agent's /health | None for the jobs surface, display url kept for
+# continuity — the byte-compatible per-engine health sub-path).
+_DAEMONS = {
+    "serving":  ("llm",     f"{SERVING_URL}/health"),
+    "training": (None,      f"{TRAINER_URL}/health"),
+    "vision":   ("vision",  f"{BENTO_URL}/readyz"),
+    "embed":    ("embed",   f"{EMBED_URL}/readyz"),
+    "tabular":  ("tabular", f"{TABULAR_URL}/readyz"),
+    "asr":      ("asr",     f"{ASR_URL}/health"),
 }
-# Optional daemons: probed + reported, but their absence does NOT fail `all_healthy` (Codex review).
-# ASR (whisper.cpp) needs a manual CUDA build and is opt-in in the supervisor's default set, so a host
-# that hasn't built it must still bring the platform up cleanly (up_all gates on all_healthy).
+# Optional daemons: reported, but their absence does NOT fail `all_healthy` (Codex review). ASR
+# (whisper.cpp) needs a manual CUDA build and is opt-in, so a host without it still comes up.
 _OPTIONAL = {"asr"}
+# Engine states that count as reachable/servable — mirrors the pre-T363 per-engine /health returning
+# 200 when available, 503 when unavailable/disabled/wedged. A cold/idle engine is healthy.
+_SERVABLE_STATES = {"cold", "loading", "ready"}
+
+
+async def _agent_health():
+    """One read of the agent's root /health; None if unreachable / non-200 / unparseable. Broadly
+    best-effort — a health aggregator must never itself 500 on a probe failure."""
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get(f"{AGENT_URL}/health")
+        return r.json() if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001 — probe, never propagate
+        return None
 
 
 async def aggregate() -> dict:
-    """Best-effort probe of each daemon; returns per-daemon reachability + an overall flag.
+    """Per-daemon reachability + an overall flag, derived from the agent's single `/health` (T363).
 
-    `all_healthy` reflects the REQUIRED daemons only — an opt-in daemon (ASR) that isn't built/running
+    `all_healthy` reflects the REQUIRED daemons only — an opt-in daemon (ASR) that isn't built
     is still reported under `daemons`, but does not hold back bring-up.
     """
+    agent = await _agent_health()
+    engines = (agent or {}).get("engines", {})
     daemons = {}
-    async with httpx.AsyncClient(timeout=3) as client:
-        for name, url in _TARGETS.items():
-            try:
-                r = await client.get(url)
-                daemons[name] = {"reachable": r.status_code == 200, "url": url,
-                                 "optional": name in _OPTIONAL}
-            except httpx.HTTPError:
-                daemons[name] = {"reachable": False, "url": url, "optional": name in _OPTIONAL}
+    for name, (eid, url) in _DAEMONS.items():
+        if eid is None:  # the jobs surface — reachable iff the agent responds
+            reachable = agent is not None
+        else:
+            reachable = agent is not None and engines.get(eid) in _SERVABLE_STATES
+        daemons[name] = {"reachable": reachable, "url": url, "optional": name in _OPTIONAL}
     return {
         "all_healthy": all(d["reachable"] for n, d in daemons.items() if n not in _OPTIONAL),
         "daemons": daemons,

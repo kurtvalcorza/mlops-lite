@@ -7,11 +7,10 @@ module-level alias so tests can still monkeypatch `module.TRAINER_URL`.
 
 Deliberate exceptions (NOT consolidated here — they must stay standalone-loadable, i.e. free of
 relative imports at module top level):
-  - `swap.py` — loaded in isolation by the offline swap tests (importlib, no package context).
-  - `quality.py` / `batch.py` / `shadow.py` — dual-runtime modules also loaded by the trainer.
+  - `quality.py` / `batch.py` / `shadow.py` — dual-runtime modules also loaded by the trainer flows.
   - `evaluation.py` — loaded standalone by training/scoring and the HPO objective.
-Those keep their env reads until their 018 fold-in phases retire the dual-runtime hacks
-(tasks T362/T374).
+Those keep their env reads until their 018 fold-in phases retire the dual-runtime hacks (task T374).
+(`swap.py` was deleted at T363 — the gateway no longer brokers preemption; the agent orchestrates.)
 """
 from platformlib import topology
 

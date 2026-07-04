@@ -16,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel
 
-from .. import background, quality, registry, swap
+from .. import background, quality, registry
 from ..settings import ASR_URL
 
 router = APIRouter()
@@ -51,8 +51,10 @@ async def transcribe(req: TranscribeRequest):
         base64.b64decode(req.audio_b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="audio_b64 is not valid base64")
-    if req.preempt:
-        await swap.preempt_or_409("asr")
+    # T363: forward `preempt` to the AGENT (`?preempt=true`), which orchestrates the swap under its
+    # single admission lock (a `kind="job"` holder refuses structurally → the agent 409s below). The
+    # gateway no longer brokers the eviction.
+    url = f"{ASR_URL}/transcribe" + ("?preempt=true" if req.preempt else "")
     # Resolve the serving ASR version at request ARRIVAL, not in the post-serve detached task (016): if an
     # operator promotes a different asr version before that task runs, the old transcription would be
     # logged under the NEW version and its labels joined into the wrong champion window during shadow
@@ -61,7 +63,7 @@ async def transcribe(req: TranscribeRequest):
     asr_name, asr_version = await run_in_threadpool(_resolve_asr_version)
     async with httpx.AsyncClient(timeout=300) as client:
         try:
-            r = await client.post(f"{ASR_URL}/transcribe", json={
+            r = await client.post(url, json={
                 "audio_b64": req.audio_b64, "filename": req.filename, "language": req.language})
         except httpx.HTTPError as e:
             ASR_REQUESTS.labels(status="unavailable").inc()
