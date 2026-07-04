@@ -134,6 +134,20 @@ def test_health_superset_carries_trainer_fields():
         server.shutdown()
 
 
+def test_post_jobs_store_blip_maps_to_502():
+    # @claude PR#46: JobManager.submit can raise StoreError now (the journal write is a Postgres
+    # upsert). do_POST must map it to a clean 502, not let it escape as a dropped connection.
+    server, base, jobs = _serve({"status": "completed"})
+    try:
+        jobs.journal._store.fail = True                    # the gateway DB goes unreachable
+        code, body = _req(base + "/jobs", method="POST", body={
+            "kind": "finetune", "modality": "llm",
+            "request": {"dataset_name": "d", "dataset_version": "1", "output_name": "o"}})
+        assert code == 502 and "error" in body
+    finally:
+        server.shutdown()
+
+
 def test_cancel_route_unknown_is_404():
     server, base, jobs = _serve({"status": "completed"})
     try:

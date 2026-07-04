@@ -209,6 +209,41 @@ def test_terminal_journal_write_precedes_slot_release(tmp_path):
     assert a.holder() is None and jm._active is None
 
 
+# ---- store blips must never strand the slot/lease (@claude PR#46, US4 T375-B) -----------------
+def test_submit_store_failure_releases_gpu_lease(tmp_path):
+    """The journal write is a networked Postgres upsert now — if it fails AFTER the GPU lease is
+    taken, `submit` must release the lease before propagating, else the next submit is wrongly 409'd
+    by a lease no live job holds."""
+    a = _admission()
+    store = FakeJobStore()
+    jm = jobs_mod.JobManager(a, Journal(store=store),         # hydrated while the store is up
+                             runners=_const_runners({"status": "completed"}))
+    store.fail = True                                         # the store goes down mid-submit
+    with pytest.raises(store.StoreError):
+        jm.submit("finetune", dict(FT_REQ))
+    assert a.holder() is None and jm._active is None          # lease + slot freed, not stranded
+
+
+def test_worker_running_transition_failure_frees_slot(tmp_path):
+    """The worker's first `transition(running)` is the same networked write. A blip there fires
+    BEFORE the terminal try/finally, so without the guard the daemon thread would die holding the
+    slot + GPU lease → every later submit 409s forever. The guard frees them; the durable record
+    stays `queued` for the next restart's `mark_interrupted` to reconcile."""
+    class FailRunningStore(FakeJobStore):
+        def upsert_job(self, conn, record):
+            if record.get("state") == "running":             # queued-write ok, running-write blips
+                raise self.StoreError("blip on running-transition (fake)")
+            return super().upsert_job(conn, record)
+
+    a = _admission()
+    jm = jobs_mod.JobManager(a, Journal(store=FailRunningStore()),
+                             runners=_const_runners({"status": "completed"}))
+    code, p = jm.submit("finetune", dict(FT_REQ))
+    assert code == 202                                        # the queued-write landed
+    assert _wait(lambda: a.holder() is None and jm._active is None, 3.0)   # slot/lease freed
+    assert (jm.get(p["run_id"]) or {})["state"] == "queued"   # record never advanced past queued
+
+
 # ---- subprocess runner plumbing (real _run_finetune, fake Popen) ------------------------------
 def test_finetune_subprocess_success_maps_fields_and_sets_child(tmp_path):
     seen = {}

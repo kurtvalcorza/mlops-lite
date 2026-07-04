@@ -28,6 +28,7 @@ from hostagent import lifecycle  # noqa: E402
 from hostagent import swap as swap_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 from hostagent.metrics import REGISTRY  # noqa: E402
+from platformlib.store import StoreError  # noqa: E402
 from platformlib.topology import AGENT_PORT, STATE_DIR  # noqa: E402
 
 VRAM_GB = float(os.getenv("VRAM_GB", "12"))
@@ -314,8 +315,11 @@ def make_handler(admission, journal, manager, jobs):
                                                        if k not in ("kind", "modality", "request")})
                 if body.get("modality") is not None:
                     request.setdefault("modality", body["modality"])
-                code, payload = jobs.submit(body.get("kind"), request)
-                return self._send(code, payload)
+                try:
+                    code, payload = jobs.submit(body.get("kind"), request)
+                except StoreError as e:  # US4 T375-B: submit's journal write is a Postgres upsert
+                    return self._send(502, {"error": str(e)})  # now — a blip is a clean 502, not a
+                return self._send(code, payload)               # dropped connection (@claude PR#46)
             if path.startswith("/jobs/") and path.endswith("/cancel"):
                 if CONTROL_SECRET and self.headers.get("X-Agent-Control", "") != CONTROL_SECRET:
                     return self._send(403, {"error": "bad or missing X-Agent-Control"})
@@ -327,7 +331,10 @@ def make_handler(admission, journal, manager, jobs):
                 body = self._read_body()
                 if body is None:
                     return self._send(400, {"error": "invalid JSON"})
-                code, payload = jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
+                try:
+                    code, payload = jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
+                except StoreError as e:  # (@claude PR#46) — same clean-502 mapping for the aliases
+                    return self._send(502, {"error": str(e)})
                 return self._send(code, payload)
             # Inference passthrough: /engines/<id>/<verb> (+ /stream, + `?preempt=true`). The
             # byte-compatible /engines/<id>/unload-now relic retired at T364 (its only caller, the

@@ -262,7 +262,17 @@ class JobManager:
 
     def _worker(self, kind: str, job_id: str, request: dict) -> None:
         spec = KINDS[kind]
-        self.journal.transition(job_id, "running", started_at=self.clock())
+        try:
+            self.journal.transition(job_id, "running", started_at=self.clock())
+        except Exception:
+            # US4 T375-B: the running-transition is a networked Postgres write now (was a local
+            # fsync that never raised) — a store blip HERE mustn't wedge the agent. This runs before
+            # the try/finally below, so without this guard the daemon thread would die with the slot
+            # and GPU lease still held → every later submit 409s forever until a manual restart.
+            # Free the slot/lease (@claude PR#46); the record stays durably `queued` and the next
+            # restart's `mark_interrupted` reconciles it.
+            self._release(kind, spec)
+            return
         update = {}
         try:
             update = self._runners[kind](self, job_id, request)
