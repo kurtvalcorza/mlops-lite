@@ -33,15 +33,27 @@ ADAPTERS = {
 }
 
 
+#: Fallback cold-start budget for an engine with no per-engine `ready_wait_s` in topology.ENGINES.
+DEFAULT_READY_WAIT_S = 60.0
+
+
+def _env_float(name):
+    v = os.getenv(name)
+    return float(v) if v not in (None, "") else None
+
+
 def build_runtimes(admission, lease=None) -> dict:
     """One `EngineRuntime` per registered adapter, all under the single admission slot. `kind` is
     "serving" for every folded-in engine (a preemptable GPU/CPU tenant); job runtimes (kind="job",
     never preempted) arrive with the jobs fold-in (T362).
 
-    Honors the legacy `IDLE_TIMEOUT` env (Codex round 7, 018): the retired supervisors read it to
-    tune how long a resident model stays before the reaper releases VRAM. A fold-in that only flips
-    the gateway URL must not reset a tuned deployment's idle timeout to the default."""
-    idle_timeout_s = float(os.getenv("IDLE_TIMEOUT", "120"))
+    Per-engine startup + idle budgets (019/US8, FR-196): the retired supervisors gave the slow
+    BentoML engines a larger cold-start grace and tuned idle per engine. `ready_wait_s` comes from
+    `{ENGINE}_READY_WAIT_S` → `topology.ENGINES[eid]["ready_wait_s"]` → DEFAULT_READY_WAIT_S, so a
+    slow first load (BentoML import + weight download) is not killed at a uniform 60s and re-downloaded
+    on every retry. Idle honors `{ENGINE}_IDLE_TIMEOUT_S` → the global `IDLE_TIMEOUT` (Codex round 7):
+    a fold-in that only flips the gateway URL must not reset a tuned deployment's per-engine idle."""
+    global_idle_s = float(os.getenv("IDLE_TIMEOUT", "120"))
     runtimes = {}
     for engine_id, factory in ADAPTERS.items():
         adapter = factory(lease)
@@ -52,10 +64,17 @@ def build_runtimes(admission, lease=None) -> dict:
             raise ValueError(
                 f"adapter {engine_id!r} gpu={adapter.gpu} disagrees with topology.ENGINES "
                 f"gpu={meta.get('gpu')}")
+        ready_wait_s = (_env_float(f"{engine_id.upper()}_READY_WAIT_S")
+                        or float(meta.get("ready_wait_s", DEFAULT_READY_WAIT_S)))
         # CPU engines (gpu=False) are never idle-reaped (T361): the idle reaper exists to free the
         # GPU lease/VRAM, and a CPU engine holds neither — reaping it would only cost a bento
         # respawn (+ model reload), reverting the "always-on" behaviour of the retired daemons.
-        idle = idle_timeout_s if adapter.gpu else float("inf")
+        if adapter.gpu:
+            idle = _env_float(f"{engine_id.upper()}_IDLE_TIMEOUT_S")
+            idle = idle if idle is not None else global_idle_s
+        else:
+            idle = float("inf")
         runtimes[engine_id] = lifecycle.EngineRuntime(adapter, admission, kind="serving",
-                                                      idle_timeout_s=idle)
+                                                      idle_timeout_s=idle,
+                                                      ready_wait_s=ready_wait_s)
     return runtimes

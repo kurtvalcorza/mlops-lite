@@ -173,13 +173,19 @@ def make_handler(admission, journal, manager, jobs):
                 # now points here, so swap.py (gpu_batch_active), platform_metrics (busy/free_mib/
                 # gpu_batch_active), and the gateway training-health view keep reading the same
                 # field names with only a base-URL flip (byte-compat, FR-177).
+                # Compute engine_states ONCE (019/US7): each call sweeps every engine's readiness
+                # probe, and /health is polled hot — computing it twice doubled the child probes.
+                states = manager.engine_states()
+                # FLAT GPU fields to match platformlib.contracts.AgentHealth (019/US7, FR-195): the
+                # prior nested `gpu` object was dropped by the contract's unknown-field filter, so a
+                # consumer read the GPU as free/unheld (holder=None) even while a tenant held it.
                 self._send(200, {
                     "ok": True,
-                    "engines": {eid: s["state"] for eid, s in manager.engine_states().items()},
-                    "gpu": {"free_gb": admission.free_gb(), "holder": (holder or {}).get("tenant"),
-                            "holder_kind": (holder or {}).get("kind"),
-                            "wedged": any(s["state"] == "wedged"
-                                          for s in manager.engine_states().values())},
+                    "engines": {eid: s["state"] for eid, s in states.items()},
+                    "gpu_free_gb": admission.free_gb(),
+                    "holder": (holder or {}).get("tenant"),
+                    "holder_kind": (holder or {}).get("kind"),
+                    "wedged": any(s["state"] == "wedged" for s in states.values()),
                     "jobs_active": journal.active_count(),
                     "interrupted_since_start": _interrupted_at_start,
                     "started_at": _started_at,
@@ -190,7 +196,10 @@ def make_handler(admission, journal, manager, jobs):
                 self._send(200, REGISTRY.render().encode(),
                            content_type="text/plain; version=0.0.4")
             elif path == "/engines":
-                self._send(200, {"engines": manager.engine_states()})
+                # Contract-shaped rows (019/US7, FR-195): each row carries engine_id/gpu/optional so
+                # a consumer can EngineState.from_json(row) — the bare {state:…} value the prior
+                # listing returned raised ContractError (validate() requires engine_id).
+                self._send(200, {"engines": manager.engine_rows()})
             elif path.startswith("/engines/") and any(
                     path.endswith(s) for s in ("/health", "/readyz", "/healthz")):
                 # Per-engine health/readiness (byte-compat, FR-177): the gateway/swap probe bento-

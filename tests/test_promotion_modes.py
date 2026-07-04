@@ -192,6 +192,42 @@ def test_default_shadow_picks_newest_verdict_by_last_modified():
     assert best["winner"] == "champion" and best["shadow_id"] == "aaaaaa"  # newest, not max-id
 
 
+def test_default_shadow_selection_is_total_when_a_verdict_lacks_last_modified():
+    """019/US9 (FR-197): the prior newest-by-LastModified tie-break could never replace a chosen
+    timestamped verdict with one whose LastModified was absent, and an all-missing-timestamp set was
+    picked in listing order (effectively random). Selection is now total + deterministic: a verdict
+    WITH a timestamp outranks one without (a real recency signal is never lost to a missing one), and
+    the object key breaks any remaining tie — never order-dependent, never a raise on a mixed set."""
+    import datetime as _dt
+
+    from app import quality as appq
+
+    stamped = {"winner": "champion", "name": "qa-demo", "modality": "text-generation",
+               "challenger": {"version": "9"}, "shadow_id": "aaaaaa"}
+    unstamped = {"winner": "challenger", "name": "qa-demo", "modality": "text-generation",
+                 "challenger": {"version": "9"}, "shadow_id": "zzzzzz"}
+    fake = _ListingS3({
+        f"{appq.SHADOW_PREFIX}aaaaaa.json": (stamped, _dt.datetime(2026, 7, 1)),
+        f"{appq.SHADOW_PREFIX}zzzzzz.json": (unstamped, None),   # no timestamp
+    })
+    best = _with_shadow_env(fake, None,
+                            lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
+    assert best["shadow_id"] == "aaaaaa"    # the timestamped verdict outranks the un-timestamped one
+
+    # all-missing timestamps → deterministic by object key (largest), not listing order
+    a = {"winner": "champion", "name": "qa-demo", "modality": "text-generation",
+         "challenger": {"version": "9"}, "shadow_id": "aaaaaa"}
+    z = {"winner": "challenger", "name": "qa-demo", "modality": "text-generation",
+         "challenger": {"version": "9"}, "shadow_id": "zzzzzz"}
+    fake2 = _ListingS3({
+        f"{appq.SHADOW_PREFIX}aaaaaa.json": (a, None),
+        f"{appq.SHADOW_PREFIX}zzzzzz.json": (z, None),
+    })
+    best2 = _with_shadow_env(fake2, None,
+                             lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
+    assert best2["shadow_id"] == "zzzzzz"   # deterministic: largest object key wins, not listing order
+
+
 def test_default_shadow_listing_failure_raises_never_reads_as_green():
     # Codex round 4 / internal review (018): the whole-scan try/except returned None on ANY
     # failure, and None means "no shadow window exists" — GREEN. A transient store outage could

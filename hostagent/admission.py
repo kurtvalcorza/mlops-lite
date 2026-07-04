@@ -15,10 +15,13 @@ Migration interop (FR-166): while any legacy daemon remains, every agent claim a
 legacy file lease (`serving/gpu_lease.py`) under the tenant's legacy identity, so an agent
 tenant and a legacy tenant can never co-reside. The shim (`lease=` seam) is deleted at T364.
 """
+import logging
 import threading
 import time
 
 from platformlib.topology import Tenant
+
+_log = logging.getLogger("hostagent.admission")
 
 #: Agent tenant id → legacy lockfile identity (the llama supervisor still claims "llm-serving").
 LEGACY_TENANT = {Tenant.LLM: Tenant.LLM_LEGACY, Tenant.ASR: Tenant.ASR,
@@ -112,10 +115,18 @@ class Admission:
     # reservation is up, acquire() admits only the reserved target; the swap itself never holds
     # this lock across engine operations, so no lock-order cycle exists.
     def begin_swap(self, target: str) -> None:
-        """Reserve the slot for `target` for the duration of a swap. Raises Held if another swap
-        is already in flight (one transaction at a time)."""
+        """Reserve the slot for `target` for the duration of a swap. Raises Held if ANY swap is
+        already in flight — one transaction at a time (FR-171).
+
+        Rejecting a concurrent swap for the SAME target too (019/US6, FR-194): the prior guard only
+        refused a *different* target, so two same-target swaps both passed and both set the shared
+        `_swap_target`; the first to finish then ran `end_swap(target)` and dropped the reservation
+        while the second was still mid-transaction (between evict and re-load) — reopening the
+        evict→re-acquire window the reservation exists to close. Serializing on any in-flight swap
+        keeps the reservation single-flight; the refused caller retries (the gateway maps it to a
+        409/PreemptRefused), by which point the first transaction has ended."""
         with self.lock:
-            if self._swap_target is not None and self._swap_target != target:
+            if self._swap_target is not None:
                 raise Held({"tenant": self._swap_target, "kind": "swap-reservation"})
             self._swap_target = target
 
@@ -204,4 +215,10 @@ class Admission:
                     try:
                         self._lease.release(LEGACY_TENANT.get(tenant, tenant))
                     except Exception:
-                        pass
+                        # Never fail the in-process release over the interop shim — but do NOT
+                        # swallow it silently: a dropped lease release leaves a stale lockfile
+                        # record that the lease's same-owner self-heal (019/US2) must reconcile on
+                        # the next acquire. Log it so the skipped release is observable, not a
+                        # silent wedge (019/US2, FR-190).
+                        _log.warning("legacy lease release for %s failed; the lockfile record will "
+                                     "be self-healed on the next acquire", tenant, exc_info=True)

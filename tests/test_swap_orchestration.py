@@ -278,6 +278,46 @@ def test_default_batch_probe_fails_closed_when_trainer_unreachable():
     assert "batch state unknown" in str(got)
 
 
+# --- 019 US3 (FR-191): the DEFAULT target probe rejects a non-2xx (up-but-not-ready) --------------
+
+def test_default_target_probe_rejects_non_2xx():
+    # The pre-019 default probe returned True for ANY HTTP response, so a target that is up but whose
+    # model failed to load (e.g. /healthz → 503) passed the guard, the working holder got evicted, and
+    # the forward 503'd anyway (evict-then-fail). Only a success status (<400) may count as serve-ready.
+    import httpx
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    class _Client:
+        code = 200
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, _url):
+            return _Resp(_Client.code)
+
+    real = httpx.AsyncClient
+    httpx.AsyncClient = _Client
+    try:
+        _Client.code = 503
+        assert run(m._default_target_probe("vision")) is False   # up but not ready → do NOT evict
+        _Client.code = 404
+        assert run(m._default_target_probe("vision")) is False   # misconfig → do NOT evict
+        _Client.code = 200
+        assert run(m._default_target_probe("vision")) is True     # serve-ready → swap may proceed
+    finally:
+        httpx.AsyncClient = real
+
+
 if __name__ == "__main__":
     import sys
     import pytest

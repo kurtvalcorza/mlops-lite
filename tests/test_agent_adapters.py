@@ -97,6 +97,42 @@ def test_stub_engine_refuses_preemption_of_a_job_like_any_engine():
         raise AssertionError("the structural job guard must cover new engines for free")
 
 
+def test_build_runtimes_gives_slow_bento_engines_a_larger_startup_budget():
+    """019/US8 (FR-196): build_runtimes must thread a PER-ENGINE cold-start budget. The prior code
+    passed none, so every engine inherited the uniform 60s default and a slow BentoML first load
+    (import + weight download) was killed and re-downloaded on every retry."""
+    from hostagent.adapters import build_runtimes
+
+    a = adm.Admission(vram_budget_gb=12.0,
+                      gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
+    rts = build_runtimes(a)
+    assert rts["llm"].ready_wait_s == 60.0                 # native child warms fast
+    assert rts["vision"].ready_wait_s == 120.0             # BentoML cold start gets the larger grace
+    assert rts["embed"].ready_wait_s == 120.0              # a CPU bento engine still gets it
+    assert rts["vision"].ready_wait_s > rts["llm"].ready_wait_s   # the regression: NOT a uniform 60
+    assert rts["embed"].idle_timeout_s == float("inf")     # CPU engines are never idle-reaped
+    assert rts["vision"].idle_timeout_s == 120.0           # GPU engines honor the global idle default
+
+
+def test_per_engine_startup_and_idle_env_override():
+    """019/US8 (FR-196): the per-engine `{ENGINE}_READY_WAIT_S` / `{ENGINE}_IDLE_TIMEOUT_S` env vars
+    the retired supervisors honored must not be silently ignored."""
+    from hostagent.adapters import build_runtimes
+
+    os.environ["VISION_READY_WAIT_S"] = "90"
+    os.environ["VISION_IDLE_TIMEOUT_S"] = "600"
+    try:
+        a = adm.Admission(vram_budget_gb=12.0,
+                          gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
+        rts = build_runtimes(a)
+        assert rts["vision"].ready_wait_s == 90.0          # per-engine startup override honored
+        assert rts["vision"].idle_timeout_s == 600.0       # per-engine idle override honored
+        assert rts["llm"].ready_wait_s == 60.0             # other engines unaffected
+    finally:
+        del os.environ["VISION_READY_WAIT_S"]
+        del os.environ["VISION_IDLE_TIMEOUT_S"]
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

@@ -73,11 +73,16 @@ class EngineRuntime:
     def ensure_loaded(self) -> float:
         """Load on demand; returns cold-start ms (0.0 when already resident+ready). Raises
         `admission.Held`/`VramExceeded` (409/507) or `EngineError` (502/503)."""
-        with self.lock:
-            # Flag the in-progress load FIRST (Codex round 4, 018): a concurrent unload whose
-            # drain times out must know a loader owns this runtime — see unload() below.
-            self._loading = True
-            try:
+        # Flag the in-progress load BEFORE acquiring the lock (019/US5, FR-193): a concurrent
+        # hard-cut unload whose timed lock.acquire() fails reads self._loading (unlocked) to decide
+        # whether to tear down. Setting the flag only AFTER acquiring the lock (the prior Codex
+        # round 4 fix) left a window — lock held by this loader, flag not yet set — in which that
+        # unlocked read saw False and released this loader's admission slot mid-load, the exact
+        # double-admission the flag exists to prevent. Setting it first (and even before we BLOCK on
+        # the lock) closes the window; the finally always clears it, even if acquisition raises.
+        self._loading = True
+        try:
+            with self.lock:
                 if not self.enabled:
                     raise EngineError(f"{self.adapter.engine_id} is disabled")
                 if self.wedged_reason:
@@ -105,8 +110,8 @@ class EngineRuntime:
                 except BaseException:
                     self.unload(drain_timeout_s=0)  # never hold the slot/child after a failed load
                     raise
-            finally:
-                self._loading = False
+        finally:
+            self._loading = False
 
     def _spawn_and_wait(self) -> float:
         t0 = self.clock()
@@ -223,6 +228,20 @@ class EngineManager:
 
     def engine_states(self) -> dict:
         return {eid: rt.state() for eid, rt in self.runtimes.items()}
+
+    def engine_rows(self) -> dict:
+        """Contract-shaped rows for GET /engines (platformlib.contracts.EngineState, 019/US7): each
+        row is SELF-DESCRIBING — it carries engine_id/gpu/optional/reason so a consumer can call
+        `EngineState.from_json(row)` directly, instead of the bare `{state: …}` value (no engine_id)
+        the listing used to return, which failed the contract's `validate()`."""
+        rows = {}
+        for eid, rt in self.runtimes.items():
+            s = rt.state()
+            rows[eid] = {"engine_id": eid, "state": s.get("state", "cold"),
+                         "gpu": bool(rt.adapter.gpu),
+                         "optional": bool(getattr(rt.adapter, "optional", False)),
+                         "reason": s.get("reason")}
+        return rows
 
     def reaper_tick(self) -> None:
         for rt in self.runtimes.values():

@@ -56,6 +56,23 @@ LOG_DIR = os.getenv("TRAINER_LOG_DIR",
 GPU_BATCH_MODALITIES = {"llm", "vision", "asr"}
 BATCH_MODALITIES = ("llm", "text-generation", "vision", "image-classification", "tabular")
 
+# How long a COMPLETED job's idempotency key still dedupes a re-issued identical launch (019/US4,
+# FR-192): long enough to cover a lost-response re-detect or a park retry (a tick or two), short
+# enough that a genuinely-new identical retrain much later still gets a fresh job. An in-flight job
+# always dedupes regardless of this window.
+IDEMPOTENCY_WINDOW_S = float(os.getenv("JOB_IDEMPOTENCY_WINDOW_S", "900"))
+
+
+def _within_idempotency_window(rec, now, window_s):
+    """Whether a prior job record `rec` should dedupe a re-issued identical launch (019/US4, FR-192):
+    a still-active job (its response was lost while it runs) or one that completed within `window_s`
+    (a park retry after it already finished). None / older → start fresh."""
+    if rec is None:
+        return False
+    if rec.get("state") in ("queued", "running"):
+        return True
+    return now - (rec.get("submitted_at") or 0) <= window_s
+
 
 class _Kind:
     """Static per-kind config: required fields, GPU-tenancy, modality validation, the legacy
@@ -134,6 +151,7 @@ class JobManager:
         self._active = None            # job_id holding the single job slot (queued/running)
         self._gpu_batch_active = False  # a GPU-modality batch runs → serving holder not preemptable
         self._children = {}            # job_id -> Popen (subprocess kinds only, for cancel)
+        self._run_keys = {}            # idempotency_key -> job_id (019/US4 — dedupe a re-launch)
 
     # -- health fields the trainer's consumers still read (byte-compat, FR-177) ------------------
     def _read_gpu_free_mib(self):
@@ -170,6 +188,18 @@ class JobManager:
             request = {**request, "modality": modality}
 
         with self.lock:
+            # Idempotent re-launch (019/US4, FR-192): a policy retrain whose response was lost, or a
+            # park re-launched after a store blip, re-issues this exact request with the same
+            # idempotency_key. Return the existing job instead of starting a duplicate on the single
+            # GPU. Checked BEFORE the busy gate so a re-launch of the still-active job returns it (not
+            # a 409). Manual callers omit the key → no dedupe (today's behavior).
+            key = request.get("idempotency_key")
+            if key is not None:
+                hit = self._run_keys.get(key)
+                rec = self.journal.get(hit) if hit else None
+                if _within_idempotency_window(rec, self.clock(), IDEMPOTENCY_WINDOW_S):
+                    return 200, {spec.id_key: hit, "status": rec.get("state", "queued"),
+                                 "idempotent": True}
             if self._active is not None:
                 return 409, {"error": f"agent busy with job {self._active}"}
             if spec.gpu:
@@ -186,6 +216,16 @@ class JobManager:
             for field in spec.extra:  # byte-compat: legacy record carries these (null until done)
                 record.setdefault(field, None)
             self.journal.submit(record)
+            if key is not None:
+                # Prune keys whose job has aged out of the dedup window before recording this one, so
+                # _run_keys stays bounded to roughly the in-flight + recent set over a long agent
+                # uptime (review nit) — an out-of-window key can no longer dedupe anyway. Submits are
+                # infrequent (one per launch), so the O(n) sweep is negligible.
+                now = self.clock()
+                self._run_keys = {
+                    k: jid for k, jid in self._run_keys.items()
+                    if _within_idempotency_window(self.journal.get(jid), now, IDEMPOTENCY_WINDOW_S)}
+                self._run_keys[key] = job_id   # so a re-issued identical launch dedupes to this job
             self._active = job_id
             if kind == "batch" and modality in GPU_BATCH_MODALITIES:
                 self._gpu_batch_active = True

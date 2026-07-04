@@ -76,6 +76,53 @@ def test_torn_tail_line_does_not_poison_replay():
         assert j2.get("job-1")["state"] == "running"       # the torn line is ignored, prefix holds
 
 
+def test_torn_tail_then_append_loses_no_record():
+    """FR-188 (019/US1): a crash that drops the trailing newline of a COMPLETE record leaves the
+    file ending without a newline. The next append must not concatenate onto that tail — both the
+    truncated record and the new one must survive replay."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "journal.jsonl")
+        j1 = Journal(path)
+        _submit(j1, "job-1")
+        j1.transition("job-1", "running", started_at=2.0)
+
+        with open(path, "rb") as f:
+            data = f.read()
+        assert data.endswith(b"\n")
+        with open(path, "wb") as f:
+            f.write(data[:-1])                    # torn tail: the `running` line loses its newline
+
+        j2 = Journal(path)                        # a fresh agent appends the next transition
+        j2.transition("job-1", "succeeded", ended_at=3.0, result={"version": "7"})
+
+        j3 = Journal(path)                        # replay must recover BOTH records
+        assert j3.get("job-1")["state"] == "succeeded"
+        assert j3.get("job-1")["result"] == {"version": "7"}
+
+
+def test_failed_append_does_not_advance_memory():
+    """FR-189 (019/US1): a durable append that raises must leave in-memory state at the last
+    durable transition — memory never leads the log."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "journal.jsonl")
+        j = Journal(path)
+        _submit(j, "job-1")
+        j.transition("job-1", "running", started_at=2.0)
+
+        def boom(_entry):
+            raise OSError("disk full")
+        j._append = boom
+
+        raised = False
+        try:
+            j.transition("job-1", "succeeded", ended_at=3.0)
+        except OSError:
+            raised = True
+        assert raised
+        assert j.get("job-1")["state"] == "running"   # did not advance past the durable state
+        assert j.active_count() == 1
+
+
 def test_unknown_fields_are_ignored_forward_compat():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "journal.jsonl")

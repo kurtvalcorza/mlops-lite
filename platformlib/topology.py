@@ -33,12 +33,17 @@ NON_PREEMPTABLE_KINDS = {"job"}
 
 #: Engine registry (data-model.md §EngineAdapter). `gpu=False` engines never touch admission;
 #: `optional=True` engines are excluded from platform-health's `all_healthy` (research R7).
+#: `ready_wait_s` is the per-engine cold-start budget (019/US8, FR-196): the native llm/asr children
+#: warm in well under a minute, but the BentoML engines (vision/embed/tabular) import BentoML and can
+#: download model weights on a fresh host — the retired supervisors gave them ~120s. A uniform 60s
+#: default killed a slow first load and re-downloaded on every retry. `{ENGINE}_READY_WAIT_S` /
+#: `{ENGINE}_IDLE_TIMEOUT_S` env vars override per engine (build_runtimes).
 ENGINES = {
-    "llm":     {"gpu": True,  "optional": False},
-    "asr":     {"gpu": True,  "optional": True},
-    "vision":  {"gpu": True,  "optional": False},
-    "embed":   {"gpu": False, "optional": False},
-    "tabular": {"gpu": False, "optional": False},
+    "llm":     {"gpu": True,  "optional": False, "ready_wait_s": 60},
+    "asr":     {"gpu": True,  "optional": True,  "ready_wait_s": 60},
+    "vision":  {"gpu": True,  "optional": False, "ready_wait_s": 120},
+    "embed":   {"gpu": False, "optional": False, "ready_wait_s": 120},
+    "tabular": {"gpu": False, "optional": False, "ready_wait_s": 120},
 }
 
 #: Modalities with a fine-tune flow (the on-breach retrain targets, FR-181). The canonical shared

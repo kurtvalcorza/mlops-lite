@@ -70,39 +70,82 @@ class Journal:
 
     # -- writes --------------------------------------------------------------------------------
     def submit(self, record: dict) -> None:
-        """First sight of a job: journal the full record with its initial state."""
+        """First sight of a job: journal the full record with its initial state.
+
+        Durable-first (FR-189): the append is fsync'd before in-memory state advances, so a
+        failed append never leaves memory reporting a transition that is not on disk."""
         with self._lock:
-            self._jobs[record["job_id"]] = dict(record)
             self._append({"ts": self.clock(), "job_id": record["job_id"],
                           "to": record.get("state", "queued"), "record": record})
+            self._jobs[record["job_id"]] = dict(record)
 
     def transition(self, job_id: str, to: str, *, reason=None, started_at=None,
                    ended_at=None, result=None, fields=None) -> None:
         """Journal a state change. `fields` (018 T362) carries arbitrary kind-specific outputs
         (mlflow_run_id/model/metrics/summary/best/…) that must survive a restart alongside the
-        state — appended to the entry so `_replay` restores them; control keys can't be shadowed."""
+        state — appended to the entry so `_replay` restores them; control keys can't be shadowed.
+
+        Durable-first (019/US1, FR-189): the append is fsync'd BEFORE in-memory state advances, so a
+        failed append never leaves memory reporting a transition that is not on disk."""
         with self._lock:
-            rec = self._jobs.setdefault(job_id, {"job_id": job_id})
-            entry = {"ts": self.clock(), "job_id": job_id, "from": rec.get("state"), "to": to}
-            rec["state"] = to
+            existing = self._jobs.get(job_id)
+            entry = {"ts": self.clock(), "job_id": job_id,
+                     "from": (existing or {}).get("state"), "to": to}
             extra = dict(fields or {})
             for k, v in (("reason", reason), ("started_at", started_at),
                          ("ended_at", ended_at), ("result", result)):
                 if v is not None:
                     extra[k] = v
+            applied = {}
             for k, v in extra.items():
                 if k in ("record", "from", "to", "ts", "job_id") or v is None:
                     continue  # never let a caller's field shadow a control key
-                rec[k] = v
                 entry[k] = v
-            self._append(entry)
+                applied[k] = v
+            self._append(entry)  # durable-first (FR-189): raises before we touch memory
+            rec = self._jobs.setdefault(job_id, {"job_id": job_id})
+            rec["state"] = to
+            for k, v in applied.items():
+                rec[k] = v
 
     def _append(self, entry: dict) -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        d = os.path.dirname(self.path) or "."
+        existed = os.path.exists(self.path)
+        os.makedirs(d, exist_ok=True)
+        # Repair a torn tail before appending (FR-188): a crash mid-write can leave the file
+        # ending without a newline — either a partial (unparseable) record or a complete record
+        # whose newline was lost. Append mode seeks to raw EOF, so writing here would concatenate
+        # the new record onto that tail, producing one line that replay then discards whole,
+        # silently losing BOTH. Starting the new record on its own line isolates the tail: a
+        # complete-but-unterminated record still replays; a partial one is skipped alone.
+        prefix = ""
+        try:
+            if os.path.getsize(self.path) > 0:
+                with open(self.path, "rb") as rf:
+                    rf.seek(-1, os.SEEK_END)
+                    if rf.read(1) != b"\n":
+                        prefix = "\n"
+        except OSError:
+            pass
         with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
+            f.write(prefix + json.dumps(entry, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())  # a journalled transition survives the very next crash
+        if not existed:
+            self._fsync_dir(d)  # the new file's directory entry must be durable too
+
+    @staticmethod
+    def _fsync_dir(d: str) -> None:
+        try:
+            dfd = os.open(d, os.O_RDONLY)
+        except OSError:
+            return  # platforms without directory fds (e.g. Windows) — best-effort
+        try:
+            os.fsync(dfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
 
     # -- reads ----------------------------------------------------------------------------------
     def get(self, job_id: str):

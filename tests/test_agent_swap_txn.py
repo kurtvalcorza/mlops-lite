@@ -224,6 +224,34 @@ def test_failed_target_load_rolls_the_evicted_holder_back():
 
 
 
+def test_second_same_target_swap_is_refused_and_reservation_not_dropped_early():
+    """019/US6 (FR-194): two concurrent swaps for the SAME target must serialize. The prior guard
+    only refused a *different* target, so both same-target swaps passed and shared `_swap_target`;
+    the first's end_swap then dropped the reservation mid-second-transaction. Now the second begin
+    is refused, and while the first swap's reservation stands a plain contender is still locked out."""
+    llm, vision = FakeEngine("llm"), FakeEngine("vision")
+    mgr, a = _manager([llm, vision])
+    a.begin_swap("vision")                        # swap #1 for vision is mid-flight
+    try:
+        try:
+            a.begin_swap("vision")                # swap #2, SAME target — must be refused, not admitted
+        except adm.Held as e:
+            assert e.holder.get("kind") == "swap-reservation"
+        else:
+            raise AssertionError("a second same-target swap must be refused while one is in flight")
+        # the reservation still stands (swap #1 owns it) → a plain contender is locked out
+        try:
+            a.acquire("asr", "serving", est_gb=1.0)
+        except adm.Held as e:
+            assert e.holder.get("kind") == "swap-reservation"
+        else:
+            raise AssertionError("the reservation must still hold the slot for swap #1's target")
+    finally:
+        a.end_swap("vision")                      # swap #1 ends — now the reservation is truly gone
+    a.acquire("asr", "serving", est_gb=1.0)       # admissions flow again
+    a.release("asr")
+
+
 def test_wedged_holder_fails_the_swap_loudly():
     llm, vision = FakeEngine("llm"), FakeEngine("vision")
     llm.immortal_child = True                 # eviction will fail — child survives SIGKILL

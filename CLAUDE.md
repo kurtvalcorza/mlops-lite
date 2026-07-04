@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/018-platform-rearchitecture/plan.md
+at specs/019-review-remediation-018/plan.md
 <!-- SPECKIT END -->

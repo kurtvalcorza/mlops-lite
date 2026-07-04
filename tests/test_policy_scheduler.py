@@ -533,6 +533,18 @@ def test_check_error_is_contained_and_recorded():
         _teardown(sched)
 
 
+def test_idempotency_key_is_stable_per_retrain_identity():
+    """019 US3 (FR-192): the launch key is a deterministic function of the retrain's identity (model,
+    modality, dataset, resolved version), so a re-detected breach that resolves the SAME `latest`
+    version re-derives the SAME key (the trainer dedupes → no duplicate run), while a newly-registered
+    dataset version derives a different key (a fresh run, as intended)."""
+    k1 = scheduler._idempotency_key("vision-mobilenet", "vision", "imagenette", "7")
+    k2 = scheduler._idempotency_key("vision-mobilenet", "vision", "imagenette", "7")
+    assert k1 == k2 and k1                                  # deterministic + non-empty
+    assert scheduler._idempotency_key("vision-mobilenet", "vision", "imagenette", "8") != k1  # new ver
+    assert scheduler._idempotency_key("other-model", "vision", "imagenette", "7") != k1       # new model
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
