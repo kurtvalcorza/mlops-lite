@@ -142,14 +142,22 @@ def _dropped(kind: str) -> None:
         pass
 
 
-def _invalidate_conn() -> None:
+def _invalidate_conn(bad_conn=None) -> None:
     """Drop (and close) the cached connection so the next `_conn()` reconnects. Called from the store-op
     error paths so a transient DB blip/restart SELF-HEALS: without this, a connection that broke but
     isn't flagged `closed` (e.g. a server-side idle-timeout drop) would make every subsequent read fail
     loud (502) forever until a manual `reset_store_conn()`. The bootstrap flag is kept (the schema is
-    already applied — a reconnect need not re-run the DDL)."""
+    already applied — a reconnect need not re-run the DDL).
+
+    **Identity-scoped** (`bad_conn`): only drop/close the cache if it is STILL the connection that
+    failed. Under concurrent access (FastAPI threadpool + the fire-and-forget log threads share one
+    cached connection) a delayed failure on an already-superseded connection must NOT close the healthy
+    reconnection another thread just established — else the self-heal closes a good connection mid-use.
+    The first invalidator of a broken connection closes it; a later, stale invalidator no-ops."""
     with _conn_lock:
         c = _conn_state["conn"]
+        if bad_conn is not None and c is not bad_conn:
+            return  # already superseded by another thread's reconnect — leave the fresh connection alone
         _conn_state["conn"] = None
     if c is not None:
         try:
@@ -226,7 +234,7 @@ def log_prediction(model_name, model_version, modality, input_ref, prediction,
                     streamed=(captured_pred is None), payload_ref=payload_ref)
         except Exception:  # noqa: BLE001 — a store outage drops the index row, never serving
             _dropped("prediction")
-            _invalidate_conn()  # so the next log reconnects instead of dropping on a stale connection
+            _invalidate_conn(conn)  # next log reconnects instead of reusing this stale connection
         finally:
             _log_sem.release()
 
@@ -296,7 +304,7 @@ def attach_label(prediction_id: str, label) -> dict:
     try:
         known = _store.prediction_exists(conn, prediction_id)
     except Exception as e:
-        _invalidate_conn()  # a broken connection self-heals on the next request (not a permanent 502)
+        _invalidate_conn(conn)  # a broken connection self-heals on the next request (not a permanent 502)
         raise QualityStoreError(f"cannot check prediction {prediction_id}: {e}") from e
     if not known:
         return {"prediction_id": prediction_id, "status": "unknown",
@@ -307,7 +315,7 @@ def attach_label(prediction_id: str, label) -> dict:
         return {"prediction_id": prediction_id, "status": "duplicate",
                 "detail": "this prediction already has a label"}
     except Exception as e:
-        _invalidate_conn()
+        _invalidate_conn(conn)
         raise QualityStoreError(f"cannot store label for {prediction_id}: {e}") from e
     return {"prediction_id": prediction_id, "status": "attached"}
 
@@ -405,7 +413,7 @@ def capture_input(prediction_id: str, modality: str, recoverable_input, *, optio
             _prune_inputs(mod)  # bound storage (cap + TTL) over the capture-index rows
         except Exception:  # noqa: BLE001 — capture must never affect serving (fail-open)
             _dropped("capture")
-            _invalidate_conn()  # reconnect on the next capture rather than reuse a stale connection
+            _invalidate_conn(conn)  # reconnect on the next capture rather than reuse a stale connection
         finally:
             _log_sem.release()
 
@@ -425,7 +433,7 @@ def _prune_inputs(modality: str) -> None:
     try:
         rows = _store.capture_rows(conn, modality)
     except Exception:  # noqa: BLE001 — prune is best-effort; never fail the capture
-        _invalidate_conn()  # a broken connection reconnects on the next capture
+        _invalidate_conn(conn)  # a broken connection reconnects on the next capture
         return
     by_ref = {r["input_ref"]: r["prediction_id"] for r in rows}
     records = [(r["input_ref"], r["captured_at"].timestamp()) for r in rows]
@@ -524,7 +532,7 @@ def _load_pairs(model_version: str, modality: str, model_name=None, *, window_n:
     try:
         rows = _store.window(conn, modality, model_name, str(model_version), n)  # DESC served_at LIMIT n
     except Exception as e:
-        _invalidate_conn()  # reconnect on the next call rather than 502 every read after a blip
+        _invalidate_conn(conn)  # reconnect on the next call rather than 502 every read after a blip
         raise QualityStoreError(f"cannot query the quality window: {e}") from e
     pairs = []
     for r in rows:

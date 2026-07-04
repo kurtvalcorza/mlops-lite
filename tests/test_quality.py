@@ -223,6 +223,18 @@ def test_store_error_invalidates_conn_so_a_blip_self_heals(monkeypatch):
     assert q._conn() is not None and n["calls"] == 1    # next call reconnects (recovery), no manual reset
 
 
+def test_invalidate_conn_only_drops_the_failing_connection():
+    # Identity-scoped self-heal: a delayed failure on an ALREADY-superseded connection must NOT close the
+    # healthy reconnection another thread established (else the self-heal closes a good connection mid-use).
+    install_fakes(q)
+    fresh = q._conn()                          # the current healthy cached connection
+    stale = object()                           # a different, already-replaced connection object
+    q._invalidate_conn(stale)                  # a late failure still referencing the stale conn
+    assert q._conn_state["conn"] is fresh and fresh.closed is False  # the fresh one is left intact
+    q._invalidate_conn(fresh)                  # the ACTUAL current connection fails
+    assert q._conn_state["conn"] is None and fresh.closed is True    # now it is dropped + closed
+
+
 def test_list_keys_paginates_past_one_page():
     # _list_keys must follow IsTruncated/NextContinuationToken, not stop at the first page.
     class PagedS3:
