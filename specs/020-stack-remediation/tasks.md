@@ -33,7 +33,7 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
 **Goal**: platform data on a maintained store; unmaintained component count → 0 (SC-129).
 **Independent test**: quickstart §US1 (spike → migrate → cutover → rollback proof → decommission).
 
-- [ ] **T403** [P] [US1] Migration tool: `scripts/migrate_store.py` per
+- [x] **T403** [P] [US1] Migration tool: `scripts/migrate_store.py` per
   contracts/store-migration.md — boto3 mirror, idempotent (skip on present+equal-size),
   `--reverse`, streaming, pagination past 1,000 keys, JSON MigrationReport
   (data-model.md shape), exit 0 iff `parity: true`. Tests `tests/test_migrate_store.py`
