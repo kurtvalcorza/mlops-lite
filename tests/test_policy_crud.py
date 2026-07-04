@@ -283,6 +283,18 @@ def test_create_suggestion_is_idempotent_per_candidate():
     assert audit2["id"] == audit1["id"]                                   # audit rows too
 
 
+def test_stored_candidate_version_round_trips_as_text():
+    # @claude review (018 T375-A): the live store persists candidate_version as text (str() at the SQL
+    # seam), so anything READ BACK is a str. The fake now coerces on write to keep FakeStore ⋈ Postgres
+    # parity exact — an int version in must surface as "7" from get_suggestion (the stated cutover goal).
+    _fake_store()
+    rec = policies.create_suggestion("qa-demo", 7, {"verdict": "pass"})   # int in
+    got = policies.get_suggestion(rec["id"])
+    assert got["candidate_version"] == "7" and isinstance(got["candidate_version"], str)
+    # idempotency still matches whether the retry passes the int 7 or the str "7"
+    assert policies.create_suggestion("qa-demo", "7", {"verdict": "pass"})["id"] == rec["id"]
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

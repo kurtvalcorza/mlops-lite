@@ -209,7 +209,9 @@ class FakeStore:
     # -- suggestions (US4 T375) -------------------------------------------------------------------
     def create_suggestion(self, conn, rec):
         with self._lock:
-            self.suggestions[rec["id"]] = dict(rec)
+            # parity: the real store persists candidate_version as text (str() at the SQL seam), so a
+            # round-trip always yields a str — coerce here too or an int in would leak back out as an int.
+            self.suggestions[rec["id"]] = {**rec, "candidate_version": str(rec["candidate_version"])}
 
     def get_suggestion(self, conn, suggestion_id):
         rec = self.suggestions.get(suggestion_id)
