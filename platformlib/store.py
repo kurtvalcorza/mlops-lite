@@ -152,6 +152,12 @@ CREATE TABLE IF NOT EXISTS policies (
   updated_at timestamptz NOT NULL,
   updated_by text NOT NULL
 );
+-- US4 T375: the queue-of-one parked retrain + the last per-model check status fold onto the policy
+-- row (both are strictly 1:1 with the policy, keyed by model_name), replacing the pre-US4
+-- policies/_pending/ + policies/_status/ objects. Additive (ADD COLUMN IF NOT EXISTS) so an existing
+-- live `policies` table gains them on the next bootstrap without a schema-version bump.
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS pending jsonb;
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS status  jsonb;
 
 CREATE TABLE IF NOT EXISTS suggestions (
   id                text PRIMARY KEY,
@@ -336,3 +342,176 @@ def has_captures(conn, modality: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM capture_index WHERE modality = %s LIMIT 1", (modality,))
         return cur.fetchone() is not None
+
+
+# ==================================================================================================
+# US3 policy state (US4 T375) — policies + queue-of-one pending retrain + check status + suggestions
+# ==================================================================================================
+#
+# The pre-US4 policy state rode MinIO objects (policies/*.json + policies/_pending/ + policies/_status/
+# + suggestions/*.json); `list_policies`/`list_suggestions` LISTED + read every object (the O(N) scan
+# SC-111 kills). Here they become indexed table reads. Timestamps in the records stay epoch FLOATS (the
+# UI + the pre-US4 shape) — the timestamptz columns exist for ordering; the helpers convert at the seam.
+
+
+def _dt(epoch):
+    """Epoch float (or None) -> a tz-aware datetime for a timestamptz column."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc) if epoch is not None else None
+
+
+def _epoch(dt):
+    """A timestamptz value (or None) -> epoch float, restoring the record's numeric timestamp."""
+    return dt.timestamp() if dt is not None else None
+
+
+# -- policies (FR-179) -----------------------------------------------------------------------------
+
+def put_policy(conn, model_name: str, document: dict, updated_at, updated_by: str) -> None:
+    """Upsert the validated ModelPolicy `document`. ON CONFLICT touches only document/updated_at/
+    updated_by — a re-declaration must NOT wipe the row's pending/status (they outlive a re-`put`,
+    matching the pre-US4 separate-object behavior)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO policies (model_name, document, updated_at, updated_by) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (model_name) DO UPDATE SET "
+            "document = EXCLUDED.document, updated_at = EXCLUDED.updated_at, "
+            "updated_by = EXCLUDED.updated_by",
+            (model_name, _json(document), _dt(updated_at), updated_by))
+
+
+def get_policy(conn, model_name: str):
+    """The stored ModelPolicy document (epoch-float timestamps intact), or None."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT document FROM policies WHERE model_name = %s", (model_name,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def list_policies(conn) -> list:
+    """Every policy document, name-ordered — one indexed scan of the `policies` table (no O(N) object
+    listing, no `_pending`/`_status` sub-prefix filtering)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT document FROM policies ORDER BY model_name")
+        return [r[0] for r in cur.fetchall()]
+
+
+def delete_policy(conn, model_name: str) -> None:
+    """Drop the policy row — its pending + status columns go with it (no separate deletes)."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM policies WHERE model_name = %s", (model_name,))
+
+
+# -- queue-of-one pending retrain + per-model check status (columns on the policy row) --------------
+
+def set_pending(conn, model_name: str, pending: dict) -> None:
+    """Park the queue-of-one retrain on the policy row. UPDATE-only: a pending for a policy that no
+    longer exists is meaningless (the pre-US4 orphan `_pending` object can't happen)."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE policies SET pending = %s WHERE model_name = %s",
+                    (_json(pending), model_name))
+
+
+def get_pending(conn, model_name: str):
+    with conn.cursor() as cur:
+        cur.execute("SELECT pending FROM policies WHERE model_name = %s", (model_name,))
+        row = cur.fetchone()
+        return row[0] if row else None  # None both when no policy and when nothing is parked
+
+
+def clear_pending(conn, model_name: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE policies SET pending = NULL WHERE model_name = %s", (model_name,))
+
+
+def set_status(conn, model_name: str, status: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE policies SET status = %s WHERE model_name = %s",
+                    (_json(status), model_name))
+
+
+def get_status(conn, model_name: str):
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM policies WHERE model_name = %s", (model_name,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+# -- suggestions + audit (FR-183) ------------------------------------------------------------------
+
+_SUGGESTION_COLS = ("id", "model_name", "candidate_version", "gate_verdict", "shadow_verdict",
+                    "state", "created_at", "resolved_at", "actor")
+
+
+def _suggestion_row(row) -> dict:
+    """A suggestions row -> the record dict, restoring created_at/resolved_at to epoch floats."""
+    d = dict(zip(_SUGGESTION_COLS, row))
+    d["created_at"] = _epoch(d["created_at"])
+    d["resolved_at"] = _epoch(d["resolved_at"])
+    return d
+
+
+def create_suggestion(conn, rec: dict) -> None:
+    """Insert a PromotionSuggestion record (its id is the caller-minted PK)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO suggestions (id, model_name, candidate_version, gate_verdict, "
+            "shadow_verdict, state, created_at, resolved_at, actor) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (rec["id"], rec["model_name"], str(rec["candidate_version"]),
+             _json(rec.get("gate_verdict") or {}),
+             _json(rec["shadow_verdict"]) if rec.get("shadow_verdict") is not None else None,
+             rec["state"], _dt(rec.get("created_at")), _dt(rec.get("resolved_at")), rec.get("actor")))
+
+
+def get_suggestion(conn, suggestion_id: str):
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {', '.join(_SUGGESTION_COLS)} FROM suggestions WHERE id = %s",
+                    (suggestion_id,))
+        row = cur.fetchone()
+        return _suggestion_row(row) if row else None
+
+
+def find_suggestion(conn, model_name: str, candidate_version: str, state: str):
+    """The suggestion for (model, candidate, state), or None — backs create_suggestion's idempotency
+    (per-(model,version,state): a re-run must not mint a duplicate open suggestion OR a duplicate
+    auto-promoted audit row for the same candidate)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(_SUGGESTION_COLS)} FROM suggestions "
+            "WHERE model_name = %s AND candidate_version = %s AND state = %s LIMIT 1",
+            (model_name, str(candidate_version), state))
+        row = cur.fetchone()
+        return _suggestion_row(row) if row else None
+
+
+def list_suggestions(conn, state: str = None, model_name: str = None) -> list:
+    """Suggestions newest-first, optionally filtered by state and/or model — an indexed table scan,
+    not a listing of every `suggestions/` object."""
+    sql = f"SELECT {', '.join(_SUGGESTION_COLS)} FROM suggestions"
+    where, params = [], []
+    if state is not None:
+        where.append("state = %s")
+        params.append(state)
+    if model_name is not None:
+        where.append("model_name = %s")
+        params.append(model_name)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC"
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        return [_suggestion_row(r) for r in cur.fetchall()]
+
+
+def resolve_suggestion(conn, suggestion_id: str, state: str, actor: str, resolved_at):
+    """Transition an OPEN suggestion to a terminal `state`. The `state = 'open'` guard makes the
+    accept/dismiss race atomic in the DB (a lost race updates 0 rows). Returns the updated record, or
+    None if the id doesn't exist / was already resolved (the caller maps None → 404-or-conflict)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE suggestions SET state = %s, resolved_at = %s, actor = %s "
+            f"WHERE id = %s AND state = 'open' RETURNING {', '.join(_SUGGESTION_COLS)}",
+            (state, _dt(resolved_at), actor, suggestion_id))
+        row = cur.fetchone()
+        return _suggestion_row(row) if row else None

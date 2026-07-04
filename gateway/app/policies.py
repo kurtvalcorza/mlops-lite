@@ -1,26 +1,36 @@
-"""Per-model policy store + promotion suggestions (018 US3, T367/T370 — FR-179/182/183).
+"""Per-model policy store + promotion suggestions (018 US3 → US4 T375 — FR-179/182/183).
 
-Storage rides MinIO pre-US4 (spec Assumptions): `policies/{model}.json`, the queue-of-one parked
-retrain at `policies/_pending/{model}.json`, per-model check status at
-`policies/_status/{model}.json`, and suggestions/audit at `suggestions/{id}.json` — all in the
-existing results bucket; everything moves to the relational store at T375. Validation is the
-shared contract (`platformlib.contracts.ModelPolicy`) so an invalid declaration is rejected with
-a structured error and never stored (FR-179).
+US4 (T375): the policy state moves off MinIO objects onto the resident Postgres `gateway` DB via
+`platformlib.store`. `list_policies`/`list_suggestions` were the O(N) object scans SC-111 kills — they
+are now indexed table reads. Per-model layout:
 
-House pattern: pure logic + an injectable `_s3()` seam (tests swap a fake in, like quality.py).
+  - `policies` row: the validated ModelPolicy `document`, plus the queue-of-one parked retrain
+    (`pending`) and the last check `status` folded onto the same row (both strictly 1:1 per model).
+  - `suggestions` rows: promotion suggestions + audit; accept/dismiss is an atomic
+    `UPDATE … WHERE state='open'` (the lost-race guard, replacing the read-modify-write).
+
+Failure posture (contract): policy reads AND writes fail LOUD (`PolicyStoreError` → 502) — these are
+operator/scheduler operations that must never silently succeed or vanish. `resolve_dataset_version`
+still reads dataset manifests from MinIO (dataset artifacts are object-store, not US4 state).
+
+House pattern: pure logic + an injectable `_store`/`_conn()` seam (tests swap a FakeStore in, like
+quality.py); a store blip self-heals via identity-scoped `_invalidate_conn`.
 """
 import os
+import threading
 import time
 import uuid
 
-from platformlib import store
+from platformlib import store as _store_mod
 from platformlib.contracts import ContractError, ModelPolicy, PendingRetrain, PromotionSuggestion
 
 RESULTS_BUCKET = os.getenv("RESULTS_BUCKET", "results")
-POLICY_PREFIX = "policies/"
-PENDING_PREFIX = "policies/_pending/"
-STATUS_PREFIX = "policies/_status/"
-SUGGESTION_PREFIX = "suggestions/"
+
+# The relational store module (US4). Module-level so tests inject an in-memory fake
+# (`policies._store = FakeStore()`); production uses platformlib.store against the `gateway` DB.
+_store = _store_mod
+_conn_state = {"conn": None, "bootstrapped": False}
+_conn_lock = threading.Lock()
 
 
 class PolicyError(Exception):
@@ -28,7 +38,7 @@ class PolicyError(Exception):
 
 
 class PolicyStoreError(Exception):
-    """The policy store is unreachable (maps to 502)."""
+    """The policy store is unreachable / a store op failed (maps to 502)."""
 
 
 class SuggestionConflict(Exception):
@@ -37,49 +47,61 @@ class SuggestionConflict(Exception):
     someone else just got there first (Codex round 4 / claude review, 018)."""
 
 
-def _s3():
-    return store.s3_client()
+# --- store connection (fail-loud, self-healing) ---------------------------------------------------
+
+def _conn():
+    """The cached store connection, opened lazily. Fail-LOUD: raises PolicyStoreError when the store is
+    unreachable (policy ops must not silently no-op). Bootstraps the schema once on first success."""
+    with _conn_lock:
+        c = _conn_state["conn"]
+        if c is not None and not getattr(c, "closed", False):
+            return c
+        try:
+            c = _store.connect()
+            if not _conn_state["bootstrapped"]:
+                _store.bootstrap(c)
+                _conn_state["bootstrapped"] = True
+            _conn_state["conn"] = c
+            return c
+        except Exception as e:  # noqa: BLE001 — normalize any driver/connection error
+            _conn_state["conn"] = None
+            raise PolicyStoreError(f"policy store unreachable: {e}") from e
 
 
-def _put(key: str, obj: dict) -> None:
-    import json
+def _invalidate_conn(bad_conn=None) -> None:
+    """Drop+close the cached connection so the next `_conn()` reconnects — identity-scoped so a stale
+    invalidator can't close a healthy reconnection another thread established (mirrors quality.py)."""
+    with _conn_lock:
+        c = _conn_state["conn"]
+        if bad_conn is not None and c is not bad_conn:
+            return
+        _conn_state["conn"] = None
+    if c is not None:
+        try:
+            c.close()
+        except Exception:  # noqa: BLE001
+            pass
 
+
+def reset_conn() -> None:
+    """Test seam: drop the cached connection + bootstrap flag (so a test can swap `_store`)."""
+    with _conn_lock:
+        _conn_state["conn"] = None
+        _conn_state["bootstrapped"] = False
+
+
+def _op(fn):
+    """Run a store op on the cached connection, mapping any failure to PolicyStoreError and invalidating
+    the connection so a transient blip self-heals on the next call."""
+    conn = _conn()
     try:
-        _s3().put_object(Bucket=RESULTS_BUCKET, Key=key, Body=json.dumps(obj).encode(),
-                         ContentType="application/json")
-    except Exception as e:
-        raise PolicyStoreError(f"cannot write {key}: {e}") from e
-
-
-def _missing(e) -> bool:
-    """True only for a confirmed 404-shaped error (same discrimination quality.py uses)."""
-    resp = getattr(e, "response", None)
-    return isinstance(resp, dict) and resp.get("Error", {}).get("Code") in ("404", "NoSuchKey")
-
-
-def _get(key: str):
-    """None ONLY for a confirmed-missing key. A transient S3/MinIO failure must raise (Codex
-    review, 018): mapping it to None turned store outages into false 404s and could make the
-    scheduler believe a parked PendingRetrain vanished — losing the retry."""
-    import json
-
-    try:
-        return json.loads(_s3().get_object(Bucket=RESULTS_BUCKET, Key=key)["Body"].read())
-    except Exception as e:
-        if _missing(e):
-            return None
-        raise PolicyStoreError(f"cannot read {key}: {e}") from e
-
-
-def _delete(key: str) -> None:
-    """Idempotent on a missing key; a transient failure RAISES (Codex round 2, 018) — a
-    swallowed delete let DELETE /policies return success while the policy (and its pending
-    retrain) survived the outage and kept scheduling."""
-    try:
-        _s3().delete_object(Bucket=RESULTS_BUCKET, Key=key)
-    except Exception as e:
-        if not _missing(e):
-            raise PolicyStoreError(f"cannot delete {key}: {e}") from e
+        return fn(conn)
+    except _store.StoreError as e:
+        _invalidate_conn(conn)
+        raise PolicyStoreError(str(e)) from e
+    except Exception as e:  # noqa: BLE001 — any store-op failure is a 502, and drops the connection
+        _invalidate_conn(conn)
+        raise PolicyStoreError(f"policy store operation failed: {e}") from e
 
 
 # --- policy CRUD (FR-179) ---------------------------------------------------------------------
@@ -92,61 +114,48 @@ def put_policy(model_name: str, doc: dict, updated_by: str = "operator") -> dict
     try:
         policy = ModelPolicy.from_json(doc)
     except ContractError as e:
-        raise PolicyError(str(e)) from e
-    _put(f"{POLICY_PREFIX}{model_name}.json", policy.to_dict())
-    return policy.to_dict()
+        raise PolicyError(str(e)) from e  # never store an invalid declaration (FR-179)
+    d = policy.to_dict()
+    _op(lambda c: _store.put_policy(c, model_name, d, d["updated_at"], updated_by))
+    return d
 
 
 def get_policy(model_name: str):
-    doc = _get(f"{POLICY_PREFIX}{model_name}.json")
+    doc = _op(lambda c: _store.get_policy(c, model_name))
     return doc if doc and doc.get("model_name") else None
 
 
 def list_policies() -> list:
-    try:
-        keys = store.list_keys(_s3(), RESULTS_BUCKET, POLICY_PREFIX)
-    except Exception as e:
-        raise PolicyStoreError(f"cannot list policies: {e}") from e
-    out = []
-    for k in keys:
-        if k.startswith((PENDING_PREFIX, STATUS_PREFIX)):
-            continue  # sub-prefixes share the policies/ root
-        doc = _get(k)
-        if doc and doc.get("model_name"):
-            out.append(doc)
-    out.sort(key=lambda d: d.get("model_name", ""))
-    return out
+    return _op(lambda c: _store.list_policies(c))  # indexed table scan (SC-111: no O(N) object listing)
 
 
 def delete_policy(model_name: str) -> None:
-    _delete(f"{POLICY_PREFIX}{model_name}.json")
-    _delete(f"{PENDING_PREFIX}{model_name}.json")
-    _delete(f"{STATUS_PREFIX}{model_name}.json")
+    _op(lambda c: _store.delete_policy(c, model_name))  # pending + status go with the row
 
 
 # --- queue-of-one pending retrain (FR-182; durable, restart-resumable) --------------------------
 
 def get_pending(model_name: str):
-    return _get(f"{PENDING_PREFIX}{model_name}.json")
+    return _op(lambda c: _store.get_pending(c, model_name))
 
 
 def save_pending(pending: dict) -> None:
     PendingRetrain.from_json(pending)  # shape check — never store junk
-    _put(f"{PENDING_PREFIX}{pending['model_name']}.json", pending)
+    _op(lambda c: _store.set_pending(c, pending["model_name"], pending))
 
 
 def clear_pending(model_name: str) -> None:
-    _delete(f"{PENDING_PREFIX}{model_name}.json")
+    _op(lambda c: _store.clear_pending(c, model_name))
 
 
 # --- per-model check status (the Monitor page's data source) ------------------------------------
 
 def save_status(model_name: str, status: dict) -> None:
-    _put(f"{STATUS_PREFIX}{model_name}.json", status)
+    _op(lambda c: _store.set_status(c, model_name, status))
 
 
 def get_status(model_name: str):
-    return _get(f"{STATUS_PREFIX}{model_name}.json")
+    return _op(lambda c: _store.get_status(c, model_name))
 
 
 def policy_status(model_name: str):
@@ -157,8 +166,8 @@ def policy_status(model_name: str):
         "policy": policy,
         "status": get_status(model_name) or {},
         "pending_retrain": get_pending(model_name),
-        "open_suggestions": [s for s in list_suggestions() if
-                             s.get("model_name") == model_name and s.get("state") == "open"],
+        "open_suggestions": _op(
+            lambda c: _store.list_suggestions(c, state="open", model_name=model_name)),
     }
 
 
@@ -166,60 +175,57 @@ def policy_status(model_name: str):
 
 def create_suggestion(model_name: str, candidate_version: str, gate_verdict: dict,
                       shadow_verdict=None, *, state: str = "open", actor=None) -> dict:
-    # Idempotent per (model, version, state) — Codex round 4 (018): the scheduler clears its
-    # watch only AFTER this write lands, so a status-store blip there re-runs the terminal
-    # handling next tick; that retry must not mint a second open suggestion (or a second
-    # auto-promoted audit row) for the same candidate.
-    try:
-        for s in list_suggestions(state=state):
-            if (s.get("model_name") == model_name
-                    and str(s.get("candidate_version")) == str(candidate_version)):
-                return s
-    except PolicyStoreError:
-        pass  # listing down — fall through to the write (worst case is the old duplicate risk)
+    # Idempotent per (model, version, state) — Codex round 4 (018): the scheduler clears its watch only
+    # AFTER this write lands, so a status-store blip there re-runs the terminal handling next tick; that
+    # retry must not mint a second open suggestion OR a second auto-promoted audit row for the candidate.
+    existing = _op(lambda c: _store.find_suggestion(c, model_name, candidate_version, state))
+    if existing is not None:
+        return existing
     rec = PromotionSuggestion(
         id=uuid.uuid4().hex[:12], model_name=model_name, candidate_version=candidate_version,
         gate_verdict=gate_verdict or {}, shadow_verdict=shadow_verdict, state=state,
         created_at=time.time(),
         resolved_at=time.time() if state == "auto-promoted" else None, actor=actor)
     rec.validate()
-    _put(f"{SUGGESTION_PREFIX}{rec.id}.json", rec.to_dict())
-    return rec.to_dict()
+    d = rec.to_dict()
+    _op(lambda c: _store.create_suggestion(c, d))
+    return d
 
 
 def get_suggestion(suggestion_id: str):
-    return _get(f"{SUGGESTION_PREFIX}{suggestion_id}.json")
+    return _op(lambda c: _store.get_suggestion(c, suggestion_id))
 
 
 def list_suggestions(state: str = None) -> list:
-    try:
-        keys = store.list_keys(_s3(), RESULTS_BUCKET, SUGGESTION_PREFIX)
-    except Exception as e:
-        raise PolicyStoreError(f"cannot list suggestions: {e}") from e
-    out = [s for s in (_get(k) for k in keys) if s]
-    if state:
-        out = [s for s in out if s.get("state") == state]
-    out.sort(key=lambda s: s.get("created_at", 0), reverse=True)
-    return out
+    return _op(lambda c: _store.list_suggestions(c, state=state))
 
 
 def resolve_suggestion(suggestion_id: str, state: str, actor: str = "operator"):
-    rec = get_suggestion(suggestion_id)
-    if rec is None:
+    # Atomic terminal transition: the store's `UPDATE … WHERE state='open'` admits exactly one resolver.
+    updated = _op(lambda c: _store.resolve_suggestion(c, suggestion_id, state, actor, time.time()))
+    if updated is not None:
+        return updated
+    # 0 rows updated → either the id doesn't exist (→ None/404) or it was already resolved (→ 409). One
+    # follow-up read disambiguates (the atomic UPDATE already closed the race window).
+    current = get_suggestion(suggestion_id)
+    if current is None:
         return None
-    if rec.get("state") != "open":
-        raise SuggestionConflict(f"suggestion {suggestion_id} is already {rec.get('state')}")
-    rec.update(state=state, resolved_at=time.time(), actor=actor)
-    _put(f"{SUGGESTION_PREFIX}{suggestion_id}.json", rec)
-    return rec
+    raise SuggestionConflict(f"suggestion {suggestion_id} is already {current.get('state')}")
 
 
 # --- dataset resolution (FR-181) -----------------------------------------------------------------
 
+def _missing(e) -> bool:
+    """True only for a confirmed 404-shaped error (same discrimination quality.py uses)."""
+    resp = getattr(e, "response", None)
+    return isinstance(resp, dict) and resp.get("Error", {}).get("Code") in ("404", "NoSuchKey")
+
+
 def resolve_dataset_version(name: str, version: str) -> str:
     """`latest` → the newest registered version of `name` (by manifest registered_at); anything
     else is returned as-is (a pinned version). Raises PolicyError when nothing is registered —
-    a breach with no data to retrain on is a loud condition, not a silent no-op."""
+    a breach with no data to retrain on is a loud condition, not a silent no-op. Dataset artifacts
+    stay in object storage (not US4 state), so this path is unchanged from the pre-cutover code."""
     if version != "latest":
         return version
     from . import datasets
