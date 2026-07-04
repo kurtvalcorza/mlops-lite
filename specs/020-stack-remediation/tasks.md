@@ -10,7 +10,7 @@ Tests are house-mandatory: every behavior task ships its regression in the same 
 
 ## Phase 1: Setup
 
-- [ ] **T401** Garage infra scaffold (research R2, contracts/store-migration.md §bootstrap):
+- [x] **T401** Garage infra scaffold (research R2, contracts/store-migration.md §bootstrap):
   `infra/garage/garage.toml` (single node, `replication_factor = 1`, `s3_region` = the
   existing `AWS_DEFAULT_REGION` value, data/metadata on a named volume) +
   `infra/garage/init.sh` (idempotent one-shot: layout assign/apply → 4 buckets → key create →
@@ -20,7 +20,7 @@ Tests are house-mandatory: every behavior task ships its regression in the same 
   REVERSED vs MinIO per contracts §bootstrap: init.sh emits the CLI-minted pair, gen_secrets
   records it into `.env` (idempotent, never re-mints). Validate:
   `docker compose config` clean with both stores defined.
-- [ ] **T402** [P] Children/runtime dependency pin (research R5/R7):
+- [x] **T402** [P] Children/runtime dependency pin (research R5/R7):
   `serving/children/requirements.txt` with the single `fastapi`+`uvicorn` pin (shared by US2
   children and US3's optional agent runtime); documented install line for the host venv.
   No `bentoml` removal yet (that is T412, after the golden gates).

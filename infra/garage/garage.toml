@@ -1,0 +1,28 @@
+# Garage single-node config (020 US1, T401 — research R2). Mirrors the infra/{mlflow,prometheus}
+# house pattern: config lives in-repo, secrets do NOT — rpc_secret and the admin token come from
+# the GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN env vars (docker-compose.yml, provisioned by
+# scripts/gen_secrets). Data + metadata live on the `garagedata` named volume.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+
+# One box, one node — Principle III. (replication_factor, not the pre-1.0 replication_mode.)
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+# Single node: the RPC "public" address is itself. Never published on the host.
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+# Same region string the clients already send (AWS_DEFAULT_REGION) — no client-side change
+# at cutover; path-style addressing (what every client uses against a custom endpoint) is
+# Garage's default mode (research R2).
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[admin]
+# Token-authed bootstrap surface for infra/garage/init.py (the createbuckets replacement).
+# Reachable only inside the container's network namespace — not published on the host.
+api_bind_addr = "[::]:3903"
