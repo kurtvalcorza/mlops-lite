@@ -11,13 +11,18 @@ absent data, compute the like-for-like verdict, and persist it. The pure pieces 
 `build_verdict`) unit-test with injected records; the trainer-side challenger scoring lives in
 `training/flows/shadow_replay.py` and is invoked through an injectable seam so the orchestration tests
 need no GPU.
+
+US4 (T374): the replay window resolves through the relational `capture_index⋈predictions⋈labels`
+join (`quality._store.replay_window`) — one bounded, TTL-filtered index scan — instead of listing
+every `inputs/<modality>/` object and reading three objects per pid. Only the recoverable input body
+and the champion's logged output are still fetched from MinIO (on the ≤`window_n` joined rows).
+FR-176: quality is now imported package-relative (the trainer reaches these cores through
+`platformlib.gateway_bridge`, never by loading shadow.py standalone).
 """
 import time
+from datetime import datetime, timezone
 
-try:
-    from . import quality
-except ImportError:  # standalone (offline tests, or the trainer path with gateway/app on sys.path)
-    import quality
+from . import quality
 
 
 class ShadowError(Exception):
@@ -96,71 +101,80 @@ def build_verdict(name, champion_version, challenger_version, modality, pairs, c
 
 # --- I/O: resolve the replay window from the store ------------------------------------------------
 
-def resolve_window(name, version, modality, *, window_n=None, s3=None, now=None, ttl_s=None):
-    """Join the captured inputs ↔ champion predictions ↔ labels from the `results` bucket into the replay
-    window for the champion `name@version` + `modality`. Reuses 013's store helpers; bounded GETs (only
-    the captured-input pids, themselves capped by the 016 policy).
+def resolve_window(name, version, modality, *, window_n=None, now=None, ttl_s=None):
+    """Join the captured inputs ↔ champion predictions ↔ labels into the replay window for the
+    champion `name@version` + `modality`. US4: the join is the relational
+    `capture_index⋈predictions⋈labels` `store.replay_window` (a bounded, indexed, TTL-filtered scan
+    of the newest `window_n` rows) — not a listing of every `inputs/<modality>/` object. Only the
+    recoverable input body (`input_ref`) and the champion's logged output (`payload_ref`) are then
+    GET from MinIO, on those ≤`window_n` rows.
 
     Two robustness properties beyond the pure join:
-      - **TTL filter at resolve time**, not just on capture-write: if traffic for a modality stops, no
-        later `capture_input` runs the prune, so a delayed label could otherwise pull an expired input
-        into a ready window. The ts is parsed from the key name (no extra GET). `now`/`ttl_s` are
-        injectable for tests; `ttl_s<=0` disables (as in `inputs_to_prune`).
-      - **Store-read failures surface** (ShadowError) instead of silently dropping a row: only a
-        *confirmed-missing* key (404/NoSuchKey — a prune race, or a never-logged prediction/pending
-        label) is skipped; a transient MinIO/S3 error aborts the replay rather than compute an advisory
-        verdict on a partial, biased window.
+      - **TTL filter at resolve time**, not just on capture-write: if traffic for a modality stops,
+        no later `capture_input` runs the prune, so a delayed label could otherwise pull an expired
+        input into a ready window. The cutoff is applied IN THE QUERY (`captured_at >= cutoff`), no
+        key parse. `now`/`ttl_s` are injectable for tests; `ttl_s<=0` disables (as `inputs_to_prune`).
+      - **Store-read failures surface** (ShadowError) instead of silently dropping a row: a failed
+        window query aborts, and for the per-row body GETs only a *confirmed-missing* object
+        (404/NoSuchKey — a prune race) is skipped; a transient MinIO error aborts the replay rather
+        than compute an advisory verdict on a partial, biased window.
     """
     window_n = quality.WINDOW_N if window_n is None else window_n
     modality = quality.normalize_modality(modality)
-    s3 = s3 or quality._s3()
     now = time.time() if now is None else now
     ttl_s = quality.SHADOW_CAPTURE_TTL_S if ttl_s is None else ttl_s
+    ttl_cutoff = (datetime.fromtimestamp(now - ttl_s, timezone.utc)
+                  if ttl_s and ttl_s > 0 else None)
+    conn = quality._conn()
+    if conn is None:
+        raise ShadowError("shadow-replay store unreachable — cannot resolve the replay window")
+    try:
+        rows = quality._store.replay_window(conn, modality, name, str(version), window_n,
+                                            ttl_cutoff=ttl_cutoff)
+    except Exception as e:
+        quality._invalidate_conn(conn)  # a broken connection self-heals on the next replay
+        raise ShadowError(f"shadow-replay window query failed: {e}") from e
     input_recs, predictions, labels = [], {}, {}
-    for key in quality._list_keys(s3, f"{quality.INPUT_PREFIX}{modality}/"):
-        if ttl_s and ttl_s > 0:
-            try:
-                _, ts_key, _ = quality.parse_input_key(key)
-            except Exception:
-                ts_key = None
-            if ts_key is not None and (now - ts_key) > ttl_s:
-                continue  # expired per the retention policy — never score stale traffic
+    for r in rows:
+        pid = r["prediction_id"]
         try:
-            rec = quality._get_json(key)
+            rec = quality._get_json(r["input_ref"])  # the recoverable served input body
         except Exception as e:
             if quality._missing(e):
-                continue  # deleted between list and get (a prune race) → skip
-            raise ShadowError(f"shadow-replay store read failed for input {key}: {e}") from e
-        pid = rec.get("prediction_id")
-        if not pid:
-            continue
+                continue  # input body pruned between the index row and the get → skip
+            raise ShadowError(f"shadow-replay store read failed for input {pid}: {e}") from e
         input_recs.append(rec)
+        labels[pid] = r["label"]  # the label is relational now (no per-pid object GET)
+        payload_ref = r.get("payload_ref")
+        if not payload_ref:
+            continue  # streamed / no output body → unscorable, excluded by join_window
         try:
-            predictions[pid] = quality._get_json(f"{quality.PRED_PREFIX}{pid}.json")
+            predictions[pid] = quality._get_json(payload_ref)  # the champion's logged output body
         except Exception as e:
-            if not quality._missing(e):  # transient store error → abort, don't bias the window
-                raise ShadowError(f"shadow-replay store read failed for prediction {pid}: {e}") from e
-            # confirmed-missing → never logged a champion prediction → excluded by join_window
-        try:
-            labels[pid] = quality._get_json(f"{quality.LABEL_PREFIX}{pid}.json").get("label")
-        except Exception as e:
-            if not quality._missing(e):
-                raise ShadowError(f"shadow-replay store read failed for label {pid}: {e}") from e
-            # confirmed-missing → unlabeled/pending → excluded by join_window
+            if quality._missing(e):
+                continue  # champion output pruned → excluded by join_window
+            raise ShadowError(f"shadow-replay store read failed for prediction {pid}: {e}") from e
     return join_window(input_recs, predictions, labels, name=name, version=version, modality=modality,
                        window_n=window_n)
 
 
-def has_captured_inputs(modality, *, s3=None) -> bool:
-    """True if ANY recoverable input is captured for `modality` (else shadow-replay has no corpus)."""
-    s3 = s3 or quality._s3()
+def has_captured_inputs(modality) -> bool:
+    """True if ANY recoverable input is captured for `modality` (else shadow-replay has no corpus).
+    US4: an indexed `capture_index` existence check, not a listing; a store outage fails loud."""
     modality = quality.normalize_modality(modality)
-    return bool(quality._list_keys(s3, f"{quality.INPUT_PREFIX}{modality}/"))
+    conn = quality._conn()
+    if conn is None:
+        raise ShadowError("shadow-replay store unreachable — cannot check the capture corpus")
+    try:
+        return quality._store.has_captures(conn, modality)
+    except Exception as e:
+        quality._invalidate_conn(conn)  # reconnect on the next check rather than reuse a stale connection
+        raise ShadowError(f"shadow-replay corpus check failed: {e}") from e
 
 
 # --- guards: decide whether a replay can run (US3) ------------------------------------------------
 
-def prepare(name, version, modality, *, window_n=None, min_pairs=None, s3=None) -> dict:
+def prepare(name, version, modality, *, window_n=None, min_pairs=None) -> dict:
     """Resolve the replay window and apply the US3 guards (FR-152). Returns either a **ready** result
     (`{"status": "ready", "pairs": [...]}`) or a terminal non-verdict status the endpoint surfaces:
 
@@ -176,9 +190,9 @@ def prepare(name, version, modality, *, window_n=None, min_pairs=None, s3=None) 
     if not quality.QUALITY_CAPTURE_IO:
         return {"status": "no_corpus",
                 "detail": "QUALITY_CAPTURE_IO is off — no replay inputs captured"}
-    if not has_captured_inputs(modality, s3=s3):
+    if not has_captured_inputs(modality):
         return {"status": "inputs_not_captured", "detail": f"inputs not captured for {modality}"}
-    pairs = resolve_window(name, version, modality, window_n=window_n, s3=s3)
+    pairs = resolve_window(name, version, modality, window_n=window_n)
     if len(pairs) < min_pairs:
         return {"status": "insufficient_data", "n_pairs": len(pairs), "min": min_pairs}
     return {"status": "ready", "pairs": pairs, "n_pairs": len(pairs)}
@@ -186,11 +200,11 @@ def prepare(name, version, modality, *, window_n=None, min_pairs=None, s3=None) 
 
 # --- persist / read the advisory verdict (results `shadow/` prefix) -------------------------------
 
-def persist_verdict(shadow_id: str, verdict: dict, *, s3=None) -> None:
+def persist_verdict(shadow_id: str, verdict: dict) -> None:
     quality._put_json(f"{quality.SHADOW_PREFIX}{shadow_id}.json", {**verdict, "shadow_id": shadow_id})
 
 
-def read_verdict(shadow_id: str, *, s3=None):
+def read_verdict(shadow_id: str):
     try:
         return quality._get_json(f"{quality.SHADOW_PREFIX}{shadow_id}.json")
     except Exception:
@@ -200,7 +214,7 @@ def read_verdict(shadow_id: str, *, s3=None):
 # --- orchestration: prepare → score the challenger → verdict → persist ----------------------------
 
 def run_replay(name, champion_version, challenger_version, modality, *, shadow_id, scorer,
-               window_n=None, min_pairs=None, s3=None) -> dict:
+               window_n=None, min_pairs=None) -> dict:
     """Full advisory shadow-replay: resolve+guard the window, run the challenger `scorer` over it, build
     the verdict, and persist it under `shadow/<id>`. Runs **on the trainer** (the `scorer` loads the
     challenger artifact under the GPU lease — one model in VRAM); the gateway dispatches it.
@@ -208,15 +222,15 @@ def run_replay(name, champion_version, challenger_version, modality, *, shadow_i
     `scorer(pairs, modality, challenger_version) -> [challenger_pred]` is the trainer-side seam
     (`training.flows.shadow_replay.score_challenger` on-hardware; injected in tests). A non-ready guard
     status is persisted + returned verbatim (no scoring). The champion is **not** re-run (FR-149)."""
-    prep = prepare(name, champion_version, modality, window_n=window_n, min_pairs=min_pairs, s3=s3)
+    prep = prepare(name, champion_version, modality, window_n=window_n, min_pairs=min_pairs)
     if prep["status"] != "ready":
         result = {**{k: v for k, v in prep.items() if k != "pairs"}, "shadow_id": shadow_id, "name": name}
-        persist_verdict(shadow_id, result, s3=s3)
+        persist_verdict(shadow_id, result)
         return result
     pairs = prep["pairs"]
     challenger_preds = scorer(pairs, modality, str(challenger_version))
     verdict = build_verdict(name, champion_version, challenger_version, modality, pairs, challenger_preds)
     verdict = {**verdict, "shadow_id": shadow_id, "name": name,
                "challenger": {**verdict["challenger"]}}
-    persist_verdict(shadow_id, verdict, s3=s3)
+    persist_verdict(shadow_id, verdict)
     return verdict

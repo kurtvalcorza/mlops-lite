@@ -94,14 +94,10 @@ def write_result(job_name: str, batch: dict, *, manifest_extra=None, s3=None) ->
 # --- I/O wrapper: load a dataset version, score it, write the artifact -----------------------------
 
 def _load_rows(dataset_name: str, dataset_version: str, s3=None) -> list:
-    try:
-        from .validation import parse_rows
-    except ImportError:  # loaded standalone (tests) — resolve via the gateway dir on sys.path
-        import sys
-        gw = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if gw not in sys.path:
-            sys.path.insert(0, gw)
-        from app.validation import parse_rows
+    # FR-176: package-relative only — the trainer reaches the batch core through platformlib, never
+    # by loading batch.py standalone, so the old `from app.validation import parse_rows` sys.path
+    # fallback is retired (the offline tests load batch.py as a package member).
+    from .validation import parse_rows
     s3 = s3 or _s3()
     bucket = os.getenv("DATASETS_BUCKET", "datasets")
     try:

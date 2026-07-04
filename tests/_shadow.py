@@ -1,40 +1,33 @@
-"""Offline harness for the 016 shadow-replay tests.
+"""Offline harness for the 016 shadow-replay tests (018 US4 store-backed).
 
-Loads `gateway/app/shadow.py` standalone, wired to a configured `quality` module (the same in-memory
-FakeS3-backed instance the 013 tests use) so the window join, verdict math, and the US3 guards run with
-no live store and no GPU. `shadow.py` falls back from `from . import quality` to `import quality`, so we
-register the configured quality under `sys.modules["quality"]` before loading shadow.
+Loads `gateway/app/shadow.py` as a member of the SAME synthetic package as its configured `quality`
+module (so shadow's `from . import quality` binds to the FakeS3+FakeStore-wired instance). The window
+join, verdict math, and the US3 guards run with no live store and no GPU. Seeds write BOTH the object
+bodies (input/prediction) into FakeS3 AND the relational index rows (predictions/labels/capture_index)
+into the FakeStore, since `resolve_window` now joins the store and reads only the ≤window_n bodies.
 """
-import importlib.util
-import os
-import sys
+import json
 
-from _quality import FakeS3, load_quality  # noqa: F401  (re-exported for the tests)
-
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP = os.path.join(REPO, "gateway", "app")
+from _pkgload import load_in_package, register_sibling
+from _quality import FakeS3, FakeStore, install_store, load_quality  # noqa: F401 (re-exported)
 
 
 class FakeS3Del(FakeS3):
-    def delete_object(self, Bucket, Key):
-        self.objs.pop(Key, None)
+    """FakeS3 already carries delete_object; kept as a named alias for the shadow tests' imports."""
 
 
 def load_shadow(quality_mod):
-    """Load shadow.py bound to `quality_mod` (its `import quality` resolves to this configured module)."""
-    sys.modules["quality"] = quality_mod
-    if APP not in sys.path:
-        sys.path.insert(0, APP)
-    spec = importlib.util.spec_from_file_location("shadow_under_test", os.path.join(APP, "shadow.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """Load shadow.py into quality_mod's package so its `from . import quality` resolves to it."""
+    pkg = quality_mod.__package__
+    register_sibling(pkg, "quality", quality_mod)
+    return load_in_package(pkg, "shadow")
 
 
 def make_quality(s3, **flags):
-    """A configured quality module: FakeS3 store + capture flags set for the test."""
+    """A configured quality module: FakeS3 store + FakeStore index + capture flags set for the test."""
     q = load_quality()
     q._s3 = lambda: s3
+    install_store(q)  # a fresh FakeStore, wired as quality._store
     q.QUALITY_CAPTURE_IO = flags.get("capture", True)
     q.QUALITY_LOGGING_ENABLED = flags.get("logging", True)
     # TTL off by default so the window/verdict tests (tiny absolute timestamps) exercise the join, not
@@ -43,24 +36,37 @@ def make_quality(s3, **flags):
     return q
 
 
+def _dt(ts):
+    """A tz-aware datetime for a float epoch ts (the store columns are timestamptz)."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, timezone.utc)
+
+
 def seed_input(s3, q, modality, pid, payload, ts):
-    s3.put_object(Bucket="results", Key=q._input_key(modality, pid, ts),
-                  Body=_json({"prediction_id": pid, "modality": q.normalize_modality(modality),
-                              "input": payload, "ts": ts}))
+    """The recoverable input: its body object in S3 + a capture_index row in the store."""
+    key = q._input_key(modality, pid, ts)
+    mod = q.normalize_modality(modality)
+    s3.put_object(Bucket="results", Key=key,
+                  Body=_json({"prediction_id": pid, "modality": mod, "input": payload, "ts": ts}))
+    q._store.capture_input(q._conn(), pid, mod, key, _dt(ts))
 
 
 def seed_prediction(s3, q, pid, *, name, version, modality, prediction, ts):
-    s3.put_object(Bucket="results", Key=f"{q.PRED_PREFIX}{pid}.json",
+    """The champion prediction: its OUTPUT body object in S3 + a predictions row in the store (a None
+    prediction is a streamed row — logged with streamed=True, excluded from scoring by the readers)."""
+    ref = f"{q.PRED_PREFIX}{pid}.json"
+    mod = q.normalize_modality(modality)
+    s3.put_object(Bucket="results", Key=ref,
                   Body=_json({"prediction_id": pid, "model_name": name, "model_version": str(version),
-                              "modality": q.normalize_modality(modality), "prediction": prediction,
-                              "ts": ts}))
+                              "modality": mod, "prediction": prediction, "ts": ts}))
+    q._store.log_prediction(q._conn(), pid, name, str(version), mod, _dt(ts),
+                            streamed=(prediction is None), payload_ref=ref)
 
 
 def seed_label(s3, q, pid, label, ts=0.0):
-    s3.put_object(Bucket="results", Key=f"{q.LABEL_PREFIX}{pid}.json",
-                  Body=_json({"prediction_id": pid, "label": label, "ts": ts}))
+    """The ground-truth label — fully relational now (a labels row; no object)."""
+    q._store.attach_label(q._conn(), pid, label, _dt(ts))
 
 
 def _json(obj):
-    import json
     return json.dumps(obj).encode()
