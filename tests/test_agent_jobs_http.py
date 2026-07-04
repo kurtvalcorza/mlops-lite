@@ -8,7 +8,6 @@ jobs fold-in added: the new `POST /jobs` (+ `GET /jobs?kind`), the legacy traine
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -24,6 +23,7 @@ from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from _agentstore import FakeJobStore  # noqa: E402
 
 
 def _instant_runners(update):
@@ -35,7 +35,7 @@ def _instant_runners(update):
 def _serve(update):
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 8.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-jobs-"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     jobs = jobs_mod.JobManager(admission, journal, runners=_instant_runners(update))
     manager = lifecycle.EngineManager(admission, runtimes={})
     server = ThreadingHTTPServer(

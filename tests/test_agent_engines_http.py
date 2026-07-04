@@ -8,7 +8,6 @@ runtime-wedged, Codex rounds 7/8), strict path-shape rejection of malformed infe
 import json
 import os
 import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -25,6 +24,7 @@ from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from _agentstore import FakeJobStore  # noqa: E402
 
 
 class FakeLLM:
@@ -66,7 +66,7 @@ class FakeLLM:
 def _serve(adapter):
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-eng-"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     rt = lifecycle.EngineRuntime(adapter, admission)
     manager = lifecycle.EngineManager(admission, runtimes={"llm": rt})
     server = ThreadingHTTPServer(
@@ -181,7 +181,7 @@ class FakeVision:
 def _serve_vision():
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-vis-"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     rt = lifecycle.EngineRuntime(FakeVision(), admission)
     manager = lifecycle.EngineManager(admission, runtimes={"vision": rt})
     server = ThreadingHTTPServer(

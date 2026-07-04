@@ -168,5 +168,77 @@ def test_suggestion_lifecycle_and_atomic_resolve(db):
             cur.execute("DELETE FROM suggestions WHERE id = %s", (sid,))
 
 
+# -- US4 T375-B: jobs (the durable host-agent journal) --------------------------------------------
+
+def test_ddl_has_jobs_listing_index():
+    assert "ix_jobs_kind" in store.DDL
+
+
+def test_job_record_round_trips_through_columns_and_catch_all(db):
+    jid = f"test-job-{uuid.uuid4().hex[:8]}"
+    now = float(uuid.uuid4().int % 1_000_000 + 1_700_000_000)  # a plausible, unique-ish epoch
+    try:
+        # submit: the flat record → typed columns + request + the `result` catch-all
+        store.upsert_job(db, {"job_id": jid, "kind": "finetune", "modality": "vision",
+                              "request": {"dataset_name": "d", "dataset_version": "1"},
+                              "state": "queued", "submitted_at": now, "run_id": jid})
+        got = store.get_job(db, jid)
+        assert got["state"] == "queued" and got["modality"] == "vision"
+        assert got["request"] == {"dataset_name": "d", "dataset_version": "1"}
+        assert got["run_id"] == jid                 # the legacy id_key alias survives the catch-all
+        assert "started_at" not in got and "ended_at" not in got   # unset timestamps are omitted
+        assert store.count_active_jobs(db) >= 1
+        # a terminal transition: kind-specific fields flatten into the catch-all, timestamps set
+        store.upsert_job(db, {"job_id": jid, "kind": "finetune", "modality": "vision",
+                              "request": {"dataset_name": "d", "dataset_version": "1"},
+                              "state": "completed", "submitted_at": now,
+                              "started_at": now + 1, "ended_at": now + 2,
+                              "run_id": jid, "mlflow_run_id": "mlf9", "model": {"version": "7"}})
+        done = store.get_job(db, jid)
+        assert done["state"] == "completed" and done["mlflow_run_id"] == "mlf9"
+        assert done["model"] == {"version": "7"}
+        assert done["started_at"] == now + 1 and done["ended_at"] == now + 2
+        assert jid in [r["job_id"] for r in store.list_jobs(db, kind="finetune")]
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM jobs WHERE job_id = %s", (jid,))
+
+
+def test_mark_jobs_interrupted_flips_only_non_terminal(db):
+    a, b, c = (f"test-job-{uuid.uuid4().hex[:8]}" for _ in range(3))
+    now = float(uuid.uuid4().int % 1_000_000 + 1_700_000_000)
+    try:
+        store.upsert_job(db, {"job_id": a, "kind": "finetune", "modality": "llm", "request": {},
+                              "state": "running", "submitted_at": now, "started_at": now})
+        store.upsert_job(db, {"job_id": b, "kind": "finetune", "modality": "llm", "request": {},
+                              "state": "queued", "submitted_at": now})
+        store.upsert_job(db, {"job_id": c, "kind": "finetune", "modality": "llm", "request": {},
+                              "state": "completed", "submitted_at": now, "ended_at": now})
+        flipped = set(store.mark_jobs_interrupted(db, "agent restart", now + 5))
+        assert {a, b} <= flipped and c not in flipped     # only queued/running, never terminal
+        marked = store.get_job(db, a)
+        assert marked["state"] == "interrupted" and marked["reason"] == "agent restart"
+        assert store.get_job(db, c)["state"] == "completed"
+        # idempotent: a second sweep flips nothing already terminal
+        assert not (set(store.mark_jobs_interrupted(db, "agent restart", now + 6)) & {a, b, c})
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM jobs WHERE job_id = ANY(%s)", ([a, b, c],))
+
+
+def test_import_job_is_idempotent_on_conflict(db):
+    jid = f"test-job-{uuid.uuid4().hex[:8]}"
+    now = float(uuid.uuid4().int % 1_000_000 + 1_700_000_000)
+    try:
+        rec = {"job_id": jid, "kind": "batch", "modality": "tabular", "request": {"x": 1},
+               "state": "succeeded", "submitted_at": now}
+        assert store.import_job(db, rec) is True                          # first insert lands
+        assert store.import_job(db, {**rec, "state": "failed"}) is False  # ON CONFLICT DO NOTHING
+        assert store.get_job(db, jid)["state"] == "succeeded"             # original untouched
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM jobs WHERE job_id = %s", (jid,))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

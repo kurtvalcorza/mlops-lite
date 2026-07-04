@@ -18,6 +18,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from _agentstore import FakeJobStore  # noqa: E402
 from hostagent import admission as adm  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
@@ -30,8 +31,10 @@ def _admission(free_gb=20.0):
                          gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: free_gb))
 
 
-def _journal(tmp_path):
-    return Journal(str(tmp_path / "journal.jsonl"))
+def _journal(tmp_path=None):
+    # US4 T375-B: the journal is Postgres-backed now — a fresh in-memory FakeJobStore per journal
+    # (tmp_path is vestigial; kept so the many call sites don't churn).
+    return Journal(store=FakeJobStore())
 
 
 def _const_runners(update):
@@ -195,7 +198,7 @@ def test_terminal_journal_write_precedes_slot_release(tmp_path):
                 seen["holder"] = a.holder()
             return super().transition(job_id, to, **kw)
 
-    jm = jobs_mod.JobManager(a, SpyJournal(str(tmp_path / "j.jsonl")),
+    jm = jobs_mod.JobManager(a, SpyJournal(store=FakeJobStore()),
                              runners=_const_runners({"status": "completed"}))
     _, p = jm.submit("finetune", dict(FT_REQ))
     assert _wait_state(jm, p["run_id"], "completed")
@@ -249,15 +252,15 @@ def test_shadow_uses_client_shadow_id(tmp_path):
 
 
 # ---- durable journal lifecycle + restart replay -----------------------------------------------
-def test_journal_records_and_replays(tmp_path):
-    path = str(tmp_path / "j.jsonl")
-    jm = jobs_mod.JobManager(_admission(), Journal(path),
+def test_journal_records_and_replays():
+    store = FakeJobStore()
+    jm = jobs_mod.JobManager(_admission(), Journal(store=store),
                              runners=_const_runners({"status": "completed", "mlflow_run_id": "r9",
                                                      "model": {"version": "4"}}))
     code, p = jm.submit("finetune", dict(FT_REQ))
     _wait_state(jm, p["run_id"], "completed")
-    # A fresh Journal folding the same file rebuilds the terminal record incl. the result fields.
-    replayed = Journal(path).get(p["run_id"])
+    # A fresh Journal hydrating the same table rebuilds the terminal record incl. the result fields.
+    replayed = Journal(store=store).get(p["run_id"])
     assert replayed["state"] == "completed" and replayed["mlflow_run_id"] == "r9"
     assert replayed["model"]["version"] == "4"
 

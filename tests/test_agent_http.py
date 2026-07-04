@@ -8,7 +8,6 @@ used to defeat the exact match and return the unfiltered list), a stray `/jobsxy
 import json
 import os
 import sys
-import tempfile
 import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -21,6 +20,7 @@ from hostagent import admission as adm  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
+from _agentstore import FakeJobStore  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 from platformlib.contracts import AgentHealth, EngineState  # noqa: E402
 from test_agent_lifecycle import FakeEngine  # noqa: E402 — the shared fake adapter
@@ -29,7 +29,7 @@ from test_agent_lifecycle import FakeEngine  # noqa: E402 — the shared fake ad
 def _serve():
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-http-"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     journal.submit({"job_id": "t1", "kind": "train", "state": "queued", "submitted_at": 1.0})
     journal.submit({"job_id": "b1", "kind": "batch", "state": "queued", "submitted_at": 2.0})
     manager = lifecycle.EngineManager(admission, runtimes={})
@@ -70,7 +70,7 @@ def test_jobs_routing_query_filter_and_exact_match():
 def _serve_with_engine():
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
-    journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-http-h"), "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     rt = lifecycle.EngineRuntime(FakeEngine("fake"), admission, sleep=lambda s: None)
     manager = lifecycle.EngineManager(admission, runtimes={"fake": rt})
     rt.ensure_loaded()                                # holder=fake, engine ready

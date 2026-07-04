@@ -18,6 +18,7 @@ if REPO not in sys.path:
 from hostagent import admission as adm  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from _agentstore import FakeJobStore  # noqa: E402
 
 WINDOW = 900.0
 FT_REQ = {"dataset_name": "d", "dataset_version": "1", "output_name": "o"}
@@ -49,7 +50,7 @@ def test_stale_completed_starts_fresh():
 def _jm(tmpdir, runner, clock=time.time):
     admission = adm.Admission(vram_budget_gb=12.0,
                               gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 20.0))
-    journal = Journal(os.path.join(tmpdir, "journal.jsonl"))
+    journal = Journal(store=FakeJobStore())
     runners = {k: runner for k in jobs_mod.KINDS}
     return jobs_mod.JobManager(admission, journal, runners=runners, clock=clock)
 

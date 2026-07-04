@@ -38,7 +38,6 @@ AGENT_BIND = os.getenv("AGENT_BIND", "0.0.0.0")
 # `SWAP_CONTROL_SECRET` is still accepted as a fallback (a deployment that set it pre-018 keeps
 # working) but the agent's state-changing routes standardize on the agent-control secret.
 CONTROL_SECRET = os.getenv("AGENT_CONTROL_SECRET") or os.getenv("SWAP_CONTROL_SECRET", "")
-JOURNAL_PATH = os.path.join(STATE_DIR, "journal.jsonl")
 
 _started_at = time.time()
 _interrupted_at_start = 0
@@ -48,7 +47,7 @@ def build_agent():
     """Wire the agent's components. Admission is the single in-process GPU authority (T364 retired
     the cross-process lockfile shim)."""
     admission = adm.Admission(vram_budget_gb=VRAM_GB)
-    journal = Journal(JOURNAL_PATH)
+    journal = Journal()  # US4 T375-B: durable job state lives in the Postgres `jobs` table now
     from hostagent import adapters  # one runtime per registered engine adapter (T358+)
 
     manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission))

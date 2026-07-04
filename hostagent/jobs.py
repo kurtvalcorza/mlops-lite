@@ -215,7 +215,16 @@ class JobManager:
                       "request": request, "submitted_at": self.clock(), spec.id_key: job_id}
             for field in spec.extra:  # byte-compat: legacy record carries these (null until done)
                 record.setdefault(field, None)
-            self.journal.submit(record)
+            try:
+                self.journal.submit(record)
+            except Exception:
+                # US4 T375-B: the journal write is a Postgres upsert now (was a local fsync) — a store
+                # blip must not strand the GPU lease we just took. Release it before propagating so the
+                # next submit isn't wrongly refused with a 409 by a lease no live job holds. `_active`
+                # is still unset here, so only the lease needs unwinding.
+                if spec.gpu:
+                    self.admission.release(self.tenant)
+                raise
             if key is not None:
                 # Prune keys whose job has aged out of the dedup window before recording this one, so
                 # _run_keys stays bounded to roughly the in-flight + recent set over a long agent
