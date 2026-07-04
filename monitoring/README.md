@@ -28,13 +28,26 @@ reference dataset  ─┐
                     ├─► POST /monitor/check ─► PSI per feature ─► report (MinIO results bucket)
 current dataset    ─┘                                              │
                                                                    ▼  (if drift & retrain spec)
-                                          POST trainer /train  ◄── drift breach
+                              POST /train (host agent) ◄── drift breach
 ```
 
 - Reports are stored in the MinIO `results` bucket and listed via `GET /monitor`.
 - `max_psi` and a `dataset_drift` flag are exported as Prometheus gauges
   (`gateway_drift_score`, `gateway_dataset_drift`) and visualized in Grafana
   ([`infra/grafana/provisioning/dashboards/`](../infra/grafana/provisioning/dashboards/)).
+
+> **Since 018:** the drift/quality breach → retrain path above is the *mechanism*; the closed
+> **policy loop** (018 US3) is the *orchestration*. Declarative per-model policies (API + UI editor,
+> `POST/GET/PUT/DELETE /policies`) run these checks on a schedule via a gateway-lifespan task, launch
+> the modality-correct retrain on the latest dataset (the byte-compatible `/train` now served by the
+> **GPU host agent**), gate it (011), and promote per the policy's mode (`manual` / `suggest` /
+> `auto-on-green`, consuming 016 shadow verdicts). Retrain launches are idempotent (019).
+>
+> **Storage (018 US4, in progress):** the high-churn monitoring state (predictions, labels, captured
+> inputs) is migrating off O(N) MinIO object scans onto the resident `gateway` Postgres DB —
+> `platformlib.store`'s relational client + schema landed in T373; the write-path cutovers follow in
+> T374–T376. Until they land, predictions/labels/reports are still written to the MinIO `results` bucket
+> as described above.
 
 ## Use
 
