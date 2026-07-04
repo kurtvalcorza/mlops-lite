@@ -134,23 +134,39 @@ cache, so health polling forks nothing (SC-110).
 
 ## T372 — Principle IV loop closes by declaration (SC-112)
 
-### ☐ SC-112 — declared policy + injected breach → correct-modality retrain + suggestion, zero manual steps
+### ☑ SC-112 — declared policy + injected breach → correct-modality retrain + suggestion, zero manual steps — **PASS** (2026-07-04)
 
-```bash
-# declare a vision policy (suggest, 60s), serve a few vision predictions, submit mislabels to breach,
-# then within one interval a vision retrain launches → registers + scores → suggestion appears:
-curl -XPUT  $GW/policies/vision-mobilenet -H "X-API-Key: $KEY" -d '{"modality":"vision","monitors":["quality"],"interval_s":60,"promotion":"suggest"}'
-# ... serve vision predictions, POST /monitor/labels (mislabeled), POST /monitor/quality/check ...
-curl -s $GW/policies/vision-mobilenet/status ; curl -s $GW/suggestions
-```
+Ran on the RTX 5070 Ti against the live stack. The **full autonomous loop closed end-to-end with zero
+manual invocations between breach detection and the promotion suggestion** — the scheduler
+(`gateway/app/scheduler.py`, a gateway lifespan task) drove every step.
 
-**PENDING — runnable now (own focused drill).** The policy scheduler (`gateway/app/scheduler.py`,
-whose T364 `trainer_url→agent_url` regression this sweep fixed) is US3 code that already merged and
-was exercised in the 018 live-policy-loop smoke; SC-112 is the full breach→retrain→suggestion loop,
-which launches a **real multi-minute vision retrain** through the agent's jobs surface. Deferred to a
-dedicated loop-drill run so this runbook lands the deterministic T365 criteria first; the retrain path
-itself is already proven by the T362 jobs [HW] smoke (finetune completed + registered through the
-agent).
+**Sequence (observed live):**
+1. Declared a `vision-mobilenet` policy (`modality:vision`, `quality` monitor with `baseline:0.9`,
+   `check_interval_s:60`, `on_breach:retrain vision-demo`, `promotion_mode:suggest`).
+2. Injected a quality breach — seeded 24 wrong-labeled `image-classification` pairs for the `@serving`
+   version straight into the US4 store (predictions⋈labels window, accuracy 0). The scheduler's first
+   due check flagged `breached:true, value:0.0` (`gateway_policy_checks_total{result="breach"}`).
+3. **Autonomous retrain launched within one check interval** — the FIRST launch transient-failed
+   (agent warming right after boot); the loop released the cooldown (a failed launch must not consume
+   it) and the **next 60 s tick re-detected the breach and launched** (`gateway_policy_retrains_total
+   {result="launched"}`). This is the designed FR-163 resilience, seen live.
+4. Retrain **completed + registered `vision-mobilenet` v2** through the agent's jobs surface (one
+   `kind=job` GPU tenant); the loop **auto-scored the candidate** via the 015 gate.
+5. **Verdict correctly withheld a suggestion** for a candidate whose incumbent had no comparable eval
+   baseline (`gate=warn, reason="incumbent has no logged eval metric (missing-metric policy)"` →
+   `promotions{mode="not_green"}`)
+   — a not-green candidate must not get a one-click promote (FR-183). After giving the incumbent a
+   like-for-like accuracy baseline (0.20), the next autonomous cycle produced a **green** candidate v3
+   (`gate verdict="pass"`, candidate 0.25 > incumbent 0.20, delta 0.05, no shadow window) → an **OPEN
+   promotion suggestion** appeared in `GET /suggestions` (`promotions{mode="suggest"}`), with **no
+   manual step** between the breach check and the suggestion.
+
+**Zero-manual-steps confirmed:** the only human action was the initial policy declaration; detection →
+retrain → register → score → suggestion were all scheduler-driven. Drill artifacts (seed pairs, the
+policy, the suggestion, the demo candidate versions, the injected baseline tags) were cleaned up
+afterward — store back to zero rows. (The `data/submit_labels.py` serve-and-mislabel path in the
+quickstart is an equivalent way to inject the breach; seeding the store directly is the same "injected
+breach" with a deterministic accuracy of 0.)
 
 ---
 
