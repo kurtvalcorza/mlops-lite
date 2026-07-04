@@ -14,7 +14,7 @@ a heavier reference platform, sized to a laptop.
 > consolidated **GPU host agent** with in-process admission, shared typed contracts, a closed
 > **declarative policy loop** (drift → retrain → gate → promote), and (**018 US4**) durable
 > **relational monitoring/job state on Postgres** — predictions·labels·capture·jobs·policies·suggestions
-> as indexed table reads, replacing the O(N) object scans (a 10k-prediction window resolves in ~40 ms).
+> as indexed table reads, replacing the O(N) object scans (a 12k-prediction window resolves in ~40 ms).
 > Constitution
 > `v1.5.0`. Reference stack on MLflow `3.14.0`.
 >
@@ -52,7 +52,7 @@ flowchart LR
   GW -->|"/train · /study · /batch · /shadow-replay (byte-compat)"| AG
   GW --> MLF
   GW --> MIN
-  GW -->|"relational monitoring store (US4): predictions·labels·policies·suggestions"| PG
+  GW -->|"relational monitoring store (US4): predictions·labels·capture·policies·suggestions"| PG
   MLF --> PG
   MLF --> MIN
   AG --> MLF
