@@ -111,5 +111,62 @@ def test_prediction_label_window_roundtrip_and_write_once(db):
             cur.execute("DELETE FROM predictions WHERE prediction_id = %s", (pid,))
 
 
+# -- US4 T375: policies + pending + status + suggestions -------------------------------------------
+
+def test_ddl_folds_pending_and_status_onto_policies():
+    assert "ADD COLUMN IF NOT EXISTS pending" in store.DDL
+    assert "ADD COLUMN IF NOT EXISTS status" in store.DDL
+
+
+def test_policy_pending_status_roundtrip(db):
+    from datetime import datetime, timezone
+    m = f"test-policy-{uuid.uuid4().hex}"
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        store.put_policy(db, m, {"model_name": m, "modality": "vision", "updated_at": now},
+                         now, "operator")
+        assert store.get_policy(db, m)["modality"] == "vision"
+        assert m in [p["model_name"] for p in store.list_policies(db)]
+        # pending + status ride the SAME row; a policy re-`put` must NOT wipe them (ON CONFLICT keeps them)
+        store.set_pending(db, m, {"attempts": 1})
+        store.set_status(db, m, {"last_check_at": now})
+        store.put_policy(db, m, {"model_name": m, "modality": "vision", "updated_at": now}, now, "op2")
+        assert store.get_pending(db, m) == {"attempts": 1}
+        assert store.get_status(db, m)["last_check_at"] == now
+        store.clear_pending(db, m)
+        assert store.get_pending(db, m) is None
+        store.delete_policy(db, m)  # pending + status go with the row
+        assert store.get_policy(db, m) is None
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM policies WHERE model_name = %s", (m,))
+
+
+def test_suggestion_lifecycle_and_atomic_resolve(db):
+    from datetime import datetime, timezone
+    sid = f"test-sug-{uuid.uuid4().hex[:8]}"
+    m = f"test-model-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc).timestamp()
+    rec = {"id": sid, "model_name": m, "candidate_version": "7", "gate_verdict": {"verdict": "pass"},
+           "shadow_verdict": None, "state": "open", "created_at": now, "resolved_at": None,
+           "actor": None}
+    try:
+        store.create_suggestion(db, rec)
+        got = store.get_suggestion(db, sid)
+        assert got["candidate_version"] == "7" and got["gate_verdict"] == {"verdict": "pass"}
+        assert abs(got["created_at"] - now) < 1e-3  # epoch float round-trips through timestamptz
+        # idempotency lookup is per (model, candidate, state)
+        assert store.find_suggestion(db, m, "7", "open")["id"] == sid
+        assert store.find_suggestion(db, m, "7", "accepted") is None
+        assert [s["id"] for s in store.list_suggestions(db, state="open", model_name=m)] == [sid]
+        # atomic resolve: the `WHERE state='open'` guard admits exactly one — the second sees 0 rows
+        upd = store.resolve_suggestion(db, sid, "accepted", "operator", now)
+        assert upd["state"] == "accepted" and upd["actor"] == "operator"
+        assert store.resolve_suggestion(db, sid, "dismissed", "op2", now) is None
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM suggestions WHERE id = %s", (sid,))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS policies (
   updated_at timestamptz NOT NULL,
   updated_by text NOT NULL
 );
+-- US4 T375: the queue-of-one parked retrain + last check status fold onto the policy row.
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS pending jsonb;
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS status  jsonb;
 
 CREATE TABLE IF NOT EXISTS suggestions (
   id                text PRIMARY KEY,

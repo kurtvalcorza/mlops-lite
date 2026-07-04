@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS policies (
   updated_at timestamptz NOT NULL,
   updated_by text NOT NULL
 );
+-- T375: the queue-of-one parked retrain + the last per-model check status are strictly 1:1 with the
+-- policy (keyed by model_name), so they fold onto the row instead of the pre-US4 policies/_pending/ +
+-- policies/_status/ objects. Additive (ADD COLUMN IF NOT EXISTS) → no schema-version bump.
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS pending jsonb;
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS status  jsonb;
 
 CREATE TABLE IF NOT EXISTS suggestions (
   id                text PRIMARY KEY,

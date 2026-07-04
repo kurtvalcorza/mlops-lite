@@ -134,17 +134,14 @@ def test_output_name_must_match_the_policy_model():
 
 # --- the store, against a fake S3 -------------------------------------------------------------------
 
-from _quality import FakeS3  # noqa: E402 — the shared in-memory S3 fake
+from _quality import install_policy_store  # noqa: E402 — the shared in-memory relational-store fake
 
 from app import policies  # noqa: E402
 
 
 def _fake_store():
-    fake = FakeS3()
-    policies._s3 = lambda: fake
-    # FakeS3 lacks delete_object — add it so delete/clear paths work
-    fake.delete_object = lambda Bucket, Key: fake.objs.pop(Key, None)
-    return fake
+    """A fresh FakeStore wired into policies (US4 T375 — the state is relational now, not objects)."""
+    return install_policy_store(policies)
 
 
 def test_put_get_list_delete_roundtrip():
@@ -192,13 +189,10 @@ def test_transient_store_failure_raises_not_none():
     fake = _fake_store()
     policies.put_policy("vision-mobilenet", _doc())
 
-    class Outage(Exception):
-        pass  # no .response attribute — NOT 404-shaped
+    def outage(*a, **k):
+        raise RuntimeError("connection reset")             # a store-op failure, not a clean "absent"
 
-    def broken_get(Bucket, Key):
-        raise Outage("connection reset")
-
-    fake.get_object = broken_get
+    fake.get_policy = fake.get_pending = fake.get_suggestion = outage
     for call in (lambda: policies.get_policy("vision-mobilenet"),
                  lambda: policies.get_pending("vision-mobilenet"),
                  lambda: policies.get_suggestion("s1")):
@@ -216,10 +210,10 @@ def test_transient_delete_failure_raises_not_false_success():
     fake = _fake_store()
     policies.put_policy("vision-mobilenet", _doc())
 
-    def broken_delete(Bucket, Key):
-        raise RuntimeError("connection reset")             # not 404-shaped
+    def broken_delete(conn, model_name):
+        raise RuntimeError("connection reset")             # a store-op failure mid-delete
 
-    fake.delete_object = broken_delete
+    fake.delete_policy = broken_delete
     try:
         policies.delete_policy("vision-mobilenet")
     except policies.PolicyStoreError:
@@ -287,6 +281,18 @@ def test_create_suggestion_is_idempotent_per_candidate():
     audit2 = policies.create_suggestion("qa-demo", "7", {"verdict": "pass"},
                                         state="auto-promoted", actor="policy:qa-demo")
     assert audit2["id"] == audit1["id"]                                   # audit rows too
+
+
+def test_stored_candidate_version_round_trips_as_text():
+    # @claude review (018 T375-A): the live store persists candidate_version as text (str() at the SQL
+    # seam), so anything READ BACK is a str. The fake now coerces on write to keep FakeStore ⋈ Postgres
+    # parity exact — an int version in must surface as "7" from get_suggestion (the stated cutover goal).
+    _fake_store()
+    rec = policies.create_suggestion("qa-demo", 7, {"verdict": "pass"})   # int in
+    got = policies.get_suggestion(rec["id"])
+    assert got["candidate_version"] == "7" and isinstance(got["candidate_version"], str)
+    # idempotency still matches whether the retry passes the int 7 or the str "7"
+    assert policies.create_suggestion("qa-demo", "7", {"verdict": "pass"})["id"] == rec["id"]
 
 
 if __name__ == "__main__":

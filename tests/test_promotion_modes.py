@@ -15,15 +15,13 @@ for _p in (REPO, os.path.join(REPO, "gateway")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from _quality import FakeS3  # noqa: E402
+from _quality import install_policy_store  # noqa: E402
 
 from app import policies, scheduler  # noqa: E402
 
 
 def _setup(*, mode, run_status="completed", version="9", gate="pass", shadow=None):
-    fake = FakeS3()
-    fake.delete_object = lambda Bucket, Key: fake.objs.pop(Key, None)
-    policies._s3 = lambda: fake
+    install_policy_store(policies)  # US4 T375: policy state rides the relational store
 
     promoted = []
     sched = scheduler.PolicyScheduler(

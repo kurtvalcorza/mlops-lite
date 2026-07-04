@@ -83,6 +83,8 @@ class FakeStore:
         self.predictions = {}  # pid -> {model_name, version, modality, served_at, streamed, payload_ref}
         self.labels = {}       # pid -> {label, submitted_at}
         self.captures = {}     # pid -> {modality, input_ref, captured_at}
+        self.policies = {}     # model_name -> {document, updated_at, updated_by, pending, status}
+        self.suggestions = {}  # id -> suggestion record dict
 
     # -- connection lifecycle (no-ops over the in-memory dicts) ------------------------------------
     def connect(self, dsn_str=None, *, autocommit=True):
@@ -163,6 +165,80 @@ class FakeStore:
     def has_captures(self, conn, modality):
         return any(c["modality"] == modality for c in self.captures.values())
 
+    # -- policies + pending + status (US4 T375) ---------------------------------------------------
+    def put_policy(self, conn, model_name, document, updated_at, updated_by):
+        with self._lock:
+            row = self.policies.get(model_name) or {"pending": None, "status": None}
+            row.update(document=document, updated_at=updated_at, updated_by=updated_by)
+            self.policies[model_name] = row  # ON CONFLICT keeps pending/status untouched
+
+    def get_policy(self, conn, model_name):
+        row = self.policies.get(model_name)
+        return row["document"] if row else None
+
+    def list_policies(self, conn):
+        return [self.policies[m]["document"] for m in sorted(self.policies)]
+
+    def delete_policy(self, conn, model_name):
+        with self._lock:
+            self.policies.pop(model_name, None)  # pending + status go with the row
+
+    def set_pending(self, conn, model_name, pending):
+        with self._lock:
+            if model_name in self.policies:  # UPDATE-only (no orphan pending)
+                self.policies[model_name]["pending"] = pending
+
+    def get_pending(self, conn, model_name):
+        row = self.policies.get(model_name)
+        return row.get("pending") if row else None
+
+    def clear_pending(self, conn, model_name):
+        with self._lock:
+            if model_name in self.policies:
+                self.policies[model_name]["pending"] = None
+
+    def set_status(self, conn, model_name, status):
+        with self._lock:
+            if model_name in self.policies:
+                self.policies[model_name]["status"] = status
+
+    def get_status(self, conn, model_name):
+        row = self.policies.get(model_name)
+        return row.get("status") if row else None
+
+    # -- suggestions (US4 T375) -------------------------------------------------------------------
+    def create_suggestion(self, conn, rec):
+        with self._lock:
+            # parity: the real store persists candidate_version as text (str() at the SQL seam), so a
+            # round-trip always yields a str — coerce here too or an int in would leak back out as an int.
+            self.suggestions[rec["id"]] = {**rec, "candidate_version": str(rec["candidate_version"])}
+
+    def get_suggestion(self, conn, suggestion_id):
+        rec = self.suggestions.get(suggestion_id)
+        return dict(rec) if rec else None
+
+    def find_suggestion(self, conn, model_name, candidate_version, state):
+        for rec in self.suggestions.values():
+            if (rec["model_name"] == model_name and rec["state"] == state
+                    and str(rec["candidate_version"]) == str(candidate_version)):
+                return dict(rec)
+        return None
+
+    def list_suggestions(self, conn, state=None, model_name=None):
+        out = [dict(r) for r in self.suggestions.values()
+               if (state is None or r["state"] == state)
+               and (model_name is None or r["model_name"] == model_name)]
+        out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return out
+
+    def resolve_suggestion(self, conn, suggestion_id, state, actor, resolved_at):
+        with self._lock:
+            rec = self.suggestions.get(suggestion_id)
+            if rec is None or rec["state"] != "open":  # atomic UPDATE … WHERE state='open'
+                return None
+            rec.update(state=state, resolved_at=resolved_at, actor=actor)
+            return dict(rec)
+
 
 class FakeGauge:
     """Records the last value set per label-set, so the gauge-export path is assertable offline."""
@@ -196,4 +272,13 @@ def install_fakes(q, s3=None):
     q._s3 = lambda: fake
     q._GAUGES = {"score": FakeGauge(), "breach": FakeGauge()}
     install_store(q)
+    return fake
+
+
+def install_policy_store(p, store=None):
+    """Point `gateway.app.policies` at a fresh FakeStore (US4 T375) and drop its cached connection so
+    the next `_conn()` reconnects to it. Returns the store for direct assertions (`p._store.policies`)."""
+    fake = store or FakeStore()
+    p._store = fake
+    p.reset_conn()
     return fake
