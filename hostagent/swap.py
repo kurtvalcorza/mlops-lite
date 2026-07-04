@@ -30,11 +30,20 @@ class SwapError(Exception):
     """The holder could not be evicted (wedged / drain refused) → 409 with detail."""
 
 
-def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0) -> dict:
+def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0, *,
+                batch_active_fn=None) -> dict:
     """Make room for `target_engine_id` and LOAD it, as one transaction. Returns
     {"swapped": bool, "evicted": tenant|None, "load_ms": float}. The operator confirm and the
     per-request `preempt=true` opt-in semantics are unchanged from 017 (the gateway still fronts
-    them); this is only the execution, made atomic."""
+    them); this is only the execution, made atomic.
+
+    `batch_active_fn` (T363, FR-155): a GPU *batch* drives a serving engine WITHOUT taking a
+    `kind="job"` admission slot — the engine it feeds holds admission as `kind="serving"`, so the
+    `NON_PREEMPTABLE_KINDS` check below would NOT catch it. This callable (the agent passes the
+    JobManager's `_gpu_batch_active` view) is read at the SAME decision point as the holder — fresh,
+    not a stale pre-captured bool (@claude PR#37) — and refuses evicting the batch-driven serving
+    holder: the structural, no-network-probe replacement for the retired gateway swap's fail-closed
+    batch probe (the deleted `gateway/app/swap.py`). Decoupled from JobManager by construction."""
     target = manager.runtimes.get(target_engine_id)
     if target is None:
         raise PreemptRefused(f"unknown engine {target_engine_id!r}")
@@ -51,6 +60,11 @@ def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0) -
         if holder["kind"] in NON_PREEMPTABLE_KINDS:  # the shared single definition (FR-172)
             raise PreemptRefused(
                 f"{holder['tenant']} is running a job (training/HPO/batch) — never preempted")
+        # Read the batch flag HERE (same point as the holder read), not a stale pre-captured value:
+        # a GPU batch drives this serving holder (FR-155) → never evicted.
+        if batch_active_fn is not None and batch_active_fn():
+            raise PreemptRefused(
+                f"a GPU batch is driving {holder['tenant']} — not preempted (FR-155)")
         holder_rt = manager.runtimes.get(holder["tenant"])
         if holder_rt is None:
             raise PreemptRefused(f"holder {holder['tenant']!r} is not a swappable engine")

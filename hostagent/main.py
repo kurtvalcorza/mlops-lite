@@ -25,6 +25,7 @@ if _REPO not in sys.path:
 from hostagent import admission as adm  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
+from hostagent import swap as swap_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 from hostagent.metrics import REGISTRY  # noqa: E402
 from platformlib.topology import AGENT_PORT, STATE_DIR  # noqa: E402
@@ -66,8 +67,8 @@ def build_agent(lease=None):
 
 def _engine_error_status(exc: BaseException) -> int:
     """Map a lifecycle/admission failure to the preserved 008–017 error vocabulary."""
-    if isinstance(exc, adm.Held):
-        return 409
+    if isinstance(exc, (adm.Held, swap_mod.PreemptRefused, swap_mod.SwapError)):
+        return 409  # slot held / preempt refused (job holder) / swap could not evict
     if isinstance(exc, adm.VramExceeded):
         return 507
     if isinstance(exc, lifecycle.EngineError):
@@ -77,13 +78,26 @@ def _engine_error_status(exc: BaseException) -> int:
     return 502      # child/backend inference failure
 
 
-def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, multipart=False):
+def _admit(manager, rt, engine_id: str, preempt: bool, batch_active_fn=None) -> float:
+    """Return cold-start ms, making room for the engine. `preempt=true` (T363: the gateway swap
+    thinned to just forwarding this flag) runs the agent's transactional evict→admit — the single
+    admission lock is the authority now, a `kind="job"` holder is refused structurally (FR-172), and
+    a GPU batch's serving holder is refused via `batch_active_fn` (FR-155 — the structural
+    replacement for the deleted gateway batch probe, read fresh at the decision point). No network
+    probe. Called under the runtime lock so it can't be reaped before the forward."""
+    if preempt:
+        return swap_mod.preempt_for(manager, engine_id, batch_active_fn=batch_active_fn)["load_ms"]
+    return rt.ensure_loaded()
+
+
+def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, multipart=False,
+                         preempt=False, batch_active_fn=None):
     """Shared lifecycle wrapper for an engine forward (contracts/agent-api.md): resolve, verb-check,
-    ensure-admitted (cold-load if needed) UNDER the runtime lock, delegate the engine-specific call,
-    stamp `last_used`. Returns (status_code, payload). Framework-free so it is unit-testable without
-    HTTP. The lock is held across the whole forward so the reaper/swap cannot unload mid-flight (the
-    supervisor's `_lock`-across-generation semantics, now shared). `do_forward(adapter, load_ms)`
-    is the JSON or multipart call."""
+    ensure-admitted (cold-load, or a `preempt=true` swap) UNDER the runtime lock, delegate the
+    engine-specific call, stamp `last_used`. Returns (status_code, payload). Framework-free so it is
+    unit-testable without HTTP. The lock is held across the whole forward so the reaper/swap cannot
+    unload mid-flight (the supervisor's `_lock`-across-generation semantics, now shared).
+    `do_forward(adapter, load_ms)` is the JSON or multipart call."""
     rt = manager.runtimes.get(engine_id)
     if rt is None:
         return 404, {"error": f"unknown engine {engine_id!r}"}
@@ -98,7 +112,7 @@ def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, mult
         return 415, {"error": f"engine {engine_id!r} does not accept {kind} for verb {verb!r}"}
     try:
         with rt.lock:
-            load_ms = rt.ensure_loaded()
+            load_ms = _admit(manager, rt, engine_id, preempt, batch_active_fn)
             result = do_forward(rt.adapter, load_ms)
             rt.touch()
         return 200, result
@@ -109,21 +123,24 @@ def _forward_under_lease(manager, engine_id: str, verb: str, do_forward, *, mult
         return _engine_error_status(e), {"error": str(e)}
 
 
-def forward_engine(manager, engine_id: str, verb: str, body: dict):
+def forward_engine(manager, engine_id: str, verb: str, body: dict, *, preempt=False,
+                   batch_active_fn=None):
     """JSON inference passthrough (llm/asr/embed/tabular): forward a parsed dict body."""
-    return _forward_under_lease(manager, engine_id, verb,
-                                lambda ad, load_ms: ad.forward(verb, body, load_ms))
+    return _forward_under_lease(
+        manager, engine_id, verb,
+        lambda ad, load_ms: ad.forward(verb, body, load_ms),
+        preempt=preempt, batch_active_fn=batch_active_fn)
 
 
 def forward_engine_multipart(manager, engine_id: str, verb: str, raw_body: bytes,
-                             content_type: str):
+                             content_type: str, *, preempt=False, batch_active_fn=None):
     """Binary/multipart inference passthrough (vision classify): relay the raw multipart body + its
     Content-Type to the engine's child unchanged (byte-compat, FR-177). The adapter opts in by
     implementing `forward_multipart(verb, raw_body, content_type, load_ms)`."""
     return _forward_under_lease(
         manager, engine_id, verb,
         lambda ad, load_ms: ad.forward_multipart(verb, raw_body, content_type, load_ms),
-        multipart=True)
+        multipart=True, preempt=preempt, batch_active_fn=batch_active_fn)
 
 
 def _refresh_metrics(admission, journal, manager) -> None:
@@ -322,11 +339,21 @@ def make_handler(admission, journal, manager, jobs):
                     return self._send(400, {"error": "invalid JSON"})
                 code, payload = jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
                 return self._send(code, payload)
-            # Inference passthrough: /engines/<id>/<verb> (+ /stream), and the migration-only
-            # byte-compatible /engines/<id>/unload-now the gateway swap still calls (retires T363).
+            # Inference passthrough: /engines/<id>/<verb> (+ /stream, + `?preempt=true`), and the
+            # byte-compatible /engines/<id>/unload-now (its gateway-swap caller was removed at T363;
+            # kept as an operator-invocable control relic alongside /control/unload — retires T364).
             segs = path.strip("/").split("/")
             if len(segs) >= 3 and segs[0] == "engines":
                 eid, verb = segs[1], segs[2]
+                # T363: the gateway swap thinned to forwarding `?preempt=true`; the agent
+                # orchestrates the evict→admit transactionally (`kind="job"` refuses structurally,
+                # and a GPU batch's serving holder refuses via `gpu_batch_active` — FR-155).
+                preempt = (parse_qs(urlparse(self.path).query).get("preempt")
+                           or [""])[0].lower() in ("1", "true", "yes")
+                # A callable (read fresh inside preempt_for at the decision point, not a stale
+                # snapshot — @claude PR#37) reporting whether a GPU batch is driving the holder.
+                batch_active_fn = (lambda: jobs.health_fields()["gpu_batch_active"]) if preempt \
+                    else None
                 rt = manager.runtimes.get(eid)
                 if rt is None:
                     return self._send(404, {"error": f"unknown engine {eid!r}"})
@@ -358,7 +385,9 @@ def make_handler(admission, journal, manager, jobs):
                 ctype = self.headers.get("Content-Type", "")
                 if not stream and ctype.startswith("multipart/"):
                     raw = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0)
-                    code, payload = forward_engine_multipart(manager, eid, verb, raw, ctype)
+                    code, payload = forward_engine_multipart(
+                        manager, eid, verb, raw, ctype, preempt=preempt,
+                        batch_active_fn=batch_active_fn)
                     return self._send(code, payload)
                 body = self._read_body()
                 if body is None:
@@ -369,7 +398,7 @@ def make_handler(admission, journal, manager, jobs):
                                                          f"verb {verb!r}"})
                     try:
                         with rt.lock:  # held across the whole generation (one model in VRAM)
-                            load_ms = rt.ensure_loaded()
+                            load_ms = _admit(manager, rt, eid, preempt, batch_active_fn)
                             gen = rt.adapter.stream(verb, body, load_ms)
                             try:
                                 self._stream(gen)
@@ -383,7 +412,8 @@ def make_handler(admission, journal, manager, jobs):
                     except Exception as e:  # noqa: BLE001 — preserved status vocabulary
                         self._send(_engine_error_status(e), {"error": str(e)})
                     return
-                code, payload = forward_engine(manager, eid, verb, body)
+                code, payload = forward_engine(manager, eid, verb, body, preempt=preempt,
+                                               batch_active_fn=batch_active_fn)
                 return self._send(code, payload)
             self._send(404, {"error": "unknown path"})
 

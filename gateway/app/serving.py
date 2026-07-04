@@ -73,13 +73,17 @@ async def gpu_state() -> dict:
     return {"holder": holder, "resident": resident, "serving_model": model}
 
 
-async def run_inference(prompt: str, max_tokens: int = 256, temperature: float = 0.7) -> dict:
-    """Serialized call to the supervisor; returns {text, load_ms, infer_ms, model, usage}."""
+async def run_inference(prompt: str, max_tokens: int = 256, temperature: float = 0.7, *,
+                        preempt: bool = False) -> dict:
+    """Serialized call to the agent; returns {text, load_ms, infer_ms, model, usage}. `preempt=true`
+    (T363) appends `?preempt=true` so the AGENT orchestrates the swap (evict a resident serving
+    holder, refuse a `kind="job"` holder) — the gateway no longer brokers it."""
+    url = f"{SERVING_URL}/infer" + ("?preempt=true" if preempt else "")
     async with _gpu_lock:
         async with httpx.AsyncClient(timeout=300) as client:
             try:
                 r = await client.post(
-                    f"{SERVING_URL}/infer",
+                    url,
                     json={"prompt": prompt, "max_tokens": max_tokens, "temperature": temperature},
                 )
             except httpx.HTTPError as e:

@@ -10,7 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter, Histogram
 from pydantic import BaseModel
 
-from .. import quality, registry, swap, tracing
+from .. import quality, registry, tracing
 from ..serving import (
     SERVING_MODEL,
     ModelTooLargeError,
@@ -79,11 +79,12 @@ async def infer(req: InferRequest):
             INFER_REQUESTS.labels(status="unavailable").inc()
             trace_status, outcome = "ERROR", "unavailable"
             raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
-        if req.preempt:
-            # 017: evict a resident *serving* model so the LLM can load (a training holder → 409).
-            await swap.preempt_or_409("llm")
         try:
-            result = await run_inference(req.prompt, req.max_tokens, req.temperature)
+            # T363: forward `preempt` to the AGENT, which orchestrates the swap (evict a resident
+            # serving holder; a `kind="job"` holder refuses structurally → the agent 409s → surfaces
+            # as ServingBusyError below). The gateway no longer brokers the eviction.
+            result = await run_inference(req.prompt, req.max_tokens, req.temperature,
+                                         preempt=req.preempt)
         except ModelTooLargeError as e:
             INFER_REQUESTS.labels(status="rejected").inc()
             trace_status, outcome = "ERROR", "rejected"

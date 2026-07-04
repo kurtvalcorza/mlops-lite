@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import background, platform_health, quality, registry, serving, swap, tracing
+from .. import background, platform_health, quality, registry, serving, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -56,10 +56,13 @@ async def infer_stream(req: StreamRequest):
         )
         raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
 
-    if req.preempt:
-        # 017: evict a resident *serving* model so the LLM can load (a training holder → 409). Done
-        # before the SSE stream opens, so a refusal is a clean 409 (not an error mid-stream).
-        await swap.preempt_or_409("llm")
+    # T363: preempt is forwarded to the AGENT (as `?preempt=true` below), which orchestrates it
+    # under its single admission lock — the gateway no longer brokers it. A refusal (a `kind="job"`
+    # holder, or a failed evict) returns the agent's 409 *before* the SSE opens, surfaced as the
+    # stream's pre-generation error frame (the status != 200 branch); the non-stream /infer keeps a
+    # clean 409 body via ServingBusyError.
+    _preempt_q = "?preempt=true" if req.preempt else ""
+    infer_stream_url = f"{serving.SERVING_URL}/infer/stream" + _preempt_q
 
     async def gen():
         # 006/FR-050: trace timing captured OUTSIDE the GPU lock (export never coincides with the
@@ -78,7 +81,7 @@ async def infer_stream(req: StreamRequest):
                 try:
                     async with httpx.AsyncClient(timeout=300) as client:
                         async with client.stream(
-                            "POST", f"{serving.SERVING_URL}/infer/stream",
+                            "POST", infer_stream_url,
                             json={"prompt": req.prompt, "max_tokens": req.max_tokens,
                                   "temperature": req.temperature},
                         ) as r:
