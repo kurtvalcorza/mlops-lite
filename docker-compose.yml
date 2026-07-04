@@ -61,6 +61,44 @@ services:
       echo 'buckets ready';
       "
 
+  # 020 US1 (T401): Garage — the maintained S3-compatible replacement store, up BESIDE MinIO
+  # for the migration window (no cutover here: the env seam still points at MinIO until T405;
+  # exactly one store is authoritative at any instant). Single node, replication_factor=1,
+  # data+metadata on the named volume. Pinned by digest (house rule) — v2.3.0.
+  garage:
+    image: dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
+    environment:
+      # Secrets — no shipped defaults (FR-017). Config file carries no secret (public repo);
+      # both come from .env via scripts/gen_secrets [--ensure-garage-secrets].
+      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET:?set GARAGE_RPC_SECRET in .env (run scripts/gen_secrets --ensure-garage-secrets)}"
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env (run scripts/gen_secrets --ensure-garage-secrets)}"
+    volumes:
+      - ./infra/garage/garage.toml:/etc/garage.toml:ro
+      - garagedata:/var/lib/garage
+    ports:
+      # S3 API only (host consumers use :3900 post-cutover). RPC (3901) + admin (3903) stay
+      # unpublished — garage-init reaches the admin API by sharing this network namespace.
+      - "${BIND_ADDR:-127.0.0.1}:${GARAGE_S3_PORT:-3900}:3900"
+
+  # One-shot bootstrap (the createbuckets analog for Garage): layout → 4 buckets → key →
+  # per-bucket read+write grants, all idempotent, via the token-authed Admin API. The garage
+  # image is scratch-based (no shell to script the CLI in — research R2's sketch adjusted), so
+  # this runs infra/garage/init.sh from a pinned python:3.12-alpine sharing garage's netns.
+  # It EMITS the store-minted S3 key pair; scripts/gen_secrets --record-garage records it into
+  # .env (credential direction REVERSED vs MinIO — contracts/store-migration.md §bootstrap).
+  garage-init:
+    image: python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df
+    depends_on:
+      garage:
+        condition: service_started
+    network_mode: "service:garage"
+    environment:
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env (run scripts/gen_secrets --ensure-garage-secrets)}"
+    volumes:
+      - ./infra/garage/init.sh:/init.sh:ro
+      - ./infra/garage/init.py:/init.py:ro
+    entrypoint: ["/bin/sh", "/init.sh"]
+
   mlflow:
     build: ./infra/mlflow
     depends_on:
@@ -195,4 +233,5 @@ services:
 volumes:
   pgdata:
   miniodata:
+  garagedata:
   grafanadata:

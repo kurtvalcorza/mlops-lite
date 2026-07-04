@@ -1,0 +1,13 @@
+# 020 T402 — the single FastAPI+uvicorn pin shared by the US2 slim children
+# (vision/embed/tabular, serving/children/*_service.py) and US3's optional agent ASGI runtime
+# (AGENT_RUNTIME=uvicorn), per research R5/R7. Same versions the gateway container pins
+# (gateway/requirements.txt) — one HTTP idiom, one version story.
+#
+# Install into the native WSL host venv:
+#   ~/mlops-train/bin/pip install -r serving/children/requirements.txt
+#
+# Model runtimes (torch/torchvision, sentence-transformers, lightgbm, pillow) keep their
+# existing pins in serving/bento/requirements.txt until T412 retires that file with the
+# framework — this file deliberately adds NOTHING beyond the shared HTTP pin.
+fastapi==0.138.1
+uvicorn[standard]==0.49.0
