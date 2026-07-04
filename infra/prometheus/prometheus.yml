@@ -19,10 +19,13 @@ scrape_configs:
   # service's signal reaches Prometheus through the one gateway target above. (T043)
 
   # 018 US2 (FR-174): the GPU host agent is scraped DIRECTLY, so GPU/holder/engine/job signals
-  # stay observable when the gateway is down (the pre-018 observability SPOF, review §4.4).
-  # `host.docker.internal` needs the compose extra_hosts host-gateway mapping; on cross-distro
-  # WSL setups serve_up.ps1 rewrites this target with the injected distro IP, like the *_URL vars.
+  # stay observable when the gateway is down (the pre-018 observability SPOF, review §4.4). The agent
+  # runs NATIVELY in WSL on a dynamic distro IP that `host.docker.internal` can't reach across WSL
+  # distros (it resolves to the docker bridge, not the Ubuntu agent). So the target is FILE-BASED:
+  # up_all.ps1 writes the injected distro IP into targets/hostagent.json and Prometheus hot-reloads it
+  # (no restart). The committed default is the same-distro `host.docker.internal` fallback.
   - job_name: hostagent
     metrics_path: /metrics
-    static_configs:
-      - targets: ['host.docker.internal:8100']
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/hostagent.json']
+        refresh_interval: 30s

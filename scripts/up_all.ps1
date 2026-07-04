@@ -31,6 +31,14 @@ if (-not $ip) { Write-Error "Could not resolve $Distro IP"; exit 1 }
 $env:AGENT_URL = "http://${ip}:${AgentPort}"
 Write-Host "engines + jobs @ agent=$env:AGENT_URL (single endpoint)" -ForegroundColor Cyan
 
+# 018 FR-174: point Prometheus's DIRECT agent scrape (file_sd) at the same injected distro IP, so
+# GPU/holder/engine/job metrics stay observable when the gateway is down (host.docker.internal can't
+# reach the Ubuntu agent cross-distro). Prometheus hot-reloads the file — no restart needed.
+$targetsDir = Join-Path $repo "infra/prometheus/targets"
+New-Item -ItemType Directory -Force $targetsDir | Out-Null
+Set-Content -Path (Join-Path $targetsDir "hostagent.json") -Encoding utf8 `
+    -Value "[{""targets"": [""${ip}:${AgentPort}""]}]"
+
 # 2. Bring up the Compose infra (gateway inherits the daemon URLs above).
 Write-Host "`n[1/3] docker compose up ..." -ForegroundColor Green
 docker compose up -d --build
