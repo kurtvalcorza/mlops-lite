@@ -24,6 +24,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from platformlib.topology import vram_budget_gb
+
 from hostagent.adapters._common import engine_health, free_port
 
 DEFAULT_MODEL = "~/models/whisper/ggml-base.en.bin"
@@ -45,7 +47,7 @@ class WhisperAdapter:
         # whisper-server's --convert uses ffmpeg to accept non-WAV uploads (m4a/mp3/webm); the UI
         # accepts audio/*, so default it on. An operator whose build/ffmpeg lacks it can disable.
         self.convert = os.getenv("WHISPER_CONVERT", "1") not in ("", "0", "false", "False")
-        self.vram_budget_gb = float(os.getenv("VRAM_GB", "12"))
+        self.vram_budget_gb = vram_budget_gb()  # FR-207: the single shared budget resolver
         self._admission = admission
         self._port = None
 

@@ -17,6 +17,8 @@ import json
 import os
 import urllib.request
 
+from platformlib.topology import vram_budget_gb
+
 from hostagent.adapters._common import bento_spawn, engine_health, http_200
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,7 +37,7 @@ class VisionAdapter:
         self.run_sh = os.path.join(_REPO, "serving", "bento", "run.sh")
         self.model_name = os.getenv("VISION_MODEL", "vision-mobilenet")
         self.est_gb = float(os.getenv("VISION_EST_GB", "1.0"))
-        self.vram_budget_gb = float(os.getenv("VRAM_GB", "12"))
+        self.vram_budget_gb = vram_budget_gb()  # FR-207: the single shared budget resolver
         self._admission = admission
         self._port = None
 

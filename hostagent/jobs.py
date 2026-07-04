@@ -33,14 +33,14 @@ import threading
 import time
 import uuid
 
-from platformlib.topology import TRAINABLE_MODALITIES, Tenant
+from platformlib.topology import TRAINABLE_MODALITIES, Tenant, vram_budget_gb
 
 from . import admission as adm
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TRAINING = os.path.join(_REPO, "training")
 
-VRAM_GB = float(os.getenv("VRAM_GB", "12"))
+VRAM_GB = vram_budget_gb()  # 020 US4 (FR-207): single shared resolver, no duplicated default
 # Conservative VRAM floor for a run (base model + adapters + optimizer state) — the same value the
 # trainer used so admission's live-VRAM gate refuses a start on a mostly-consumed GPU (507) instead
 # of letting the worker hit CUDA OOM (008.1 #11), rather than an exact estimate.

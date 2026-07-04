@@ -8,6 +8,17 @@ per-daemon URL resolvers and their hand-allocated ports (8090–8095/8099) retir
 import os
 
 
+def vram_budget_gb() -> float:
+    """The GPU memory budget knob (020 US4, FR-207) — the ONLY place the static default lives.
+
+    Live NVML reads stay the primary admission input; this budget is the fallback when the GPU is
+    unreadable (admission refuses above budget × 0.95, hostagent/admission.py). A machine with a
+    different GPU sets the `VRAM_GB` env (.env / hardware-profile.md) — never a code edit
+    (SC-133). Every python consumer resolves through this function so a moved knob can't leave
+    one of them on a stale duplicated default (the pre-020 state: five independent `"12"`s)."""
+    return float(os.getenv("VRAM_GB", "12"))
+
+
 class Tenant:
     """Canonical GPU tenant identities (data-model.md §Tenant)."""
     LLM = "llm"
