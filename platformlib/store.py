@@ -296,6 +296,14 @@ def prediction_exists(conn, prediction_id: str) -> bool:
         return cur.fetchone() is not None
 
 
+def capture_exists(conn, prediction_id: str) -> bool:
+    """Whether a capture-index row exists for this prediction (symmetric with `prediction_exists`) —
+    the backfill's idempotency precheck so a re-run counts an already-migrated input as skipped."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM capture_index WHERE prediction_id = %s", (prediction_id,))
+        return cur.fetchone() is not None
+
+
 def replay_window(conn, modality: str, model_name: str, version: str, n: int,
                   *, ttl_cutoff=None) -> list:
     """The shadow-replay (016) resolution path: the most recent `n` captured∩labeled predictions for
