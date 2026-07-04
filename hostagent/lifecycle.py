@@ -53,7 +53,7 @@ class EngineRuntime:
         this for every engine, and taking `self.lock` would block the read surface behind a cold
         load or a long in-flight request — probes would mark the agent down exactly while an
         engine is busy. A momentarily stale answer is fine for display (the same stale-tolerant
-        stance as the legacy lease's `current_holder`); admission decisions never read this."""
+        stance as `admission.holder()`); admission decisions never read this."""
         if not self.enabled:
             return {"state": "disabled"}
         if self.wedged_reason:

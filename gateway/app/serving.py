@@ -1,14 +1,14 @@
-"""Serving client + GPU/lease-state surface (T016/T017; 008 US1/US3).
+"""Serving client + GPU-state surface (T016/T017; 008 US1/US3).
 
-The gateway proxies inference to a native serving **supervisor** running on the WSL GPU host
-(hybrid GPU, constitution v1.2.0). The supervisor owns the llama-server lifecycle (on-demand load,
-idle VRAM release, oversize rejection).
+The gateway proxies inference to the native **GPU host agent** on the WSL host (018). The agent
+owns each engine's lifecycle (on-demand load, idle VRAM release, oversize rejection) behind its
+`/engines/llm` byte-compatible surface.
 
-**Principle II authority moved in 008** (Claude review F5): the single race-free **GPU lease**
-(serving/gpu_lease.py), held by the native daemons, is now what guarantees one GPU tenant at a time
-— **not** this gateway. The `_gpu_lock` below is only a gateway-side concurrency limiter (at most one
-in-flight supervisor call); it no longer *enforces* Principle II. `gpu_state()` reads the lease
-holder via the supervisor `/health` for the UI status line (FR-068).
+**Principle II authority is the agent's** (008 Claude review F5, generalized at 018): the single
+race-free **admission slot** the agent holds is what guarantees one GPU tenant at a time — **not**
+this gateway. The `_gpu_lock` below is only a gateway-side concurrency limiter (at most one
+in-flight agent call); it does not *enforce* Principle II. `gpu_state()` reads the GPU holder via
+the agent's per-engine `/health` for the UI status line (FR-068).
 """
 import asyncio
 
@@ -19,12 +19,13 @@ from . import settings
 SERVING_URL = settings.SERVING_URL
 SERVING_MODEL = settings.SERVING_MODEL
 
-# Shared-lockfile tenant id -> the label the UI status line shows (008 FR-068). The supervisor reads
-# the single GPU lease (serving/gpu_lease.py) and reports its current holder in /health, so this one
-# read covers every tenant (LLM, vision, training) — they all share the same lockfile.
-_HOLDER_LABEL = {"llm-serving": "llm", "vision": "vision", "training": "training", "asr": "asr"}
+# Admission tenant id -> the label the UI status line shows (008 FR-068). The agent reports its
+# single admission holder in /health (T364: sourced from `admission.holder()`, no longer a shared
+# lockfile), so this one read covers whichever tenant (llm, vision, asr, training) holds the GPU.
+# The ids already equal the labels; the map stays for a stable display contract + future aliases.
+_HOLDER_LABEL = {"llm": "llm", "vision": "vision", "training": "training", "asr": "asr"}
 
-_gpu_lock = asyncio.Lock()  # gateway-side concurrency limiter only; Principle II is the lease's job
+_gpu_lock = asyncio.Lock()  # gateway-side concurrency limiter only; Principle II is the agent's job
 
 
 class ServingError(Exception):
@@ -52,12 +53,12 @@ async def health() -> bool:
 
 
 async def gpu_state() -> dict:
-    """Lease/GPU state for the UI status line (008 FR-068): which tenant holds the single GPU lease,
-    the serving model name, and whether the LLM is resident.
+    """GPU state for the UI status line (008 FR-068): which tenant holds the single GPU slot, the
+    serving model name, and whether the LLM is resident.
 
-    Sourced from the supervisor's /health, which reads the shared lease (gpu_lease.current_holder)
-    — so one read reflects whichever tenant (LLM, vision, training) holds the GPU. Key-free: the
-    BFF contract is unchanged (no key reaches the browser). Returns holder=None when unreadable.
+    Sourced from the agent's per-engine `/health` (`lease_holder`, from `admission.holder()` since
+    T364) — so one read reflects whichever tenant (llm, vision, asr, training) holds the GPU.
+    Key-free: the BFF contract is unchanged (no key reaches the browser). holder=None when unreadable.
     """
     holder, resident, model = None, False, SERVING_MODEL
     async with httpx.AsyncClient(timeout=5) as client:

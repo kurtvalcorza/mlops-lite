@@ -48,7 +48,7 @@ def test_stale_completed_starts_fresh():
 # -- the JobManager.submit wiring ---------------------------------------------------------------
 def _jm(tmpdir, runner, clock=time.time):
     admission = adm.Admission(vram_budget_gb=12.0,
-                              gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 20.0), lease=None)
+                              gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 20.0))
     journal = Journal(os.path.join(tmpdir, "journal.jsonl"))
     runners = {k: runner for k in jobs_mod.KINDS}
     return jobs_mod.JobManager(admission, journal, runners=runners, clock=clock)

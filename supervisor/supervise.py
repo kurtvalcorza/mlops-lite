@@ -1,15 +1,16 @@
 """Native-daemon process supervisor (002 US2, T049/T050 — FR-018).
 
-The GPU/vision daemons run natively in WSL, outside the container engine. 001 started each by
-hand (`bash serving/llama/run.sh`, etc.) and they silently died on crash. This pure-stdlib
-supervisor starts each, polls their health, and restarts them on exit with exponential
-backoff — backing off to a `persistent-unhealthy` state after repeated failures rather than
-crash-loop hammering. Daemon states are surfaced over HTTP (`GET /status`) so they're observable.
+Since 018 the native side is just two processes: the GPU host **agent** (every engine + the jobs
+surface) and the operator **UI**. 001 started daemons by hand (`bash serving/llama/run.sh`, etc.)
+and they silently died on crash. This pure-stdlib supervisor starts each, polls their health, and
+restarts them on exit with exponential backoff. Per FR-178 the restart is UNCONDITIONAL — a
+persistently-crashing agent keeps being restarted (capped backoff), never abandoned, because
+interrupted work is surfaced through the journal (FR-173), not by giving up on the process. Daemon
+states are surfaced over HTTP (`GET /status`) so they're observable.
 
-NOTE: this is distinct from `serving/llama/supervisor.py`, which supervises the *llama-server
-model* (load/unload/VRAM). This one supervises the *daemon processes* themselves. It does NOT
-touch the one-model-in-VRAM mutex (Principle II) — it only (re)starts processes; the serving↔
-training exclusion still lives in those daemons.
+NOTE: this supervises the *daemon processes* themselves, not the model in VRAM. It does NOT touch
+the one-model-in-VRAM mutex (Principle II) — it only (re)starts processes; admission inside the
+agent is the single GPU authority.
 
 Run from WSL:  python3 supervisor/supervise.py
 Stop:          Ctrl-C / SIGTERM (terminates all managed children — no GPU orphans).
@@ -28,8 +29,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 POLL_INTERVAL = float(os.getenv("SUPERVISE_POLL_INTERVAL", "3"))
 BACKOFF_BASE = float(os.getenv("SUPERVISE_BACKOFF_BASE", "1"))
-BACKOFF_CAP = float(os.getenv("SUPERVISE_BACKOFF_CAP", "30"))
-MAX_RESTARTS = int(os.getenv("SUPERVISE_MAX_RESTARTS", "5"))   # consecutive failures -> give up
+BACKOFF_CAP = float(os.getenv("SUPERVISE_BACKOFF_CAP", "30"))   # backoff ceiling; restarts never stop (FR-178)
 STATUS_PORT = int(os.getenv("SUPERVISE_STATUS_PORT", "8099"))
 
 # Managed daemons: name -> launch command + health probe. Health URLs are localhost because the
@@ -39,9 +39,9 @@ _ALL = {
     # 018 T358-T362: EVERY GPU/CPU daemon folded into the host agent — the LLM (T358), ASR (T359),
     # vision/embed/tabular (T360-T361) engines AND the training/HPO/batch/shadow-replay jobs surface
     # (T362, `hostagent/jobs.py`, replacing the retired `training/trainer.py`). The agent spawns each
-    # engine's child and runs jobs as subprocesses/in-process; the gateway's SERVING_URL/ASR_URL/
-    # BENTO_URL/EMBED_URL/TABULAR_URL/TRAINER_URL all point at it. With the trainer retired the
-    # supervised set is now just {agent, ui}; at lockfile retirement (T364) the interop shim also goes.
+    # engine's child and runs jobs as subprocesses/in-process; the gateway reaches it via the single
+    # AGENT_URL. The supervised set is just {agent, ui}; T364 retired the lockfile interop shim, so the
+    # agent's in-process admission is the sole GPU authority.
     "agent": {
         "cmd": ["bash", os.path.join(REPO, "hostagent", "run.sh")],
         # Probe the LLM ENGINE, not just the process (Codex round 8, 018): the agent replaces the
@@ -94,7 +94,7 @@ class Daemon:
         self.health_url = spec["health_url"]
         self.grace_s = spec["grace_s"]
         self.proc: subprocess.Popen | None = None
-        self.state = "pending"   # pending|starting|healthy|unhealthy|backoff|persistent-unhealthy
+        self.state = "pending"   # pending|starting|healthy|unhealthy|backoff
         self.restart_count = 0
         self.consecutive_failures = 0
         self.backoff_until = 0.0
@@ -129,9 +129,8 @@ class Daemon:
                 print(f"[supervise] {self.name} exited (code={code}); "
                       f"failure #{self.consecutive_failures}, backoff "
                       f"{self.backoff_until - now:.0f}s", flush=True)
-            if self.consecutive_failures > MAX_RESTARTS:
-                self.state = "persistent-unhealthy"
-                return
+            # No give-up (FR-178): the restart is unconditional — a persistently-crashing agent keeps
+            # being restarted at the capped backoff. Interrupted jobs are surfaced via the journal.
             if now < self.backoff_until:
                 self.state = "backoff"
                 return

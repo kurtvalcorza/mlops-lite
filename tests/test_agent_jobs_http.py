@@ -34,7 +34,7 @@ def _instant_runners(update):
 
 def _serve(update):
     admission = adm.Admission(vram_budget_gb=12.0,
-                              gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 8.0), lease=None)
+                              gpu=adm.GpuReader(ttl_s=1e6, read_fn=lambda: 8.0))
     journal = Journal(os.path.join(tempfile.mkdtemp(prefix="agent-jobs-"), "journal.jsonl"))
     jobs = jobs_mod.JobManager(admission, journal, runners=_instant_runners(update))
     manager = lifecycle.EngineManager(admission, runtimes={})

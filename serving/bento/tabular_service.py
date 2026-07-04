@@ -3,10 +3,10 @@
 Serves a single **LightGBM** model (one joblib artifact) packaged from the MinIO `models` bucket
 (seeded + registered by scripts/seed_tabular_model.py). Exposes `predict(rows: list[dict])`.
 
-**CPU-only, off the GPU lease, ALWAYS available** (grilled 2026-06-28) — like embeddings and unlike
-the vision service, it never imports gpu_lease and never touches VRAM, so a `predict` call succeeds
-even while a GPU tenant holds the lease. Lazy-load + idle-release mirror the scale-to-zero shape of
-the other services (only RAM here).
+**CPU-only, off GPU admission, ALWAYS available** (grilled 2026-06-28) — like embeddings and unlike
+the vision service, it never touches VRAM or the agent's GPU slot, so a `predict` call succeeds even
+while a GPU tenant holds it. Lazy-load + idle-release mirror the scale-to-zero shape of the other
+services (only RAM here).
 
 The joblib artifact is a dict: {"booster": lgb.Booster, "features": [...]} — the native Booster API
 keeps the dep light (no scikit-learn). AutoGluon is documented as an optional, GBM-constrained,

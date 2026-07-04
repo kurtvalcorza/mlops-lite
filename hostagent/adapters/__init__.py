@@ -19,17 +19,19 @@ from hostagent.adapters.vision import VisionAdapter
 from hostagent.adapters.whisper import WhisperAdapter
 from platformlib.topology import ENGINES
 
-#: engine_id -> factory(lease) -> adapter. One row per folded-in engine (SC-114). `lease` is the
-#: legacy lockfile module (migration interop); adapters that don't need it ignore the argument. The
-#: `asr` engine is opt-in (optional=True): it registers here always but reports unavailable until
-#: whisper.cpp is built, so platform-health (which treats asr as optional) never stalls on it.
-#: embed/tabular are CPU (gpu=False): off-lease, so the lifecycle admits nothing for them (T361).
+#: engine_id -> factory(admission) -> adapter. One row per folded-in engine (SC-114). `admission`
+#: is the single in-process GPU authority — adapters read it for the holder/free-VRAM fields in
+#: their /health (T364 flipped this from the retired lockfile module); adapters that don't need it
+#: ignore the argument. The `asr` engine is opt-in (optional=True): it registers here always but
+#: reports unavailable until whisper.cpp is built, so platform-health (which treats asr as optional)
+#: never stalls on it. embed/tabular are CPU (gpu=False): off-lease, so the lifecycle admits nothing
+#: for them (T361).
 ADAPTERS = {
-    "llm": lambda lease: LlamaAdapter(lease=lease),
-    "asr": lambda lease: WhisperAdapter(lease=lease),
-    "vision": lambda lease: VisionAdapter(lease=lease),
-    "embed": lambda lease: EmbedAdapter(lease=lease),
-    "tabular": lambda lease: TabularAdapter(lease=lease),
+    "llm": lambda admission: LlamaAdapter(admission=admission),
+    "asr": lambda admission: WhisperAdapter(admission=admission),
+    "vision": lambda admission: VisionAdapter(admission=admission),
+    "embed": lambda admission: EmbedAdapter(admission=admission),
+    "tabular": lambda admission: TabularAdapter(admission=admission),
 }
 
 
@@ -42,7 +44,7 @@ def _env_float(name):
     return float(v) if v not in (None, "") else None
 
 
-def build_runtimes(admission, lease=None) -> dict:
+def build_runtimes(admission) -> dict:
     """One `EngineRuntime` per registered adapter, all under the single admission slot. `kind` is
     "serving" for every folded-in engine (a preemptable GPU/CPU tenant); job runtimes (kind="job",
     never preempted) arrive with the jobs fold-in (T362).
@@ -56,7 +58,7 @@ def build_runtimes(admission, lease=None) -> dict:
     global_idle_s = float(os.getenv("IDLE_TIMEOUT", "120"))
     runtimes = {}
     for engine_id, factory in ADAPTERS.items():
-        adapter = factory(lease)
+        adapter = factory(admission)
         # The topology table is the metadata source of truth; assert the adapter agrees so a
         # gpu/optional drift between the two is caught at wiring time, not in production.
         meta = ENGINES.get(engine_id, {})

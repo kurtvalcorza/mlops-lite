@@ -14,17 +14,9 @@ way (at run time) and assume the gateway was (re)started with the matching key.
 import json
 import os
 import shutil
-import tempfile
 import urllib.request
 
 import pytest
-
-# 018: serving/gpu_lease.py honors a live holder at the FIXED pre-018 /tmp lease path (the
-# mixed-version upgrade guard), captured at module import. Point it at a per-session temp file
-# so a real /tmp/mlops-lite-gpu.lease on the box (or a parallel run) never bleeds into tests.
-os.environ.setdefault(
-    "MLOPS_LEGACY_LEASE_PATH",
-    os.path.join(tempfile.mkdtemp(prefix="mlops-legacy-lease-"), "legacy.lease"))
 
 GATEWAY_PORT = os.getenv("GATEWAY_PORT", "8080")
 UI_PORT = os.getenv("UI_PORT", "3000")
@@ -91,34 +83,37 @@ def require_key():
         pytest.skip("GATEWAY_API_KEY not set — run scripts/gen_secrets and export it for auth checks")
 
 
+# 018 T364: every engine is served by the ONE host agent; these gate on the per-engine reachability
+# the gateway derives from the agent's /health, so the skip hint points at the agent bring-up (up_all)
+# rather than the retired per-daemon run scripts.
 @pytest.fixture
 def require_serving(require_gateway):
     if not _daemon_reachable("serving"):
-        pytest.skip("serving daemon not reachable — start the native llama-server (serve_up)")
+        pytest.skip("llm engine (host agent /engines/llm) not reachable — bring the agent up (up_all)")
 
 
 @pytest.fixture
 def require_vision(require_gateway):
     if not _daemon_reachable("vision"):
-        pytest.skip("vision (BentoML) daemon not reachable — bash serving/bento/run.sh")
+        pytest.skip("vision engine (host agent /engines/vision) not reachable — bring the agent up (up_all)")
 
 
 @pytest.fixture
 def require_trainer(require_gateway):
     if not _daemon_reachable("training"):
-        pytest.skip("training daemon not reachable — bash training/run.sh")
+        pytest.skip("jobs surface (host agent) not reachable — bring the agent up (up_all)")
 
 
 @pytest.fixture
 def require_embed(require_gateway):
     if not _daemon_reachable("embed"):
-        pytest.skip("embeddings (BentoML) daemon not reachable — bash serving/bento/embed_run.sh")
+        pytest.skip("embeddings engine (host agent /engines/embed) not reachable — bring the agent up (up_all)")
 
 
 @pytest.fixture
 def require_tabular(require_gateway):
     if not _daemon_reachable("tabular"):
-        pytest.skip("tabular (BentoML) daemon not reachable — bash serving/bento/tabular_run.sh")
+        pytest.skip("tabular engine (host agent /engines/tabular) not reachable — bring the agent up (up_all)")
 
 
 @pytest.fixture

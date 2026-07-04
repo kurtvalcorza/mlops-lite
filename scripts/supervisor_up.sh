@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# WSL helper for up_all (002 US3, T053): ensure the native-daemon supervisor is running and all
-# three daemons report healthy. Idempotent — if a supervisor is already up on :8099, just wait for
-# health rather than launching a second one.
+# WSL helper for up_all (002 US3, T053): ensure the native-daemon supervisor is running and its
+# daemons ({agent, ui} since 018) report healthy. Idempotent — if a supervisor is already up on
+# :8099, just wait for health rather than launching a second one.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -138,7 +138,7 @@ SC-106..110 at completion.
   passthrough (the agent orchestrates); `platform_health.py`/`platform_metrics.py` read the
   agent's single health (parallelize the remaining probes with `asyncio.gather`);
   `tests/test_swap_orchestration.py` re-targeted at the passthrough contract.
-- [ ] **T364** [US2] Lockfile retirement: delete `serving/gpu_lease.py` + the interop shim +
+- [x] **T364** [US2] Lockfile retirement: delete `serving/gpu_lease.py` + the interop shim +
   `supervisor/supervise.py` shrinks to `{agent, ui}` (unconditional backoff restart, FR-178);
   rewrite `tests/test_gpu_lease.py` → agent admission API; update `tests/test_supervisor.py`
   and the `require_*` reachability fixtures in `tests/conftest.py` to the `{agent, ui}` daemon

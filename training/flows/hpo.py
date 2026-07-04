@@ -35,7 +35,6 @@ _log = logging.getLogger(__name__)
 DEFAULT_N_TRIALS = int(os.getenv("HPO_N_TRIALS", "15"))  # small — each trial is a full sequential train
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 HPO_EXPERIMENT = os.getenv("HPO_EXPERIMENT", "hpo")
-LEASE_TENANT = "training"  # the GPU-lease identity a study runs under (same as the trainer daemon)
 
 # modality -> the registry `task` tag 011 keys its metric/direction off of.
 MODALITY_TASK = {
@@ -91,32 +90,16 @@ def _default_train(req: dict) -> dict:
         req_path, res_path = os.path.join(tmp, "req.json"), os.path.join(tmp, "res.json")
         with open(req_path, "w", encoding="utf-8") as f:
             json.dump(req, f)
-        # Popen + record the child as the lease's VRAM owner (matching the trainer daemon's _worker),
-        # so the single GPU lease's liveness self-heal fires if a trial process dies/hangs — closing
-        # the asymmetry where a hung trial would otherwise strand the lease (review).
+        # A fresh subprocess per trial (CUDA isolation). The agent holds the single GPU slot for the
+        # whole study as one `kind="job"` admission (hostagent.jobs) — the trial is its child, so
+        # there is no separate lease VRAM-owner to record (T364 retired the cross-process lockfile).
         proc = subprocess.Popen([sys.executable, run_flow, req_path, res_path], env=os.environ.copy())
-        _set_trial_vram_owner(proc.pid)
         proc.wait()
         rec = read_result(res_path, proc.returncode)
     if rec.get("status") != "completed":
         raise HpoError(rec.get("error", "trial training failed"))
     return {"run_id": rec.get("mlflow_run_id"), "model": rec.get("model"),
             "metrics": rec.get("metrics"), "params": rec.get("params")}
-
-
-def _set_trial_vram_owner(pid: int) -> None:
-    """Record a trial's training subprocess as the GPU lease's VRAM owner (best-effort) so the lease
-    self-heals on its death — same liveness discipline as the trainer daemon's `_worker`. A no-op if
-    the stdlib-only lease isn't importable (e.g. off the WSL host, or in tests)."""
-    try:
-        serving = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "serving")
-        if serving not in sys.path:
-            sys.path.insert(0, serving)
-        import gpu_lease
-        gpu_lease.set_vram_owner(LEASE_TENANT, pid)
-    except Exception:
-        pass
 
 
 def _default_eval(name: str, version: str, modality: str) -> dict:

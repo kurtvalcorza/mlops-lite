@@ -115,31 +115,13 @@ services:
       # 005 US2 (FR-042): fail-closed by default. No key => protected routes 401, UNLESS this
       # truthy dev override runs the gateway open (logged loudly). Never the default.
       GATEWAY_ALLOW_OPEN: ${GATEWAY_ALLOW_OPEN:-}
-      # GPU host agent on the WSL host (018). up_all.ps1 injects the Ubuntu IP since
-      # host.docker.internal can't cross WSL distros.
+      # GPU host agent on the WSL host (018). The SINGLE endpoint since T364 folded every engine
+      # (llm/asr/vision/embed/tabular) AND the jobs surface into one process; the gateway derives each
+      # per-engine base (`${AGENT_URL}/engines/<id>`) + the legacy /train|/classify|/transcribe|…
+      # byte-compatible paths from it (gateway/app/settings.py). up_all.ps1 injects the Ubuntu IP
+      # since host.docker.internal can't cross WSL distros.
       AGENT_URL: ${AGENT_URL:-http://host.docker.internal:8100}
-      # 018 T358: the LLM engine is served by the agent — SERVING_URL is the agent's /engines/llm
-      # sub-path (byte-compatible /health, /infer, /infer/stream, /unload-now). Folds to a single
-      # AGENT_URL at T364; the other modalities still point at their legacy daemons for now.
-      SERVING_URL: ${SERVING_URL:-http://host.docker.internal:8100/engines/llm}
       SERVING_MODEL: ${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}
-      # 018 T362: the training/HPO/batch/shadow-replay jobs surface folded into the host agent —
-      # TRAINER_URL points at the agent ROOT, which serves the legacy /train|/study|/batch|
-      # /shadow-replay aliases + a superset /health byte-compatibly (FR-177). up_all.ps1 injects the
-      # Ubuntu IP. Collapses into AGENT_URL at T364.
-      TRAINER_URL: ${TRAINER_URL:-http://host.docker.internal:8100}
-      # Native BentoML vision service (US1 vision/audio, CPU). serve_up.ps1 injects the Ubuntu IP.
-      # 018 T360: the vision engine is served by the host agent's /engines/vision sub-path (was the
-      # BentoML supervisor on :8092). Byte-compatible /readyz, /classify, /unload-now.
-      BENTO_URL: ${BENTO_URL:-http://host.docker.internal:8100/engines/vision}
-      # 018 T361: the embeddings + tabular CPU engines are served by the host agent's
-      # /engines/{embed,tabular} sub-paths (were BentoML supervisors on :8093/:8094). Byte-compatible
-      # /readyz, /embed, /predict.
-      EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8100/engines/embed}
-      TABULAR_URL: ${TABULAR_URL:-http://host.docker.internal:8100/engines/tabular}
-      # 018 T359: the ASR engine is served by the host agent's /engines/asr sub-path (was the
-      # whisper.cpp supervisor on :8095). Byte-compatible /health, /transcribe, /unload-now.
-      ASR_URL: ${ASR_URL:-http://host.docker.internal:8100/engines/asr}
       # MinIO/S3 for the dataset registry (US3).
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"

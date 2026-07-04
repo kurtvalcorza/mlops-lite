@@ -1,31 +1,18 @@
 """In-process single-slot GPU admission (018 US2, FR-168 — the lease, realized as a lock).
 
 The cross-process lockfile protocol existed only because the GPU tenants were separate
-processes; with one owner, admission is a decision under ONE re-entrant lock — race-free by
-construction, no time-of-check/time-of-use window (the free-VRAM read, the holder check, and
-the claim all happen while holding `_lock`). The same lock is what makes swap transactional
-(`hostagent.swap` holds it across evict→free→load, FR-171).
+processes; with one owner (T364 retired the last legacy daemon), admission is a decision under
+ONE re-entrant lock — race-free by construction, no time-of-check/time-of-use window (the
+free-VRAM read, the holder check, and the claim all happen while holding `_lock`). The same lock
+is what makes swap transactional (`hostagent.swap` holds it across evict→free→load, FR-171).
 
 Live-VRAM admission (FR-175): `GpuReader` prefers NVML (`pynvml`, in-process, microseconds) and
 falls back to one `nvidia-smi` fork only when NVML is unavailable; reads are cached with a short
 TTL so steady-state health polling forks nothing. When the GPU is unreadable the static budget
 check applies — never fail-open into co-residency.
-
-Migration interop (FR-166): while any legacy daemon remains, every agent claim also acquires the
-legacy file lease (`serving/gpu_lease.py`) under the tenant's legacy identity, so an agent
-tenant and a legacy tenant can never co-reside. The shim (`lease=` seam) is deleted at T364.
 """
-import logging
 import threading
 import time
-
-from platformlib.topology import Tenant
-
-_log = logging.getLogger("hostagent.admission")
-
-#: Agent tenant id → legacy lockfile identity (the llama supervisor still claims "llm-serving").
-LEGACY_TENANT = {Tenant.LLM: Tenant.LLM_LEGACY, Tenant.ASR: Tenant.ASR,
-                 Tenant.VISION: Tenant.VISION, Tenant.TRAINING: Tenant.TRAINING}
 
 _BUDGET_SAFETY = 0.95  # static-budget fallback margin — same value the lockfile lease used
 
@@ -97,11 +84,9 @@ class Admission:
     """The single slot. All mutation happens under `lock` (re-entrant so `hostagent.swap` can
     hold it across a whole evict→free→load transaction)."""
 
-    def __init__(self, vram_budget_gb: float, gpu: GpuReader = None, lease=None,
-                 clock=time.time):
+    def __init__(self, vram_budget_gb: float, gpu: GpuReader = None, clock=time.time):
         self.lock = threading.RLock()
         self.gpu = gpu or GpuReader()
-        self._lease = lease  # legacy lockfile module (interop shim) or None once retired
         self._clock = clock
         self._budget = vram_budget_gb
         self._holder = None  # {"tenant","kind","est_gb","child_pid","acquired_at"}
@@ -174,22 +159,6 @@ class Admission:
                 raise VramExceeded(
                     f"{tenant} needs ~{est_gb:.1f}GB, over the {self._budget:.0f}GB budget "
                     f"(GPU unreadable — static check)")
-            if self._lease is not None:  # migration interop: also claim the legacy file lease
-                try:
-                    self._lease.acquire(LEGACY_TENANT.get(tenant, tenant), est_gb=est_gb,
-                                        vram_budget_gb=self._budget)
-                except Exception as e:
-                    # Map the legacy lease's refusals onto OUR types (internal review, 018): the
-                    # lease module is loaded separately, so its LeaseHeld/VramExceeded are foreign
-                    # classes — unmapped they'd surface as a 500 instead of the 409/507 the agent
-                    # surface derives from Held/VramExceeded. Matching by name keeps this module
-                    # free of a hard import on the (retiring, T364) serving/gpu_lease.
-                    name = type(e).__name__
-                    if name == "LeaseHeld":
-                        raise Held(getattr(e, "holder", None) or {}) from e
-                    if name == "VramExceeded":
-                        raise VramExceeded(str(e)) from e
-                    raise
             self._holder = {"tenant": tenant, "kind": kind, "est_gb": est_gb,
                             "child_pid": None, "acquired_at": self._clock()}
             return dict(self._holder)
@@ -200,25 +169,9 @@ class Admission:
         with self.lock:
             if self._holder and self._holder["tenant"] == tenant:
                 self._holder["child_pid"] = pid
-                if self._lease is not None:
-                    try:
-                        self._lease.set_vram_owner(LEGACY_TENANT.get(tenant, tenant), pid)
-                    except Exception:
-                        pass  # interop bookkeeping only — never fail a load over it
 
     def release(self, tenant: str) -> None:
         """Drop our claim (idempotent, own-tenant only)."""
         with self.lock:
             if self._holder and self._holder["tenant"] == tenant:
                 self._holder = None
-                if self._lease is not None:
-                    try:
-                        self._lease.release(LEGACY_TENANT.get(tenant, tenant))
-                    except Exception:
-                        # Never fail the in-process release over the interop shim — but do NOT
-                        # swallow it silently: a dropped lease release leaves a stale lockfile
-                        # record that the lease's same-owner self-heal (019/US2) must reconcile on
-                        # the next acquire. Log it so the skipped release is observable, not a
-                        # silent wedge (019/US2, FR-190).
-                        _log.warning("legacy lease release for %s failed; the lockfile record will "
-                                     "be self-healed on the next acquire", tenant, exc_info=True)

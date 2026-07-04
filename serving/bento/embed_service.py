@@ -5,10 +5,10 @@ Serves a sentence-transformer embedding model packaged with MLflow's `sentence_t
 `embed(texts: list[str]) -> list[list[float]]` with `@bentoml.api(batchable=True)` so BentoML batches
 texts across concurrent requests into one forward pass (CPU throughput).
 
-**CPU-only, off the GPU lease, ALWAYS available** (grilled 2026-06-28). Unlike the vision service
-(008 US2, a GPU lease tenant), embeddings never imports gpu_lease and never touches VRAM — an `embed`
-call succeeds even while a GPU tenant (LLM/vision/ASR/training) holds the lease. That removes the RAG
-embed→LLM swap thrash: embed (CPU) and the LLM (GPU) never contend. Lazy-load + idle-release mirror
+**CPU-only, off GPU admission, ALWAYS available** (grilled 2026-06-28). Unlike the vision service
+(008 US2, a GPU tenant), embeddings never touches VRAM or the agent's GPU slot — an `embed` call
+succeeds even while a GPU tenant (LLM/vision/ASR/training) holds it. That removes the RAG embed→LLM
+swap thrash: embed (CPU) and the LLM (GPU) never contend. Lazy-load + idle-release mirror
 the scale-to-zero shape of the other services (no resident cost until used), but here it's only RAM.
 
 Serve natively in WSL:  bash serving/bento/embed_run.sh   (gateway proxies POST /embed to it)

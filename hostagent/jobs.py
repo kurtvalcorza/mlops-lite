@@ -1,8 +1,8 @@
 """Jobs surface — the training daemon folded into the host agent (018 US2, T362, FR-172/FR-173).
 
 `training/trainer.py`'s four launch paths (`/train`, `/study`, `/batch`, `/shadow-replay`) collapse
-here into ONE parameterized `submit(kind, request)`. What the trainer did with its own lock +
-`serving/gpu_lease.py` + in-memory `_runs/_studies/_batches/_shadows` dicts is now done with the
+here into ONE parameterized `submit(kind, request)`. What the trainer did with its own lock + the
+cross-process GPU lease + in-memory `_runs/_studies/_batches/_shadows` dicts is now done with the
 agent's shared primitives:
 
   - **the single job slot** (`_active`) — one training/HPO/batch/shadow job at a time, exactly the
