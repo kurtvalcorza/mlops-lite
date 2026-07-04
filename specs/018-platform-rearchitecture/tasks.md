@@ -111,14 +111,14 @@ SC-106..110 at completion.
   + `adapters` registry; `SERVING_URL`/compose/supervise wiring; supervisor retired; 18 new tests
   + shared-lifecycle drain/reap coverage supersedes the retired supervisor tests; 325 passed /
   24 skipped offline, ruff-clean). **[HW] smoke pending on the GPU box.**
-- [ ] **T359** [US2] ASR fold-in: `hostagent/adapters/whisper.py` (multipart forward, opt-in
+- [x] **T359** [US2] ASR fold-in: `hostagent/adapters/whisper.py` (multipart forward, opt-in
   engine, `unavailable` when the CUDA build is absent); flip `ASR_URL`; delete
   `serving/whispercpp/supervisor.py` (keep `build.sh`). **[HW]** smoke.
-- [ ] **T360** [US2] Vision fold-in: `hostagent/adapters/vision.py` wrapping the BentoML child
+- [x] **T360** [US2] Vision fold-in: `hostagent/adapters/vision.py` wrapping the BentoML child
   (R10); strip the in-service lease/unload code from `serving/bento/service.py` (admission is
   the agent's job now); flip `BENTO_URL`; gateway `vision.py` drops the `busy`-marker mapping
   in favor of agent 409s. **[HW]** smoke.
-- [ ] **T361** [P] [US2] CPU fold-ins: `hostagent/adapters/{embed,tabular}.py` (children, no
+- [x] **T361** [P] [US2] CPU fold-ins: `hostagent/adapters/{embed,tabular}.py` (children, no
   admission); flip `EMBED_URL`/`TABULAR_URL`; retire their supervise entries.
 - [x] **T362** [US2] Jobs fold-in: `hostagent/jobs.py` ports the trainer daemon's four launch
   paths into one parameterized submit (subprocess-per-run via `training/run_flow.py` +
@@ -134,7 +134,7 @@ SC-106..110 at completion.
   surface doesn't need): `training/scoring/__init__.py:_load_evaluation`,
   `training/flows/hpo.py:_load_evaluation`, `training/flows/batch_infer.py:_load_batch`,
   `training/flows/shadow_replay.py:_load_gateway_shadow` → `platformlib` imports.
-- [ ] **T363** [US2] Gateway swap thinning: `gateway/app/swap.py` reduces to preempt-flag
+- [x] **T363** [US2] Gateway swap thinning: `gateway/app/swap.py` reduces to preempt-flag
   passthrough (the agent orchestrates); `platform_health.py`/`platform_metrics.py` read the
   agent's single health (parallelize the remaining probes with `asyncio.gather`);
   `tests/test_swap_orchestration.py` re-targeted at the passthrough contract.
