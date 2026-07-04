@@ -1,17 +1,16 @@
-"""Vision engine adapter (018 US2, T360) — wraps the BentoML vision service as an agent child.
+"""Vision engine adapter (018 US2, T360; 020 T410 — launch flipped to the slim child).
 
-Unlike the llama/whisper adapters (which spawn a single binary), vision is an existing BentoML
-service. Per research R10 the fold-in WRAPS it: the adapter spawns `serving/bento/run.sh` on a
-dynamic loopback port, probes BentoML's `/readyz`, and relays the classify request. The service's
-own in-process GPU-lease code is stripped in the same phase (T360) — admission is the agent's job
-now, so the adapter's `EngineRuntime` acquires the `vision` lease before spawning the child and
-killing the child frees the VRAM (BentoML loads the torch model in-process; the agent stays
-torch-free, R10).
+The adapter spawns the vision child via `serving/children/run.sh` (020 US2: a slim FastAPI
+single-route service — the BentoML framework is retired, FR-203/FR-204) on a dynamic loopback
+port, probes `/readyz`, and relays the classify request. The adapter CONTRACT is unchanged from
+the fold-in: admission is the agent's job — `EngineRuntime` acquires the `vision` lease before
+spawning the child and killing the child frees the VRAM (the child loads the torch model
+in-process; the agent stays torch-free, R10).
 
-BentoML forks worker processes, so the child is spawned in its own session (process group) and
-terminate/kill signal the WHOLE group — killing only the launcher would orphan a worker still
-holding VRAM. `classify` is a multipart image upload (the gateway forwards it verbatim); the adapter
-relays the raw multipart body + Content-Type to the child unchanged (byte-compat, FR-177).
+uvicorn may still fork/manage workers, so the child stays spawned in its own session (process
+group) and terminate/kill signal the WHOLE group. `classify` is a multipart image upload (the
+gateway forwards it verbatim); the adapter relays the raw multipart body + Content-Type to the
+child unchanged (byte-compat, FR-177).
 """
 import json
 import os
@@ -33,8 +32,8 @@ class VisionAdapter:
 
     def __init__(self, admission=None):
         self.venv = os.path.expanduser(os.getenv("VENV", "~/mlops-train"))
-        self.bentoml_bin = os.path.join(self.venv, "bin", "bentoml")
-        self.run_sh = os.path.join(_REPO, "serving", "bento", "run.sh")
+        self.uvicorn_bin = os.path.join(self.venv, "bin", "uvicorn")
+        self.run_sh = os.path.join(_REPO, "serving", "children", "run.sh")
         self.model_name = os.getenv("VISION_MODEL", "vision-mobilenet")
         self.est_gb = float(os.getenv("VISION_EST_GB", "1.0"))
         self.vram_budget_gb = vram_budget_gb()  # FR-207: the single shared budget resolver
@@ -43,9 +42,9 @@ class VisionAdapter:
 
     # -- lifecycle interface --------------------------------------------------------------------
     def available(self):
-        if not (os.path.isfile(self.bentoml_bin) and os.access(self.bentoml_bin, os.X_OK)):
-            return (False, f"bentoml not found in {self.venv} — "
-                           f"pip install bentoml torchvision pillow into the venv")
+        if not (os.path.isfile(self.uvicorn_bin) and os.access(self.uvicorn_bin, os.X_OK)):
+            return (False, f"uvicorn not found in {self.venv} — "
+                           f"pip install -r serving/children/requirements.txt into the venv")
         if not os.path.isfile(self.run_sh):
             return (False, f"vision run script missing at {self.run_sh}")
         return (True, None)
@@ -54,7 +53,7 @@ class VisionAdapter:
         return self.est_gb  # MobileNet + CUDA context (small, non-zero)
 
     def spawn(self):
-        """Spawn the bento service via its run.sh (sources .env + bridges MinIO creds) on a dynamic
+        """Spawn the slim child via its run.sh (sources .env + bridges store creds) on a dynamic
         loopback port, in its own process group so the whole worker tree is reap-able (_common)."""
         self._port, child = bento_spawn(self.run_sh)
         return child
@@ -64,7 +63,7 @@ class VisionAdapter:
 
     # -- forward surface (multipart, not JSON) --------------------------------------------------
     def forward_multipart(self, verb: str, raw_body: bytes, content_type: str, load_ms: float):
-        """Relay the raw multipart image upload to the bento child's /classify unchanged. Response
+        """Relay the raw multipart image upload to the child's /classify unchanged. Response
         {model, device, predictions} is byte-identical to the retired daemon (FR-177)."""
         if verb != "classify":
             raise ValueError(f"vision engine has no verb {verb!r}")

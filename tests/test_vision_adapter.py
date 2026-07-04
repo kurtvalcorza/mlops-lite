@@ -1,8 +1,9 @@
-"""018 T360 — Vision (BentoML) engine adapter unit tests (offline, GPU-free).
+"""018 T360 / 020 T410 — Vision engine adapter unit tests (offline, GPU-free).
 
-Stubs `urllib.request.urlopen` so no bento runs; pins the adapter interface, the multipart classify
-passthrough (raw body + Content-Type relayed unchanged), the opt-in `unavailable` when bentoml is
-absent, and that `_ProcGroup.terminate()` reaps the whole process group (BentoML forks workers).
+Stubs `urllib.request.urlopen` so no child runs; pins the adapter interface, the multipart classify
+passthrough (raw body + Content-Type relayed unchanged), the opt-in `unavailable` when uvicorn is
+absent (020 US2 flipped the launch to the slim FastAPI child), and that `ProcGroup.terminate()`
+reaps the whole process group (the child may manage workers).
 """
 import json
 import os
@@ -41,9 +42,9 @@ def _adapter(tmp_path, monkeypatch, *, installed=True):
     if installed:
         binroot = tmp_path / "venv" / "bin"
         binroot.mkdir(parents=True)
-        bento = binroot / "bentoml"
-        bento.write_text("#!/bin/sh\n")
-        os.chmod(bento, 0o755)
+        uvicorn = binroot / "uvicorn"
+        uvicorn.write_text("#!/bin/sh\n")
+        os.chmod(uvicorn, 0o755)
         monkeypatch.setenv("VENV", str(tmp_path / "venv"))
     else:
         monkeypatch.setenv("VENV", str(tmp_path / "empty-venv"))
@@ -58,10 +59,10 @@ def test_engine_metadata():
     assert a.verbs == ("classify",) and a.stream_verbs == ()
 
 
-def test_available_unavailable_without_bentoml(tmp_path, monkeypatch):
+def test_available_unavailable_without_uvicorn(tmp_path, monkeypatch):
     a = _adapter(tmp_path, monkeypatch, installed=False)
     ok, reason = a.available()
-    assert not ok and "bentoml" in reason
+    assert not ok and "uvicorn" in reason and "serving/children/requirements.txt" in reason
 
 
 def test_available_ok_when_installed(tmp_path, monkeypatch):
@@ -125,8 +126,9 @@ def test_health_shape(tmp_path, monkeypatch):
 
 
 def test_procgroup_terminate_reaps_the_group():
-    # BentoML forks workers, so the child is spawned in its own session and terminate() must signal
-    # the whole group. Drive it with a real `sleep` child (WSL/Linux only — killpg is POSIX).
+    # The child may manage worker processes, so it is spawned in its own session and terminate()
+    # must signal the whole group. Drive it with a real `sleep` child (WSL/Linux only — killpg is
+    # POSIX).
     p = subprocess.Popen(["sleep", "30"], start_new_session=True)
     pg = ProcGroup(p)
     assert pg.pid == p.pid and pg.poll() is None

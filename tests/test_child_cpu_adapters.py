@@ -1,9 +1,9 @@
-"""018 T361 — embed + tabular CPU engine adapters (offline, GPU-free).
+"""018 T361 / 020 T410 — embed + tabular CPU engine adapters (offline, GPU-free).
 
-Both are thin subclasses of the shared BentoCpuAdapter. Stubs `urllib.request.urlopen` so no bento
-runs; pins the interface, the JSON forward passthrough to the child endpoint, the opt-in
-`unavailable` when bentoml is absent, and that CPU engines are registered off-lease (gpu=False) and
-never idle-reaped.
+Both are thin subclasses of the shared ChildCpuAdapter (the slim FastAPI children since 020 US2).
+Stubs `urllib.request.urlopen` so no child runs; pins the interface, the JSON forward passthrough
+to the child endpoint, the opt-in `unavailable` when uvicorn is absent, and that CPU engines are
+registered off-lease (gpu=False) and never idle-reaped.
 """
 import json
 import os
@@ -38,9 +38,9 @@ class _Resp:
 def _installed(tmp_path, monkeypatch):
     binroot = tmp_path / "venv" / "bin"
     binroot.mkdir(parents=True)
-    bento = binroot / "bentoml"
-    bento.write_text("#!/bin/sh\n")
-    os.chmod(bento, 0o755)
+    uvicorn = binroot / "uvicorn"
+    uvicorn.write_text("#!/bin/sh\n")
+    os.chmod(uvicorn, 0o755)
     monkeypatch.setenv("VENV", str(tmp_path / "venv"))
 
 
@@ -56,10 +56,10 @@ def test_tabular_metadata():
     assert a.verbs == ("predict",)
 
 
-def test_embed_available_unavailable_without_bentoml(tmp_path, monkeypatch):
+def test_embed_available_unavailable_without_uvicorn(tmp_path, monkeypatch):
     monkeypatch.setenv("VENV", str(tmp_path / "nope"))
     ok, reason = EmbedAdapter().available()
-    assert not ok and "bentoml" in reason
+    assert not ok and "uvicorn" in reason and "serving/children/requirements.txt" in reason
 
 
 def test_embed_forward_relays_json_and_returns_vectors(tmp_path, monkeypatch):
