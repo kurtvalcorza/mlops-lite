@@ -237,8 +237,11 @@ runs against trainer *or* agent jobs surface.
   T342: Principle II mechanism sentence names the host agent's in-process admission as the
   lease realization (rule text unchanged). Update `.specify/memory/constitution.md` history
   note on ratification.
-- [ ] **T379** [P] Docs refresh: `README.md` status paragraph (stale at "through 014") + the
-  architecture mermaid diagram → agent topology; prune retired env vars from compose comments.
+- [x] **T379** [P] Docs refresh: `README.md` status + architecture mermaid now show the **US4
+  relational store** (gateway monitoring state + agent job journal on Postgres — the missing edges
+  `GW→PG`/`AG→PG` + the PG node's table list). NOTE: the status paragraph + agent-topology mermaid
+  were already current through 019 (bumped past the "stale at 014" premise by later doc work); the
+  compose per-daemon env vars were already pruned by the T358–T364 fold-ins (verified none remain).
 - [x] **T380** [P] SC-114 demonstration: stub-engine adapter test in
   `tests/test_agent_adapters.py` proving a new engine = one adapter + one registry row (zero
   edits elsewhere).

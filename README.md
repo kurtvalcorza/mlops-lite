@@ -11,8 +11,11 @@ a heavier reference platform, sized to a laptop.
 > champion-challenger), **Optuna hyperparameter optimization**, **model-quality monitoring** with
 > ground-truth labels, **offline batch inference + data-validation gates**, **score-at-registration**,
 > **advisory shadow-replay**, **operator-confirmed preemptive swap**, and — since **018** — a
-> consolidated **GPU host agent** with in-process admission, a durable job journal, shared typed
-> contracts, and a closed **declarative policy loop** (drift → retrain → gate → promote). Constitution
+> consolidated **GPU host agent** with in-process admission, shared typed contracts, a closed
+> **declarative policy loop** (drift → retrain → gate → promote), and (**018 US4**) durable
+> **relational monitoring/job state on Postgres** — predictions·labels·capture·jobs·policies·suggestions
+> as indexed table reads, replacing the O(N) object scans (a 10k-prediction window resolves in ~40 ms).
+> Constitution
 > `v1.4.1`. Reference stack on MLflow `3.14.0`.
 >
 > **In flight:** **020 stack-remediation** (object-store exit, "Bento-ectomy", agent-runtime
@@ -36,7 +39,7 @@ flowchart LR
     GW["FastAPI gateway :8080<br/>infer · embed · transcribe · predict · vision · batch<br/>models(evaluate·compare·gated-promote) · datasets(validate) · runs · studies<br/>monitor(drift · quality · labels) · policies (closed loop)"]
     MLF["MLflow :5500<br/>tracking + registry + traces"]
     MIN["MinIO :9000<br/>datasets · models · results"]
-    PG["Postgres :55432"]
+    PG["Postgres :55432<br/>MLflow backend + gateway DB<br/>(US4 relational store:<br/>predictions·labels·capture·jobs·policies·suggestions)"]
     PR["Prometheus :9090"]
     GR["Grafana :3001"]
   end
@@ -49,10 +52,12 @@ flowchart LR
   GW -->|"/train · /study · /batch · /shadow-replay (byte-compat)"| AG
   GW --> MLF
   GW --> MIN
+  GW -->|"relational monitoring store (US4): predictions·labels·policies·suggestions"| PG
   MLF --> PG
   MLF --> MIN
   AG --> MLF
   AG --> MIN
+  AG -->|"durable job journal (US4)"| PG
   SUP -.-> AG
   SUP -.-> UI
   PR -->|direct scrape| AG
