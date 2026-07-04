@@ -8,11 +8,14 @@ strict path-shape rejection of malformed inference paths (round 8), the happy-pa
 symmetric multipart/JSON 415 guards, SSE stream framing byte-parity, the control-secret gate, and
 the pre-stream JSON error path.
 """
+import http.client
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 import pytest
 
@@ -218,6 +221,53 @@ def test_stream_releases_lock_for_next_request(runtime):
         assert code == 200
         code, body = _req(base, "/engines/llm/infer", "POST", {"prompt": "again"})
         assert code == 200 and body["text"] == "ok"
+    finally:
+        server.shutdown()
+
+
+class SlowStreamLLM(FakeLLM):
+    """A stream that keeps producing (50 frames, 50ms apart) so the client can cut mid-flight."""
+
+    def stream(self, verb, body, load_ms):
+        for i in range(50):
+            yield f'data: {{"event": "t{i}"}}\n\n'.encode()
+            time.sleep(0.05)
+
+
+def test_mid_stream_disconnect_releases_lock_for_next_request(runtime):
+    # The GENUINE disconnect regression (@claude PR#56): open a stream on the real server, read
+    # two frames, hard-cut the socket mid-generation — the transport must close the frame
+    # generator (releasing the engine RLock on its owning thread) so a subsequent forward on the
+    # SAME engine succeeds promptly instead of wedging behind a leaked lock.
+    server, base, _ = _serve(SlowStreamLLM(), runtime)
+    try:
+        u = urlparse(base)
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
+        conn.request("POST", "/engines/llm/infer/stream",
+                     body=json.dumps({"prompt": "hi"}),
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        assert resp.status == 200
+        frames = 0
+        while frames < 2:
+            line = resp.fp.readline()
+            assert line, "stream ended before two frames arrived"
+            if line.startswith(b"data:"):
+                frames += 1
+        # Hard cut mid-generation (48 frames still pending). resp.close() owns the socket on a
+        # connection-close response (stdlib leg: conn.sock is already None after getresponse).
+        resp.close()
+        conn.close()
+
+        deadline = time.time() + 10
+        while True:  # the forward blocks on rt.lock until the cut stream's generator closes
+            code, body = _req(base, "/engines/llm/infer", "POST", {"prompt": "again"})
+            if code == 200:
+                break
+            assert time.time() < deadline, \
+                f"engine lock not released after mid-stream disconnect (last: {code} {body})"
+            time.sleep(0.2)
+        assert body["text"] == "ok"
     finally:
         server.shutdown()
 

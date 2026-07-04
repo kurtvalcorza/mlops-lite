@@ -8,66 +8,75 @@ output shape, SSE stream framing, and the legacy byte-compat aliases.
 
 Streaming: `stream_frames` holds the engine's RLock across the whole generation, and an RLock is
 thread-affine — so each stream gets ONE dedicated pump thread that drives the generator end-to-end
-(acquire, yield, close/release all on that thread), handing frames to the event loop over a small
-bounded queue. The first frame is pulled before headers are sent, so a pre-stream failure still
-answers a JSON error with the mapped status (same as the stdlib transport). A client disconnect
-stops the pump between frames; the pump's `finally` closes the generator on its own thread, which
-releases the lock — the next request is clean (FR-205's disconnect scenario).
+(acquire, yield, close/release all on that thread). Frames hand off to the event loop over an
+`asyncio.Queue` via `call_soon_threadsafe`, bounded by a semaphore the consumer releases — so the
+async side `await`s natively (fully cancellable) and NO shared executor thread is parked per
+stream (@claude PR#56: parking `q.get` calls on the default executor could exhaust the pool that
+also dispatches `handle_get`/`handle_post` under enough hung/disconnected streams). The first
+frame is pulled before headers are sent, so a pre-stream failure still answers a JSON error with
+the mapped status (same as the stdlib transport). A client disconnect stops the pump between
+frames; the pump's `finally` closes the generator on its own thread, which releases the lock —
+the next request is clean (FR-205's disconnect scenario).
 
 Imported lazily by `main()` only when `AGENT_RUNTIME=uvicorn` is selected — the stdlib default
 keeps the agent pip-dep-free.
 """
 import asyncio
 import json
-import queue
 import threading
 
 from hostagent import main as agent_main
 
 _QUEUE_FRAMES = 8          # small bound: backpressure a slow client instead of buffering unbounded
-_PUT_POLL_S = 0.25         # how often a blocked pump re-checks the stop flag
+_ACQUIRE_POLL_S = 0.25     # how often a backpressured pump re-checks the stop flag
 
 
 class _StreamPump:
-    """Drives a sync frame generator on one dedicated thread (RLock affinity), feeding a bounded
-    queue of ("frame", bytes) | ("end", None) | ("error", exc) items."""
+    """Drives a sync frame generator on one dedicated thread (RLock affinity), feeding an
+    asyncio.Queue of ("frame", bytes) | ("end", None) | ("error", exc) items over
+    `call_soon_threadsafe`. Backpressure = a semaphore the consumer releases per item, so the
+    async side never parks an executor thread just to wait for a frame."""
 
-    def __init__(self, gen):
+    def __init__(self, gen, loop):
         self._gen = gen
-        self.q = queue.Queue(maxsize=_QUEUE_FRAMES)
+        self._loop = loop
+        self.q = asyncio.Queue()
+        self._slots = threading.Semaphore(_QUEUE_FRAMES)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def _put(self, item) -> bool:
+    def _emit(self, item) -> bool:
         while not self._stop.is_set():
+            if not self._slots.acquire(timeout=_ACQUIRE_POLL_S):
+                continue  # queue full — re-check the stop flag, then wait again
+            if self._stop.is_set():
+                return False  # raced a stop — don't enqueue into a finished consumer
             try:
-                self.q.put(item, timeout=_PUT_POLL_S)
+                self._loop.call_soon_threadsafe(self.q.put_nowait, item)
                 return True
-            except queue.Full:
-                continue
+            except RuntimeError:
+                return False  # event loop closed (server shutdown mid-stream)
         return False
 
     def _run(self):
         try:
             for frame in self._gen:
-                if not self._put(("frame", frame)):
+                if not self._emit(("frame", frame)):
                     return  # stopped (client gone) — finally closes the generator
-            self._put(("end", None))
+            self._emit(("end", None))
         except Exception as e:  # noqa: BLE001 — surfaced to the transport for status mapping
-            self._put(("error", e))
+            self._emit(("error", e))
         finally:
             # Close ON THIS THREAD: the generator acquired the engine RLock here, so GeneratorExit
             # (→ lock release + touch) must run here too.
             self._gen.close()
 
+    def item_consumed(self):
+        self._slots.release()
+
     def stop(self):
         self._stop.set()
-        # Drain one slot so a pump blocked in q.put wakes promptly.
-        try:
-            self.q.get_nowait()
-        except queue.Empty:
-            pass
 
 
 async def _read_body(receive) -> bytes:
@@ -97,13 +106,13 @@ async def _watch_disconnect(receive):
 
 
 async def _serve_stream(send, receive, frames):
-    """First-frame-before-headers, then relay; stop on disconnect (watched, not just inferred
-    from a failing send)."""
-    pump = _StreamPump(frames)
-    loop = asyncio.get_running_loop()
+    """First-frame-before-headers, then relay; stop on disconnect (watched via the ASGI
+    `http.disconnect` message, not just inferred from a failing send)."""
+    pump = _StreamPump(frames, asyncio.get_running_loop())
     watcher = asyncio.ensure_future(_watch_disconnect(receive))
     try:
-        kind, item = await loop.run_in_executor(None, pump.q.get)
+        kind, item = await pump.q.get()
+        pump.item_consumed()
         if kind == "error":
             status, payload = agent_main.error_response(item)
             return await _send_json(send, status, payload)
@@ -113,13 +122,14 @@ async def _serve_stream(send, receive, frames):
         if kind == "frame":
             await send({"type": "http.response.body", "body": item, "more_body": True})
             while True:
-                get_task = asyncio.ensure_future(loop.run_in_executor(None, pump.q.get))
+                get_task = asyncio.ensure_future(pump.q.get())
                 done, _ = await asyncio.wait({get_task, watcher},
                                              return_when=asyncio.FIRST_COMPLETED)
                 if watcher in done:
-                    get_task.cancel()
-                    break  # client disconnected mid-stream — stop pumping, lock releases in pump
+                    get_task.cancel()  # native cancel — no executor thread left parked
+                    break  # client disconnected mid-stream — pump stops, lock releases there
                 kind, item = get_task.result()
+                pump.item_consumed()
                 if kind != "frame":
                     break  # "end" — or a mid-stream error, which the stdlib path also truncates
                 try:
@@ -154,7 +164,7 @@ def build_asgi_app(admission, journal, manager, jobs):
         headers = {k.decode().lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         method = scope["method"]
 
-        if method in ("GET", "HEAD"):
+        if method == "GET":
             code, payload, ctype = await asyncio.to_thread(
                 agent_main.handle_get, path, query,
                 admission=admission, journal=journal, manager=manager, jobs=jobs)
@@ -169,6 +179,8 @@ def build_asgi_app(admission, journal, manager, jobs):
                 _, code, payload = result
                 return await _send_json(send, code, payload)
             return await _serve_stream(send, receive, result[1])
-        return await _send_json(send, 405, {"error": "method not allowed"})
+        # The stdlib BaseHTTPRequestHandler answers any verb without a do_<VERB> with a 501 —
+        # mirror that (the agent's contract is GET/POST only; nothing pins the other verbs).
+        return await _send_json(send, 501, {"error": f"unsupported method {method}"})
 
     return app
