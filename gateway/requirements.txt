@@ -21,3 +21,9 @@ boto3==1.43.36
 # by hand rather than pulling Evidently+pandas+scipy onto the constrained Windows C: drive. sklearn
 # would drag in numpy+scipy for math we do exactly in a few lines; jiwer pulls a compiled rapidfuzz.
 # Those libs stay swappable behind evaluation.METRICS (Principle V) if a modality later needs them.
+
+# 018 US4 (T373) — relational monitoring store (platformlib.store) on the resident Postgres `gateway`
+# DB: predictions/labels/capture/jobs/policies/suggestions, replacing O(N) MinIO object scans (FR-186,
+# SC-111). psycopg 3 binary wheel (no system libpq needed); imported lazily so platformlib stays
+# importable driver-free. The Postgres server is already resident (MLflow backend) — no new service.
+psycopg[binary]==3.3.4
