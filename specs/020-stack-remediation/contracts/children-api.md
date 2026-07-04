@@ -12,7 +12,9 @@ The agent adapters are the ONLY consumers (FR-177). Each child keeps, byte-for-b
 
 Launch contract (unchanged from R10/018): the adapter spawns `run.sh` with a dynamic port in a
 process group; readiness = the probe; teardown = process-group signal. The ONLY permitted adapter
-edits are the child launch path and the `unavailable` pip-hint string. Error vocabulary at the
+edits are the child launch path, the `unavailable` pip-hint string, and the cosmetic
+`_bento_cpu.py` → `_child_cpu.py` module rename (with its import updates) — the adapter
+*contract* (verbs, states, error mapping) is untouched. Error vocabulary at the
 agent boundary (404 verb / 415 content-type / 5xx child failure) is unchanged.
 
 Gate: the GoldenSet replay (data-model.md) diffs status + content type + body bytes at the agent

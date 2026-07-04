@@ -16,7 +16,9 @@ Tests are house-mandatory: every behavior task ships its regression in the same 
   `infra/garage/init.sh` (idempotent one-shot: layout assign/apply → 4 buckets → key create →
   per-bucket read+write allow) + `docker-compose.yml`: `garage` service (pinned digest, volume)
   and `garage-init` one-shot — added BESIDE minio (no cutover; the env seam still points at
-  minio); `scripts/gen_secrets` + `.env.example` gain the Garage key pair wiring. Validate:
+  minio); `scripts/gen_secrets` + `.env.example` gain the Garage key pair wiring — direction
+  REVERSED vs MinIO per contracts §bootstrap: init.sh emits the CLI-minted pair, gen_secrets
+  records it into `.env` (idempotent, never re-mints). Validate:
   `docker compose config` clean with both stores defined.
 - [ ] **T402** [P] Children/runtime dependency pin (research R5/R7):
   `serving/children/requirements.txt` with the single `fastapi`+`uvicorn` pin (shared by US2
@@ -40,14 +42,18 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
 - [ ] **T404** [US1] **[HW]** Candidate spike (FR-202 gate; quickstart §US1.1, research R2
   checklist): MLflow artifact round-trip incl. one multi-hundred-MB multipart upload;
   `platformlib.store` pagination; `_missing()` 404 discrimination; duplicate-PUT write-once;
-  idle RSS at rest recorded (SC-130 gate: ≤ incumbent); offline suite + golden flows green
-  against the candidate. Record in `docs/on-hardware-validation-018.md`. A miss ⇒ switch to
+  idle RSS at rest recorded (`docker stats --no-stream`, ≥5 min idle — SC-130 gate:
+  ≤ incumbent); offline suite + golden flows green against the candidate **via a temporary
+  env-seam flip to the empty candidate (flows self-create data), flipped back before
+  migration**. Record in `docs/on-hardware-validation-018.md`. A miss ⇒ switch to
   SeaweedFS per R1 and repeat (same plan, same tasks).
 - [ ] **T405** [US1] **[HW]** Migrate → cutover → rollback proof → soak (quickstart §US1.2–4;
   FR-199/200): forward run `parity: true`, re-run `copied: 0`; flip the three-env cutover
   contract; golden flows + full suite pass unchanged (SC-128); one rollback flip proven, then
   forward again; MigrationReports kept under `docs/`.
-- [ ] **T406** [US1] **[HW]** Decommission (FR-201; operator confirms FIRST): final forward run
+- [ ] **T406** [US1] **[HW]** Decommission (FR-201; operator confirms FIRST): quiesce writers
+  (contract §concurrent-write: stop gateway + agent, or at minimum the policy scheduler +
+  prediction/capture logging), then final forward run
   `copied: 0` everywhere; execute the contract checklist (compose services/volumes/digests,
   gen_secrets + .env.example wiring, README/runbook refs, CVE-digest note retired);
   `docker compose config` has zero references to the retired store (SC-129); stack restarts
@@ -108,7 +114,9 @@ components and a proven rollback story (now moot).
   RuntimeBaselineRecords + the FR-205 verdict in `docs/on-hardware-validation-018.md`. Any
   stdlib baseline miss ⇒ flip the default to `uvicorn` and re-run the full agent suite on it;
   no miss ⇒ stdlib stays. Either way the loser's deletion is queued for the next increment
-  (research R7 — no permanent dual matrix).
+  (research R7 — no permanent dual matrix). Runbook note: the `-018` doc name is deliberate
+  (one [HW] session, shared records); 018's T379 renames it to
+  `docs/on-hardware-validation.md` carrying both increments' records.
 
 **Checkpoint**: the runtime choice is a recorded measurement, not a default.
 
@@ -116,8 +124,9 @@ components and a proven rollback story (now moot).
 
 - [ ] **T416** [P] [US4] Budget-knob audit + regression: repo audit pins the only VRAM-budget
   literal is the `VRAM_GB` env default (FR-207); `tests/test_agent_admission.py` gains the
-  knob test — GPU unreadable + `VRAM_GB=16`: 15.3 GB-estimate admitted, 15.5 GB refused
-  (thresholds move with the knob, 16×0.95 — SC-133).
+  knob test — GPU unreadable + budget 16: a **15.0 GB** estimate is admitted, a **15.5 GB**
+  one refused (the static-fallback threshold is 16 × 0.95 = **15.2 GB** and moves with the
+  knob — SC-133).
 - [ ] **T417** [US4] New-machine bring-up checklist in `README.md` (coordinated with 018's
   T379 refresh so the README is edited once): `VRAM_GB`, native builds
   (llama.cpp / whisper.cpp `build.sh`), CUDA-index torch/torchvision wheels,
@@ -131,7 +140,8 @@ components and a proven rollback story (now moot).
   FastAPI children behind the agent, hand-rolled PSI + Prometheus/Grafana); rule text unchanged.
 - [ ] **T419** [P] Env-surface docs: `.env.example` gains `AGENT_RUNTIME` (with the
   decision-window note) and the Garage endpoint/credential block with the cutover-contract
-  cross-reference; stale MinIO comments pruned (final sweep beyond T406's checklist).
+  cross-reference. Scope boundary vs T406: ALL MinIO-reference removal belongs to T406's
+  decommission checklist; T419 touches only the additions named here.
 
 ## Dependencies & execution order
 

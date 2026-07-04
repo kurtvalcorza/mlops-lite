@@ -11,8 +11,14 @@ Prereq: drive headroom ≥ current object population size ×2 (both stores co-re
 1. **Spike (gate — FR-202)**: `docker compose up -d garage` beside the running stack; run
    `infra/garage/init.sh`; then per research R2's checklist: MLflow artifact round-trip incl. one
    multi-hundred-MB model (multipart), `platformlib.store` pagination past 1,000 keys, `_missing()`
-   404 discrimination, duplicate-PUT write-once behavior, idle RSS at rest (record; SC-130 gate:
-   ≤ incumbent). Expected: all green. A miss ⇒ switch candidate (SeaweedFS) and repeat this drill.
+   404 discrimination, duplicate-PUT write-once behavior, idle RSS at rest — measured as
+   `docker stats --no-stream` after ≥5 min idle, both stores, same host (record; SC-130 gate:
+   ≤ incumbent). For the suite + smoke-flow leg: **temporarily flip the env seam to the (empty)
+   candidate** — the flows self-create their data — run them, then **flip back to the incumbent
+   before migration** (this mini-flip is the spike's own rehearsal of the cutover contract).
+   Expected: all green. A miss ⇒ switch candidate (SeaweedFS) and repeat this drill.
+   *(Terminology: the end-to-end platform "golden/smoke flows" here are unrelated to US2's
+   "goldens" — the per-child byte-parity request/response pairs.)*
 2. **Migrate**: `python scripts/migrate_store.py --source-endpoint <minio> --dest-endpoint <garage>
    --report /tmp/mig1.json` → `parity: true`; re-run → every bucket `copied: 0` (idempotence,
    SC-127).
@@ -21,9 +27,11 @@ Prereq: drive headroom ≥ current object population size ×2 (both stores co-re
    infer → drift/quality check → policy tick. Full offline suite passes untouched (SC-128).
 4. **Rollback proof** (once, before soak ends): flip the env back, confirm the platform serves
    from the incumbent; `--reverse` mirror carries back any post-cutover writes; flip forward again.
-5. **Decommission (operator confirms first — FR-201)**: final forward run shows `copied: 0`;
-   remove minio+createbuckets per the contract checklist; `docker compose config | grep -i minio`
-   → empty; stack restarts clean. Expected end state: zero unmaintained components (SC-129).
+5. **Decommission (operator confirms first — FR-201)**: quiesce writers (stop gateway + agent,
+   or at minimum the policy scheduler + prediction/capture logging), then the final forward run
+   shows `copied: 0` on every bucket; remove minio+createbuckets per the contract checklist;
+   `docker compose config | grep -i minio` → empty; stack restarts clean. Expected end state:
+   zero unmaintained components (SC-129).
 
 ## US2 — Bento-ectomy (per child; vision, then embed + tabular)
 
@@ -55,8 +63,9 @@ Prereq: drive headroom ≥ current object population size ×2 (both stores co-re
 
 1. `grep -rn` for VRAM-budget literals outside the single `VRAM_GB` default + docs → none
    (FR-207).
-2. With the GPU reader stubbed unreadable and `VRAM_GB=16`: a 15.5 GB-estimate load is admitted,
-   a 15.3 GB one refused at 16×0.95 — thresholds move with the knob (SC-133; offline test).
+2. With the GPU reader stubbed unreadable and `VRAM_GB=16`: a **15.0 GB**-estimate load is
+   admitted, a **15.5 GB** one refused — the static-fallback threshold is 16 × 0.95 =
+   **15.2 GB** and moves with the knob (SC-133; offline test).
 3. Bring-up checklist present in the README refresh (rides T379): `VRAM_GB`, native builds,
    CUDA-index wheels, `gen_secrets`, renamed-host beacon note.
 
