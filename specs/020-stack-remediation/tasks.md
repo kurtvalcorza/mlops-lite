@@ -115,8 +115,8 @@ components and a proven rollback story (now moot).
   stdlib baseline miss ⇒ flip the default to `uvicorn` and re-run the full agent suite on it;
   no miss ⇒ stdlib stays. Either way the loser's deletion is queued for the next increment
   (research R7 — no permanent dual matrix). Runbook note: the `-018` doc name is deliberate
-  (one [HW] session, shared records); 018's T379 renames it to
-  `docs/on-hardware-validation.md` carrying both increments' records.
+  (one [HW] session, shared records); **T419 renames it** to
+  `docs/on-hardware-validation.md` once both increments' records have landed.
 
 **Checkpoint**: the runtime choice is a recorded measurement, not a default.
 
@@ -140,8 +140,11 @@ components and a proven rollback story (now moot).
   FastAPI children behind the agent, hand-rolled PSI + Prometheus/Grafana); rule text unchanged.
 - [ ] **T419** [P] Env-surface docs: `.env.example` gains `AGENT_RUNTIME` (with the
   decision-window note) and the Garage endpoint/credential block with the cutover-contract
-  cross-reference. Scope boundary vs T406: ALL MinIO-reference removal belongs to T406's
-  decommission checklist; T419 touches only the additions named here.
+  cross-reference; rename `docs/on-hardware-validation-018.md` →
+  `docs/on-hardware-validation.md` (both increments' records; runs LAST, after the [HW]
+  session's records land — 020 owns this rename, 018's T379 does not mention it) and update
+  the references in 018/020 artifacts. Scope boundary vs T406: ALL MinIO-reference removal
+  belongs to T406's decommission checklist; T419 touches only the items named here.
 
 ## Dependencies & execution order
 
