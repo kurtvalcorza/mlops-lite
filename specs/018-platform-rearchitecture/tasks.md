@@ -187,8 +187,12 @@ runs against trainer *or* agent jobs surface.
   (gate + shadow verdicts, accept/dismiss) + audit rows on `ui/app/models/page.tsx`; `ui/lib/
   gw.ts` returns structured `{status, body}` errors (retiring the `'-> 409'` string-match in
   `ui/app/runs/page.tsx`); allowlist additions.
-- [ ] **T372** [US3] **[HW]** SC-112 loop drill per quickstart (declared vision policy →
-  injected breach → suggestion, zero manual steps); append to `docs/on-hardware-validation-018.md`.
+- [x] **T372** [US3] **[HW]** SC-112 **PASS** (RTX 5070 Ti, 2026-07-04): declared vision policy →
+  injected quality breach (24 wrong-labeled store pairs) → scheduler autonomously launched a vision
+  retrain within one interval (with the FR-163 failed-launch/cooldown-release retry seen live) →
+  registered + gate-scored → **OPEN promotion suggestion** (green candidate 0.25 > incumbent 0.20),
+  zero manual steps between detection and suggestion; a not-green candidate was correctly withheld
+  (FR-183). Recorded in `docs/on-hardware-validation-018.md`; artifacts cleaned up.
 
 **Checkpoint**: Principle IV loop closed; `manual` default verified byte-for-byte.
 
