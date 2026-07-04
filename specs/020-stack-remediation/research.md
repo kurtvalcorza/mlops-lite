@@ -66,13 +66,22 @@ US1 **spike** before migration — the spike, not this document, is the gate (FR
 
 ## R4. Cutover mechanics: one env seam, both stores live through the window
 
-- **Decision**: The store endpoint stays a single env seam (`MLFLOW_S3_ENDPOINT_URL` + the AWS
-  credential pair) consumed by the gateway container, the MLflow server, and the host venv.
+- **Decision**: The store endpoint is an env seam (the AWS credential pair plus the endpoint,
+  which resolves as `S3_ENDPOINT_URL` → `MLFLOW_S3_ENDPOINT_URL` → a hardcoded `minio:9000`
+  fallback) consumed by the gateway container, the MLflow server, and the host venv.
   Sequence: garage service up alongside minio → spike → migrate → **flip the env + restart**
   (cutover) → soak (golden flows + normal operation) → operator confirms → delta re-mirror
-  back-check → remove minio + createbuckets + pinned digests + secrets wiring + docs (FR-201).
-  Rollback at any pre-confirm point: flip the env back (FR-200); a `--reverse` mirror carries any
-  post-cutover writes back first.
+  back-check → remove minio + createbuckets + pinned digests + secrets wiring + docs + the
+  hardcoded source-default endpoints (FR-201). Rollback at any pre-confirm point: flip the env back
+  (FR-200); a `--reverse` mirror carries any post-cutover writes back first.
+- **Seam caveat (the review's finding — the seam is two vars + baked defaults, not one)**: because
+  `S3_ENDPOINT_URL` wins over `MLFLOW_S3_ENDPOINT_URL`, and the host consumers bake a `:9000`
+  default (`hostagent/run.sh`, `training/flows/*`), a naive "flip one var" cutover can silently
+  no-op (if `S3_ENDPOINT_URL` is set) or break on the wrong port (if a host consumer falls back to
+  its default). So the cutover asserts `S3_ENDPOINT_URL` unset, exports the endpoint explicitly to
+  the Garage host port, and verifies the client's *resolved* `endpoint_url` moved
+  (contracts/store-migration.md §cutover). The clean single-seam story remains the design intent;
+  020 hardens the two rough edges rather than assuming them away.
 - **Rationale**: the platform earned this cheap cutover by routing every byte through one
   endpoint seam since 003 — 020 collects on that design. Compose keeps both services defined
   during the window; no profiles machinery needed (the seam is the switch, the services are just
@@ -129,9 +138,12 @@ US1 **spike** before migration — the spike, not this document, is the gate (FR
 
 ## R8. GPU-budget portability audit + bring-up doc
 
-- **Decision**: A repo audit pins that the only VRAM-budget literal is the `VRAM_GB` env default
-  (agent) — model-size estimates and per-engine idle knobs are already env-driven; live NVML
-  reads remain the primary admission input (static budget = fallback only). The bring-up
+- **Decision**: A repo audit pins that the only VRAM-budget literals are `VRAM_GB` env fallbacks.
+  Today that default (`"12"`) is duplicated across five reads (`hostagent/main.py`,
+  `hostagent/jobs.py`, and the `llama`/`vision`/`whisper` adapters); the audit **consolidates them
+  to one resolver** so a machine set to a different budget can't be left partially on the old
+  value if the env is ever unset. Model-size estimates and per-engine idle knobs are already
+  env-driven; live NVML reads remain the primary admission input (static budget = fallback only). The bring-up
   checklist (new-machine section in the README refresh that T379 already owes) lists: `VRAM_GB`,
   native binary rebuilds (llama.cpp / whisper.cpp `build.sh`), the CUDA-indexed torch/torchvision
   wheels, `scripts/gen_secrets`, and the state-dir/beacon behavior on a renamed host (self-heals

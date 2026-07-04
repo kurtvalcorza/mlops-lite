@@ -122,6 +122,11 @@ hostagent/main.py        # US3 (conditional): AGENT_RUNTIME=stdlib|uvicorn switc
 │                        #   reusing the existing framework-free forward functions
 training/requirements.txt / serving/children/requirements.txt  # venv: -bentoml, +fastapi+uvicorn
 platformlib/topology.py  # store endpoint resolution unchanged (env-driven); no code change
+platformlib/store.py,s3io.py  # DECOMMISSION-ONLY: repoint/drop the hardcoded `minio:9000`
+│                        #   endpoint fallback (T406) — a default-literal edit, not a call-site
+│                        #   change; the resolution ORDER (S3_ENDPOINT_URL → MLFLOW_S3_ENDPOINT_URL)
+│                        #   is unchanged and drives the cutover assertion in T405
+hostagent/run.sh, training/flows/*  # DECOMMISSION-ONLY: `:9000` default → Garage host port
 tests/                   # goldens/ fixtures + migrate-store unit tests (two-FakeS3 mirror),
                          #   children contract tests, dual-runtime agent HTTP tests
 ```
@@ -129,7 +134,11 @@ tests/                   # goldens/ fixtures + migrate-store unit tests (two-Fak
 **Structure Decision**: no new top-level packages. The children move from `serving/bento/` to
 `serving/children/` (framework-neutral name — the directory outlives any one serving library);
 `infra/garage/` mirrors the existing `infra/prometheus`/`infra/mlflow` pattern. All store access
-continues through the existing seams — zero call-site changes expected outside compose/env.
+continues through the existing seams — **zero call-site changes**. The only source edits are the
+decommission-time repoint of the hardcoded `minio:9000`/`:9000` **endpoint-fallback defaults**
+(T406): the resolution order (`S3_ENDPOINT_URL` → `MLFLOW_S3_ENDPOINT_URL` → default) is preserved,
+so the seam and every call site are unchanged — only the retired store's name/port leaves the
+defaults, which is required for SC-129's "zero references" to hold across code, not just compose.
 
 ## Complexity Tracking
 

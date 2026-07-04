@@ -22,16 +22,22 @@ Prereq: drive headroom ≥ current object population size ×2 (both stores co-re
 2. **Migrate**: `python scripts/migrate_store.py --source-endpoint <minio> --dest-endpoint <garage>
    --report /tmp/mig1.json` → `parity: true`; re-run → every bucket `copied: 0` (idempotence,
    SC-127).
-3. **Cutover**: flip the three env vars (contract table), `docker compose up -d` + restart host
-   venv services; run the golden flows: dataset register → fine-tune (small) → gate → promote →
-   infer → drift/quality check → policy tick. Full offline suite passes untouched (SC-128).
+3. **Cutover**: flip the env vars (contract table) — **assert `S3_ENDPOINT_URL` is unset (it wins
+   over `MLFLOW_S3_ENDPOINT_URL` if set) and export `MLFLOW_S3_ENDPOINT_URL` to the Garage host
+   port `:3900` for every host consumer** (the baked defaults are `:9000`); `docker compose up -d`
+   + restart host venv services; confirm the client's resolved endpoint moved
+   (`python -c "import boto3,platformlib.store as s; print(s.s3_client().meta.endpoint_url)"` →
+   Garage). Run the golden flows: dataset register → fine-tune (small) → gate → promote → infer →
+   drift/quality check → policy tick. Full offline suite passes untouched (SC-128).
 4. **Rollback proof** (once, before soak ends): flip the env back, confirm the platform serves
    from the incumbent; `--reverse` mirror carries back any post-cutover writes; flip forward again.
 5. **Decommission (operator confirms first — FR-201)**: quiesce writers (stop gateway + agent,
    or at minimum the policy scheduler + prediction/capture logging), then the final forward run
-   shows `copied: 0` on every bucket; remove minio+createbuckets per the contract checklist;
-   `docker compose config | grep -i minio` → empty; stack restarts clean. Expected end state:
-   zero unmaintained components (SC-129).
+   shows `copied: 0` on every bucket; remove minio+createbuckets and repoint/drop the hardcoded
+   `minio`/`:9000` source-default endpoints per the contract checklist; both
+   `docker compose config | grep -i minio` **and** `grep -rin 'minio\|:9000' --include='*.py'
+   --include='*.sh' --include='*.yml' .` (excluding `specs/`/`docs/`) → empty; stack restarts
+   clean. Expected end state: zero unmaintained components (SC-129).
 
 ## US2 — Bento-ectomy (per child; vision, then embed + tabular)
 
@@ -61,8 +67,9 @@ Prereq: drive headroom ≥ current object population size ×2 (both stores co-re
 
 ## US4 — GPU-budget portability audit
 
-1. `grep -rn` for VRAM-budget literals outside the single `VRAM_GB` default + docs → none
-   (FR-207).
+1. `grep -rn` for VRAM-budget literals: the only hits are `VRAM_GB` env fallbacks (today `"12"`
+   in `hostagent/main.py`, `hostagent/jobs.py`, and the three adapters) — consolidate them to one
+   resolver so no literal survives that isn't the single shared default (FR-207).
 2. With the GPU reader stubbed unreadable and `VRAM_GB=16`: a **15.0 GB**-estimate load is
    admitted, a **15.5 GB** one refused — the static-fallback threshold is 16 × 0.95 =
    **15.2 GB** and moves with the knob (SC-133; offline test).

@@ -31,13 +31,27 @@ One seam, three consumers (gateway container, MLflow server, host venv):
 
 | Variable | Pre-cutover | Post-cutover |
 |---|---|---|
-| `MLFLOW_S3_ENDPOINT_URL` | `http://minio:9000` (container) / host equivalent | `http://garage:3900` / host equivalent |
+| `MLFLOW_S3_ENDPOINT_URL` | `http://minio:9000` (container) / `http://localhost:9000` (host) | `http://garage:3900` (container) / `http://localhost:3900` (host) |
+| `S3_ENDPOINT_URL` | unset (see precedence note) | unset — or, if set anywhere, flipped in lockstep with `MLFLOW_S3_ENDPOINT_URL` |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | MinIO root pair | Garage key pair (gen_secrets-provisioned) |
 | `AWS_DEFAULT_REGION` | `us-east-1` | unchanged — `garage.toml s3_region` matches it (R2) |
 
-Rollback (until decommission confirmed): flip the three variables back; run `--reverse` first if
-any writes landed post-cutover. Bucket names and every prefix are identical on both stores
-(FR-198) — no client code change is permitted as part of cutover.
+> **Endpoint precedence (load-bearing — the seam is TWO vars, not one).** Both storage clients
+> resolve the endpoint as `S3_ENDPOINT_URL` **first**, then `MLFLOW_S3_ENDPOINT_URL`, then a
+> hardcoded `http://minio:9000` fallback (`platformlib/store.py`, `platformlib/s3io.py`). So:
+> (a) if `S3_ENDPOINT_URL` is set in any consumer's environment, flipping *only*
+> `MLFLOW_S3_ENDPOINT_URL` is a **silent no-op** — that consumer keeps serving from MinIO; the
+> cutover step MUST assert `S3_ENDPOINT_URL` is unset (or flip it too). (b) The **host** port
+> changes `9000 → 3900`; `hostagent/run.sh` and the `training/flows/*` defaults bake
+> `localhost:9000`, so every host consumer MUST have `MLFLOW_S3_ENDPOINT_URL` **explicitly
+> exported** to the Garage host port — a consumer that falls back to its baked default hits the
+> dead port after cutover. The cutover is verified by asserting the client's *resolved*
+> `endpoint_url` actually moved (boto3 `client.meta.endpoint_url`), not merely that flows pass.
+
+Rollback (until decommission confirmed): flip the variables back (both endpoint vars + the
+credential pair); run `--reverse` first if any writes landed post-cutover. Bucket names and every
+prefix are identical on both stores (FR-198) — no client code change is permitted as part of
+cutover.
 
 ## Bootstrap contract (`infra/garage/init.sh`, the createbuckets replacement)
 
@@ -56,4 +70,12 @@ re-validated, never re-minted).
 - compose: `minio` + `createbuckets` services, volumes, and the pinned digests removed
 - `.env.example` / `scripts/gen_secrets`: MinIO credential wiring removed
 - docs: README + runbook references updated; the frozen-digest CVE note retired
-- final state: `docker compose config` contains zero references to the retired store
+- **source defaults**: the hardcoded `minio`/`:9000` endpoint fallbacks are repointed to Garage
+  (`garage:3900`) or dropped so a missing env fails loud — `platformlib/store.py`,
+  `platformlib/s3io.py` (fallback default), `hostagent/run.sh`, `training/flows/finetune.py`,
+  `training/flows/_common.py`, the seed scripts, and any surviving `serving/` default
+  (the `serving/bento/*` copies leave with US2). The `serving/children/*` run scripts land on the
+  Garage host port, not `9000`.
+- final state: **both** `docker compose config` **and** a source-tree `grep -rin 'minio\|:9000'`
+  (excluding `specs/`, `docs/` history, and CHANGELOG-style records) contain zero live references
+  to the retired store — SC-129's "zero references" is enforced across code, not just compose
