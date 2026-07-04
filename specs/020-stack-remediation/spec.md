@@ -65,7 +65,8 @@ platform still runs on the incumbent (rollback proof); flip forward and decommis
    configuration back to the incumbent, **Then** the platform serves from the incumbent again with
    no code change (rollback window intact).
 4. **Given** the operator confirms decommission, **When** the incumbent store is removed, **Then**
-   no service, image reference, bootstrap step, or document still points at it, and the running
+   no service, image reference, bootstrap step, document, or hardcoded source-default endpoint still
+   points at it (verified by `docker compose config` **and** a source-tree grep), and the running
    stack contains zero unmaintained components.
 5. **Given** the candidate validation spike fails on a compatibility gap (registry artifact
    round-trip or any storage-client path), **When** the operator switches to the fallback
@@ -156,8 +157,12 @@ threshold moves accordingly); confirm the bring-up doc lists every knob a new ma
 
 **Acceptance Scenarios**:
 
-1. **Given** a repo-wide audit, **When** searching for memory-budget literals outside the single
-   configurable default and its documentation, **Then** none exist.
+1. **Given** a repo-wide audit, **When** searching for memory-budget literals, **Then** the only
+   ones that exist are `VRAM_GB` env-var fallbacks (today the string `"12"` appears as the default
+   in `hostagent/main.py`, `hostagent/jobs.py`, and the three adapters) — no budget literal exists
+   that is *not* a fallback for the `VRAM_GB` env, and the audit task consolidates the duplicated
+   fallbacks to a single resolver so a machine with a different budget cannot be left partially on
+   the old default.
 2. **Given** the budget knob set to a new value with the GPU unreadable (static fallback),
    **When** a load whose estimate exceeds the new budget is requested, **Then** it is refused at
    the new threshold — and admitted when the estimate fits it.
@@ -171,6 +176,13 @@ threshold moves accordingly); confirm the bring-up doc lists every knob a new ma
 - **Migration interrupted mid-copy**: both stores stay live during migration; the copy is
   idempotent and resumable; cutover happens only after the parity report is clean — a partial copy
   can never be cut over to silently.
+- **The endpoint seam is two variables, not one**: both storage clients resolve
+  `S3_ENDPOINT_URL` before `MLFLOW_S3_ENDPOINT_URL` (then a hardcoded `minio:9000` fallback), and
+  the host port changes `9000 → 3900`. A cutover that flips only `MLFLOW_S3_ENDPOINT_URL` while
+  `S3_ENDPOINT_URL` is set — or that lets a host consumer fall back to its baked `:9000` default —
+  silently keeps serving from (or breaks against) the retired store. The cutover step asserts
+  `S3_ENDPOINT_URL` is unset (or flips it too) and verifies the client's *resolved* endpoint moved,
+  not merely that flows pass (contracts/store-migration.md §cutover).
 - **Compatibility gap found late** (after migration, before decommission): rollback is a
   configuration flip; the incumbent still holds all data written before cutover. Writes made after
   cutover are re-mirrored back before flipping (the migration tool runs in either direction).
@@ -202,8 +214,11 @@ threshold moves accordingly); confirm the bring-up doc lists every knob a new ma
 - **FR-200**: Cutover MUST be reversible by configuration alone until the operator explicitly
   confirms decommission; both stores retain data through the rollback window.
 - **FR-201**: After confirmed decommission, the retired store MUST be fully removed — service
-  definition, pinned image digest, bootstrap/bucket-creation references, secrets wiring, and
-  documentation; the running stack contains zero unmaintained components.
+  definition, pinned image digest, bootstrap/bucket-creation references, secrets wiring,
+  documentation, **and the hardcoded endpoint fallbacks in source** (the `minio`/`:9000` defaults
+  in the storage clients and host run/flow scripts, repointed to the replacement or dropped so a
+  missing env fails loud); the running stack contains zero unmaintained components and a source-tree
+  grep for the retired store's name/port returns zero live references.
 - **FR-202**: A candidate **validation spike** MUST gate migration: registry artifact round-trip,
   every storage-client code path (upload, download, list with pagination, delete, prefix listing,
   conditional/duplicate-key behavior relied on by write-once semantics), and the offline suite
@@ -221,8 +236,10 @@ threshold moves accordingly); confirm the bring-up doc lists every knob a new ma
   the existing host agent process (no new resident service), preserving routes, the agent API
   contract, bind posture, control-secret enforcement, and the error vocabulary; the drill re-runs
   clean after the swap.
-- **FR-207**: The GPU memory budget MUST remain fully parameterized: no hardcoded budget outside
-  the single configurable default; live GPU readings stay the primary admission input; the
+- **FR-207**: The GPU memory budget MUST remain fully parameterized: the only budget literals in
+  the tree are `VRAM_GB` env-var fallbacks, and those MUST resolve through a single resolver (not
+  independently duplicated defaults that could drift) so a machine set to a different budget cannot
+  be left partially on the old value; live GPU readings stay the primary admission input; the
   bring-up documentation lists every knob required for a machine with different GPU memory.
 
 ### Key Entities
@@ -245,7 +262,8 @@ threshold moves accordingly); confirm the bring-up doc lists every knob a new ma
 - **SC-128**: The full offline suite and the golden live flows pass unchanged against the
   replacement store — zero endpoint behavior changes, zero test edits attributable to the store.
 - **SC-129**: Unmaintained components in the running stack drop from one to **zero** after
-  decommission.
+  decommission — enforced across code, not just compose: both `docker compose config` and a
+  source-tree grep for the retired store's name/port return zero live references.
 - **SC-130**: Idle memory footprint of the storage service does not increase versus the incumbent
   (Principle III), measured at rest on the target machine.
 - **SC-131**: The three child swaps remove the serving framework from the host environment

@@ -48,16 +48,25 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
   migration**. Record in `docs/on-hardware-validation-018.md`. A miss ⇒ switch to
   SeaweedFS per R1 and repeat (same plan, same tasks).
 - [ ] **T405** [US1] **[HW]** Migrate → cutover → rollback proof → soak (quickstart §US1.2–4;
-  FR-199/200): forward run `parity: true`, re-run `copied: 0`; flip the three-env cutover
-  contract; golden flows + full suite pass unchanged (SC-128); one rollback flip proven, then
-  forward again; MigrationReports kept under `docs/`.
+  FR-199/200): forward run `parity: true`, re-run `copied: 0`; flip the cutover env contract —
+  **assert `S3_ENDPOINT_URL` is unset (or flip it in lockstep) and that every host consumer has
+  `MLFLOW_S3_ENDPOINT_URL` exported to the Garage host port (`:3900`, not the baked `:9000`
+  default); verify the client's *resolved* endpoint moved** (boto3 `client.meta.endpoint_url`), not
+  merely that flows pass (contract §cutover, endpoint-precedence note); golden flows + full suite
+  pass unchanged (SC-128); one rollback flip proven, then forward again; MigrationReports kept
+  under `docs/`.
 - [ ] **T406** [US1] **[HW]** Decommission (FR-201; operator confirms FIRST): quiesce writers
   (contract §concurrent-write: stop gateway + agent, or at minimum the policy scheduler +
   prediction/capture logging), then final forward run
   `copied: 0` everywhere; execute the contract checklist (compose services/volumes/digests,
-  gen_secrets + .env.example wiring, README/runbook refs, CVE-digest note retired);
-  `docker compose config` has zero references to the retired store (SC-129); stack restarts
-  clean on Garage alone.
+  gen_secrets + .env.example wiring, README/runbook refs, CVE-digest note retired, **and the
+  hardcoded `minio`/`:9000` source-default endpoints repointed to Garage or dropped —
+  `platformlib/store.py`, `platformlib/s3io.py`, `hostagent/run.sh`, `training/flows/*`, seed
+  scripts, `scripts/bootstrap.sh`, `scripts/reseed_registry.sh`, and the `"minio live"`
+  health-check string in `tests/test_foundation.py`**); **both** `docker compose config` **and** a
+  source-tree `grep -rin 'minio\|:9000'`
+  (excluding `specs/`/`docs/` history) have zero live references to the retired store (SC-129);
+  stack restarts clean on Garage alone.
 
 **Checkpoint**: SC-127/128/129/130 all recorded; the platform runs with zero unmaintained
 components and a proven rollback story (now moot).
@@ -122,11 +131,14 @@ components and a proven rollback story (now moot).
 
 ## Phase 6: User Story 4 — GPU-budget portability (P3)
 
-- [ ] **T416** [P] [US4] Budget-knob audit + regression: repo audit pins the only VRAM-budget
-  literal is the `VRAM_GB` env default (FR-207); `tests/test_agent_admission.py` gains the
-  knob test — GPU unreadable + budget 16: a **15.0 GB** estimate is admitted, a **15.5 GB**
-  one refused (the static-fallback threshold is 16 × 0.95 = **15.2 GB** and moves with the
-  knob — SC-133).
+- [ ] **T416** [P] [US4] Budget-knob audit + consolidation + regression: repo audit pins that the
+  only VRAM-budget literals are `VRAM_GB` env fallbacks — today `"12"` is duplicated across
+  `hostagent/main.py`, `hostagent/jobs.py`, and the three adapters (`llama.py`, `vision.py`,
+  `whisper.py`); **consolidate them to a single resolver** so no consumer can be left on a stale
+  default when the knob moves (FR-207). `tests/test_agent_admission.py` gains the knob test — GPU
+  unreadable + budget 16: a **15.0 GB** estimate is admitted, a **15.5 GB** one refused (the
+  static-fallback threshold is 16 × 0.95 = **15.2 GB** and moves with the knob — SC-133); a grep
+  regression asserts no un-consolidated budget literal remains.
 - [ ] **T417** [US4] New-machine bring-up checklist in `README.md` (coordinated with 018's
   T379 refresh so the README is edited once): `VRAM_GB`, native builds
   (llama.cpp / whisper.cpp `build.sh`), CUDA-index torch/torchvision wheels,
