@@ -215,9 +215,11 @@ runs against trainer *or* agent jobs surface.
   directly (clarify Q4; JSONL path retired after import); `policies.py` + suggestion state move
   to their tables; gateway job reads via store. **Split into T375-A (policies/pending/status/
   suggestions → store, merged #45) + T375-B (agent journal → `jobs` table, this PR).**
-- [ ] **T376** [P] [US4] Backfill: `scripts/backfill_store.py` (objects → rows,
+- [x] **T376** [P] [US4] Backfill: `scripts/backfill_store.py` (objects → rows,
   `ON CONFLICT DO NOTHING`, counts report, journal import); `tests/test_backfill.py`
-  (idempotent re-run).
+  (idempotent re-run). Predictions/labels/capture + policies/pending/status/suggestions +
+  the folded journal → jobs; non-clobber (DB is source of truth post-migration); added the
+  symmetric `store.capture_exists`. Live-DB test confirms idempotency (2nd run inserts 0).
 - [ ] **T377** [US4] **[HW]** SC-111: 10k-prediction window <5s; concurrent-label trial;
   restart drill (gateway + agent) with intact history; append to the runbook doc.
 
