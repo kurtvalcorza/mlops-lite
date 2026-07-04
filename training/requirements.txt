@@ -26,3 +26,7 @@ prefect==3.7.6
 # like the ephemeral Prefect above; default in-memory study storage) — one light dep, no daemon, no
 # Ray (Principle III). Verified it installs without moving the frozen torch/transformers/peft pins.
 optuna==4.9.0
+# 018 US4 (T373) — the relational monitoring store (platformlib.store). The agent (running under this
+# venv since T362) writes `jobs` rows directly (T375), so the host env needs the psycopg 3 client too.
+# Binary wheel = no system libpq; pure-client, no GPU/torch interaction (stack stays frozen).
+psycopg[binary]==3.3.4
