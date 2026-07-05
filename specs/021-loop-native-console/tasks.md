@@ -108,8 +108,10 @@ and cooldown-as-outcome (FR-238..242).
   policies, with the retrain spec auto-filled from the breached model (`dataset_version=latest`,
   modality/output prefilled, knobs defaulted) behind confirmation; render `skipped: cooldown` as a
   first-class outcome (FR-240/242).
-- [ ] **T439** [US3] Assemble `app/monitoring/page.tsx` from the panels; validate against
-  `quickstart.md §US3`; lint + build green.
+- [ ] **T439** [US3] Assemble `app/monitoring/page.tsx` from the panels; render the explicit
+  manual-vs-standing framing — a short in-page note that these are *manual, one-shot* checks whose
+  *standing, scheduled* counterpart lives in `retraining` (same checks, same gate, same cooldown)
+  (FR-248). Validate against `quickstart.md §US3`; lint + build green.
 
 ---
 
@@ -129,8 +131,10 @@ suggestions inbox with gate-safe accept (FR-243..248).
 - [ ] **T443** [P] [US4] `ui/components/retraining/SuggestionsInbox.tsx`: `GET /suggestions?state=`
   filter; accept (gated promote) / dismiss; a blocked accept stays open and deep-links →
   `/models?override=<name>@<version>` (FR-247, research R7).
-- [ ] **T444** [US4] Assemble `app/retraining/page.tsx`; validate against `quickstart.md §US4`; lint +
-  build green.
+- [ ] **T444** [US4] Assemble `app/retraining/page.tsx`; render the reciprocal manual-vs-standing
+  framing — a short in-page note that these policies run the *same* monitoring checks on a *standing
+  schedule* (the manual, one-shot counterpart lives in `monitoring`; same gate, same cooldown)
+  (FR-248). Validate against `quickstart.md §US4`; lint + build green.
 
 ---
 
@@ -167,7 +171,9 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
   (FR-217, research R7).
 - [ ] **T451** [US6] `app/training/page.tsx`: fixed 4-way modality picker showing only that modality's
   knobs + pinned default base; base read-only for vision (locked arch); chain-from-parent enabled
-  only for vision/embeddings; reads `ds` prefill (FR-219/220).
+  only for vision/embeddings; reads `ds` prefill (FR-219/220). **Remove the batch launcher from this
+  page** — batch inference now lives in `serving` (T431/FR-236); this completes the move so batch is
+  not duplicated across stages.
 - [ ] **T452** [P] [US6] Lease-aware launch: read `serving/state` before launch; surface 409 (busy) /
   507 (over-budget) as distinct first-class refusals; poll `runs/:id` detail; "view in models"
   hand-off on completion (FR-221/222). No cancel/register/history surfaces (FR-223).
