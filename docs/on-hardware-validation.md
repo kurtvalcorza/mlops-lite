@@ -1,8 +1,11 @@
-# On-hardware validation runbook — increment 018 (platform re-architecture)
+# On-hardware validation runbook — increments 018 (platform re-architecture) + 020 (stack remediation)
 
 Target box: RTX 5070 Ti (12 GB), WSL2 Ubuntu + Rancher Desktop. Model on the 015–017 runbook.
 018 folds every native daemon into ONE GPU host agent (`hostagent/`); at completion the platform
 runs **two** supervised native processes — the agent and the UI — under the shrunken supervisor.
+The 020 records (store exit → Garage, Bento-ectomy golden gates, agent-runtime drill + verdict,
+decommission) share this document — one [HW] record chain per box (renamed from the `-018`
+filename at T419 once both increments' records landed).
 
 Records the on-hardware success criteria for the 018 [HW] tasks: **T365** (SC-106..110), **T372**
 (SC-112), **T377** (SC-111). Offline coverage (unit/integration) lands with the suite; these are the

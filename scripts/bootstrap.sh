@@ -108,7 +108,6 @@ if [ -f "$REPO/.env" ]; then set -a; . "$REPO/.env"; set +a; fi
 # Garage's S3 port has no unauthenticated HTTP health path — a TCP connect proves it is up.
 GARAGE_PORT="${GARAGE_S3_PORT:-3900}"
 if (exec 3<>"/dev/tcp/localhost/${GARAGE_PORT}") 2>/dev/null && [ -n "${GARAGE_ACCESS_KEY_ID:-}" ]; then
-  exec 3>&- 3<&- || true
   export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-$GARAGE_ACCESS_KEY_ID}"
   export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-$GARAGE_SECRET_ACCESS_KEY}"
   export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:${GARAGE_PORT}}"

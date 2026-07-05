@@ -152,7 +152,7 @@ components and a proven rollback story (now moot).
   FastAPI children behind the agent, hand-rolled PSI + Prometheus/Grafana); rule text unchanged.
 - [x] **T419** [P] Env-surface docs: `.env.example` gains `AGENT_RUNTIME` (with the
   decision-window note) and the Garage endpoint/credential block with the cutover-contract
-  cross-reference; rename `docs/on-hardware-validation.md` →
+  cross-reference; rename `docs/on-hardware-validation-018.md` →
   `docs/on-hardware-validation.md` (both increments' records; runs LAST, after the [HW]
   session's records land — 020 owns this rename, 018's T379 does not mention it) and update
   the references in 018/020 artifacts. Scope boundary vs T406: ALL MinIO-reference removal
