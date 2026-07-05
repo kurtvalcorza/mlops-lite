@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { PageTitle } from '@/components/Panel';
-import { NoRenderer, RENDERERS } from '@/components/infer';
-import type { ServingState, TaskEntry } from '@/components/infer';
+import { NoRenderer, RENDERERS } from '@/components/serving';
+import type { ServingState, TaskEntry } from '@/components/serving';
 import { gwGet } from '@/lib/gw';
 
 /** Poll the gateway's GPU/lease state so the tab reflects what is actually resident (008 US3). */

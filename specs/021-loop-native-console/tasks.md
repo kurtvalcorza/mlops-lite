@@ -16,17 +16,17 @@ task is `npm run lint` + `npm run build` (type-check); each story's behavioural 
 
 ## Phase 1: Setup (shared, mechanical — unblocks everything)
 
-- [ ] **T420** Extend the BFF allow-list per [contracts/allowlist-delta.md](./contracts/allowlist-delta.md):
+- [x] **T420** Extend the BFF allow-list per [contracts/allowlist-delta.md](./contracts/allowlist-delta.md):
   add the 13 entries (`datasets/:name/:version`; `runs/:id`; `POST infer` (LLM trace mode); `monitor`;
   `monitor/quality/check`; `monitor/quality`; `monitor/labels`; and the 6 per-engine health probes) to
   `ui/lib/gw-allowlist.ts`, and re-section existing policy/suggestion/engine comments under the loop
   vocabulary (`serving`/`retraining`/…). No proxy route logic change. Validate: `isAllowed` returns
   true for each new pair; `npm run build` clean.
-- [ ] **T421** [P] Relocate the dynamic per-task panel set `ui/components/infer/*` →
+- [x] **T421** [P] Relocate the dynamic per-task panel set `ui/components/infer/*` →
   `ui/components/serving/*` (StreamPanel, ClassifyPanel, TabularPanel, TranscribePanel, EmbedPanel,
   NoRenderer, index, types) as a pure move + import-path update; no behaviour change yet (research
   R3). Validate: `npm run build` clean.
-- [ ] **T422** Route renames as file moves (content unchanged for now): `app/datasets`→`app/data`,
+- [x] **T422** Route renames as file moves (content unchanged for now): `app/datasets`→`app/data`,
   `app/runs`→`app/training`, `app/infer`→`app/serving`, `app/monitor`→`app/monitoring`; add
   `app/retraining/page.tsx` stub. **`app/page.tsx` today redirects the root `/`→`/infer`** — change it
   to `/`→`/serving` (FR-212). Add explicit old-path→new-path redirects: `/infer`→`/serving`,
@@ -36,7 +36,7 @@ task is `npm run lint` + `npm run build` (type-check); each story's behavioural 
   page imports the relocated `components/serving` (today `app/infer/page.tsx` imports
   `@/components/infer`), so parallel moves would race on that import. Validate: each new route renders
   its (pre-rebuild) page; every old path 3xx-redirects to its new home.
-- [ ] **T423** [P] Shared `ConfirmDialog` primitive in `ui/components/ConfirmDialog.tsx` — supports a
+- [x] **T423** [P] Shared `ConfirmDialog` primitive in `ui/components/ConfirmDialog.tsx` — supports a
   warning body and an optional required-reason text field (backs all three high-trust actions;
   research R5 / FR-250). Validate: renders, blocks confirm until a required reason is entered.
 
