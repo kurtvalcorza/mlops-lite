@@ -1,6 +1,6 @@
 // Shared types for the task-driven Infer tab (009 US1, FR-077). The tab queries the registry for the
 // distinct serving `task`s and renders one panel per task via a renderer map keyed by task. Adding a
-// modality = register a model with a `task` tag + drop a renderer into the map (components/infer).
+// modality = register a model with a `task` tag + drop a renderer into the map (components/serving).
 
 // 008 US3 (FR-068) + 009 US3: the gateway's lease/GPU state. `holder` ∈ {llm, vision, training, asr,
 // null} — ASR (whisper.cpp) joined the single lease as a tenant in 009.

@@ -34,6 +34,16 @@ const nextConfig = {
   async headers() {
     return [{ source: '/:path*', headers: SECURITY_HEADERS }];
   },
+  // 021 (T422): old tab paths → loop-stage routes. Central + survivable on purpose — these live in
+  // the config (not the deleted route dirs), so the T457 dead-surface cleanup can't take them along.
+  async redirects() {
+    return [
+      { source: '/infer', destination: '/serving', permanent: false },
+      { source: '/datasets', destination: '/data', permanent: false },
+      { source: '/runs', destination: '/training', permanent: false },
+      { source: '/monitor', destination: '/monitoring', permanent: false },
+    ];
+  },
 };
 
 export default nextConfig;

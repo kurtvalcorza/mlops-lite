@@ -1,12 +1,26 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { PageTitle, Panel } from '@/components/Panel';
 import { gwGet, gwPost } from '@/lib/gw';
 
 type Version = { version: string; size_bytes: number; sha256: string; format: string; uri: string };
 type Dataset = { name: string; versions: Version[] };
 type Manifest = { name: string; version: string; size_bytes: number; sha256: string; format: string };
+// Full version manifest (021 FR-215): `download_url` exists on the wire but is presigned against
+// the INTERNAL store endpoint — not browser-reachable — so this stage is inspect-only (no byte
+// download button; deferred until a public-presign knob exists).
+type VersionDetail = {
+  name: string;
+  version: string;
+  size_bytes: number;
+  sha256: string;
+  format: string;
+  uri?: string;
+  created_at?: number | string;
+  download_url?: string;
+};
 
 // 014 US2 — the hand-rolled dataset-validation report.
 type Rule = {
@@ -25,7 +39,11 @@ type ValidationReport = {
   warnings: string[];
 };
 
-export default function DatasetsPage() {
+// 021 T449 (FR-214..218): the data stage — the loop's entry. Register/list/dedupe (unchanged),
+// version INSPECT (full manifest — inspect-only, FR-215), validate as a pre-train readiness GATE
+// (gate vs warn dispositions), and the "train on this version" hand-off → /training?ds=… (T450,
+// R7). Deliberately absent: edit/delete (immutability is the point) and EDA (FR-218).
+export default function DataPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
@@ -49,8 +67,8 @@ export default function DatasetsPage() {
 
   return (
     <>
-      <PageTitle sub="Upload immutable, content-addressed dataset versions; identical bytes dedupe.">
-        datasets
+      <PageTitle sub="Immutable, content-addressed versions — the loop's entry. Identical bytes dedupe.">
+        data
       </PageTitle>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1.3fr]">
@@ -79,14 +97,15 @@ export default function DatasetsPage() {
   );
 }
 
-// 014 US2 — a dataset version row with an inline "validate" action that renders the readiness report.
+// One dataset version row: inspect (manifest), validate (readiness gate), train-on-this-version.
 function VersionRow({ name, version: v }: { name: string; version: Version }) {
   const [report, setReport] = useState<ValidationReport | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [detail, setDetail] = useState<VersionDetail | null>(null);
+  const [busy, setBusy] = useState<'validate' | 'inspect' | ''>('');
   const [err, setErr] = useState('');
 
   const validate = async () => {
-    setBusy(true);
+    setBusy('validate');
     setErr('');
     try {
       setReport(
@@ -98,7 +117,28 @@ function VersionRow({ name, version: v }: { name: string; version: Version }) {
     } catch (e) {
       setErr(String(e));
     } finally {
-      setBusy(false);
+      setBusy('');
+    }
+  };
+
+  // 021 (FR-215): full-manifest inspect — closes/opens like a disclosure.
+  const inspect = async () => {
+    if (detail) {
+      setDetail(null);
+      return;
+    }
+    setBusy('inspect');
+    setErr('');
+    try {
+      setDetail(
+        await gwGet<VersionDetail>(
+          `datasets/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}`,
+        ),
+      );
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy('');
     }
   };
 
@@ -113,31 +153,85 @@ function VersionRow({ name, version: v }: { name: string; version: Version }) {
           <span>
             {v.size_bytes} B · {v.sha256.slice(0, 12)}…
           </span>
-          <button onClick={validate} disabled={busy} className="hairline rounded-sm px-2 text-ink disabled:opacity-40">
-            {busy ? '[~]…' : '[?] validate'}
+          <button
+            onClick={inspect}
+            disabled={busy !== ''}
+            className="hairline rounded-sm px-2 text-ink disabled:opacity-40"
+          >
+            {busy === 'inspect' ? '[~]…' : detail ? '[−] manifest' : '[i] inspect'}
           </button>
+          <button
+            onClick={validate}
+            disabled={busy !== ''}
+            className="hairline rounded-sm px-2 text-ink disabled:opacity-40"
+          >
+            {busy === 'validate' ? '[~]…' : '[?] validate'}
+          </button>
+          {/* T450 (FR-217): the data → training hand-off, context in the URL (R7) */}
+          <Link
+            href={`/training?ds=${encodeURIComponent(`${name}@${v.version}`)}`}
+            className="hairline rounded-sm px-2 st-accent"
+            title="open training with this pinned version prefilled"
+          >
+            [→] train on this
+          </Link>
         </span>
       </div>
       {err && <p className="mt-1 st-danger">[x] {err}</p>}
+      {detail && (
+        <div className="mt-1 hairline rounded-sm p-2">
+          <p className="text-ink">manifest — {detail.name} @ {detail.version}</p>
+          <dl className="mt-1 space-y-0.5 text-mute">
+            <ManifestRow k="sha256">{detail.sha256}</ManifestRow>
+            <ManifestRow k="size">{detail.size_bytes} B</ManifestRow>
+            <ManifestRow k="format">{detail.format}</ManifestRow>
+            {detail.uri && <ManifestRow k="store uri">{detail.uri}</ManifestRow>}
+            {detail.created_at != null && (
+              <ManifestRow k="created">{String(detail.created_at)}</ManifestRow>
+            )}
+          </dl>
+          <p className="mt-1 text-ash">
+            [i] inspect-only — the pinned bytes live in the internal store (byte download deferred;
+            the presigned URL is not browser-reachable).
+          </p>
+        </div>
+      )}
       {report && (
         <div className="mt-1 hairline rounded-sm p-2">
           <p className={report.passed ? 'st-success' : 'st-danger'}>
             [{report.passed ? '✓' : 'x'}] readiness {report.passed ? 'passed' : 'FAILED'} ·{' '}
             {report.stats.row_count} rows
             {report.gate_failures.length > 0 && <span> · gate: {report.gate_failures.join(', ')}</span>}
-            {report.warnings.length > 0 && <span className="st-warning"> · warn: {report.warnings.join(', ')}</span>}
+            {report.warnings.length > 0 && (
+              <span className="st-warning"> · warn: {report.warnings.join(', ')}</span>
+            )}
           </p>
           <ul className="mt-1 space-y-0.5">
             {report.rules.map((r) => (
-              <li key={r.name} className={r.passed ? 'text-ash' : r.disposition === 'gate' ? 'st-danger' : 'st-warning'}>
+              <li
+                key={r.name}
+                className={r.passed ? 'text-ash' : r.disposition === 'gate' ? 'st-danger' : 'st-warning'}
+              >
                 [{r.passed ? '✓' : r.disposition === 'gate' ? 'x' : '!'}] {r.name} ({r.disposition})
                 {!r.passed && r.detail ? ` — ${r.detail}` : ''}
               </li>
             ))}
           </ul>
+          <p className="mt-1 text-ash">
+            [i] gate rules block a train on this version; warn rules ship with a caution.
+          </p>
         </div>
       )}
     </li>
+  );
+}
+
+function ManifestRow({ k, children }: { k: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-ash">{k}</dt>
+      <dd className="break-all text-right text-mute">{children}</dd>
+    </div>
   );
 }
 
@@ -177,7 +271,7 @@ function UploadForm({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <Panel title="upload" hint="POST /datasets">
+    <Panel title="register" hint="POST /datasets">
       <label className="mb-2 block text-caption-md text-mute">name</label>
       <input
         value={name}
@@ -203,7 +297,8 @@ function UploadForm({ onDone }: { onDone: () => void }) {
       {result && (
         <div className="mt-3 text-caption-md">
           <p className={result.dedup ? 'st-warning' : 'st-success'}>
-            [{result.dedup ? '!' : '✓'}] {result.dedup ? 'identical bytes — deduped to existing version' : 'registered new version'}
+            [{result.dedup ? '!' : '✓'}]{' '}
+            {result.dedup ? 'identical bytes — deduped to existing version' : 'registered new version'}
           </p>
           <p className="mt-1 text-mute">
             v{result.manifest.version} · {result.manifest.size_bytes} B ·{' '}

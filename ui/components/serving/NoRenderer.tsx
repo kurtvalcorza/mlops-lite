@@ -23,7 +23,7 @@ export function NoRenderer({ entry }: PanelProps) {
         </p>
         <p className="mt-1 text-ash">
           This console has no renderer for this task yet — register a renderer in
-          components/infer to add one. Routing still resolves via the gateway.
+          components/serving to add one. Routing still resolves via the gateway.
         </p>
       </div>
     </Panel>

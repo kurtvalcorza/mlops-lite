@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Panel } from '@/components/Panel';
 import { gwPost } from '@/lib/gw';
 import type { PanelProps } from './types';
@@ -11,21 +12,30 @@ type VisionResp = { predictions: Pred[]; device?: string; model?: string };
 // image-classification renderer (009 US1): drop an image → top-5. Lease-governed (008 — one model in
 // VRAM). 017/A2: when another *serving* model (LLM/ASR) holds the lease, classify is no longer a dead
 // end — it offers a cost-stating "Swap & classify" that, on confirm, sends preempt=true so the gateway
-// evicts the resident model and loads vision (sequential, one model in VRAM). A **training** holder is
-// never preemptable, so that case keeps the 008/A1 disabled-with-hint. Vision holding the lease is fine.
+// evicts the resident model and loads vision (sequential, one model in VRAM). Vision holding the
+// lease is fine. 021 review: eligibility is an ALLOWLIST of swappable *serving* tenants, not a
+// denylist of `'training'` — a `kind="job"` holder (batch/retrain) surfaces as its own job label,
+// NOT the literal string `'training'`, so a denylist would wrongly mark it swappable and let
+// preempt=true evict an active job (FR-250/Principle II forbid it; mirrors StreamPanel's SWAPPABLE).
+
+// Serving tenants the agent may evict on preempt=true; training + kind="job" holders never swap.
+const SWAPPABLE = new Set(['llm', 'asr']);
+
 export function ClassifyPanel({ serving }: PanelProps) {
   const [preds, setPreds] = useState<Pred[] | null>(null);
   const [device, setDevice] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [fileName, setFileName] = useState('');
+  // 021 (FR-250): a pending swap-classify held until the shared ConfirmDialog confirms it.
+  const [pendingSwap, setPendingSwap] = useState<File | null>(null);
 
   const holder = serving?.holder;
   const heldByOther = !!holder && holder !== 'vision';
-  const heldByTraining = holder === 'training';
-  // A serving holder (LLM/ASR) is swappable; a training run is not (017 FR-155) → stay disabled.
-  const swappable = heldByOther && !heldByTraining;
-  const blocked = heldByOther && !swappable; // training holder → no swap offered
+  // Allowlist: only a resident *serving* tenant (llm/asr) is swappable; training runs and
+  // kind="job" holders (batch/retrain, which surface as their own job label) stay blocked.
+  const swappable = heldByOther && !!holder && SWAPPABLE.has(holder);
+  const blocked = heldByOther && !swappable; // training / job holder → no swap offered
   const holderLabel = holder === 'llm' ? 'LLM' : holder === 'asr' ? 'ASR' : String(holder);
 
   const handleFile = useCallback(
@@ -49,19 +59,19 @@ export function ClassifyPanel({ serving }: PanelProps) {
     [blocked],
   );
 
-  // On a swappable holder, confirm the cost before sending preempt=true; otherwise classify normally.
+  // On a swappable holder, confirm the cost before sending preempt=true; otherwise classify
+  // normally. 021 (FR-250): the confirm is the shared ConfirmDialog naming the holder to evict —
+  // the same friction primitive as the LLM panel's swap — replacing the old window.confirm.
   const onPick = useCallback(
     (file: File) => {
       if (blocked) return;
       if (swappable) {
-        if (window.confirm(`Evict the resident ${holderLabel} model (~2.5s reload) and classify?`)) {
-          handleFile(file, true);
-        }
+        setPendingSwap(file);
         return;
       }
       handleFile(file, false);
     },
-    [blocked, swappable, holderLabel, handleFile],
+    [blocked, swappable, handleFile],
   );
 
   return (
@@ -93,8 +103,10 @@ export function ClassifyPanel({ serving }: PanelProps) {
         {blocked ? (
           <>
             <span className="st-danger">[!]</span>
-            <span className="mt-1">GPU busy: training run active</span>
-            <span className="mt-1 text-ash">training is never preempted — wait for it to finish</span>
+            {/* `blocked` covers training AND kind="job" holders (batch/retrain) — use the dynamic
+                holder label so the copy is honest for a job, not hardcoded to "training". */}
+            <span className="mt-1">GPU busy: {holderLabel} active</span>
+            <span className="mt-1 text-ash">{holderLabel} is never preempted — wait for it to finish</span>
           </>
         ) : swappable ? (
           <>
@@ -129,6 +141,25 @@ export function ClassifyPanel({ serving }: PanelProps) {
           </ul>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingSwap !== null}
+        title="preemptive swap"
+        body={
+          <>
+            The GPU lease is held by <span className="text-ink">{holderLabel}</span> with a model
+            resident. Classifying will <span className="st-warning">evict it</span> and load vision
+            (~2.5s reload; one model in VRAM, Principle II).
+          </>
+        }
+        confirmLabel={`evict ${holderLabel} & classify`}
+        onConfirm={() => {
+          const f = pendingSwap;
+          setPendingSwap(null);
+          if (f) handleFile(f, true);
+        }}
+        onCancel={() => setPendingSwap(null)}
+      />
     </Panel>
   );
 }

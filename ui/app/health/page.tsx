@@ -3,6 +3,41 @@
 import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/Badge';
 import { PageTitle, Panel } from '@/components/Panel';
+import { gwGet } from '@/lib/gw';
+
+// 021 T454 (FR-249): the per-engine probe set — each serving subsystem's own health endpoint,
+// polled independently so ONE down engine shows distinctly not-ok while the rest stay green.
+const ENGINE_PROBES: { name: string; path: string }[] = [
+  { name: 'serving (llm)', path: 'serving/health' },
+  { name: 'vision', path: 'vision/health' },
+  { name: 'transcribe (asr)', path: 'transcribe/health' },
+  { name: 'embed', path: 'embed/health' },
+  { name: 'predict (tabular)', path: 'predict/health' },
+  { name: 'training', path: 'training/health' },
+];
+
+/** null = probing, true = ok, false = down/unreachable. */
+function useEngineProbes(intervalMs = 8000): Record<string, boolean | null> {
+  const [state, setState] = useState<Record<string, boolean | null>>(
+    Object.fromEntries(ENGINE_PROBES.map((p) => [p.name, null])),
+  );
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      ENGINE_PROBES.forEach((p) =>
+        gwGet(p.path)
+          .then(() => alive && setState((s) => ({ ...s, [p.name]: true })))
+          .catch(() => alive && setState((s) => ({ ...s, [p.name]: false }))),
+      );
+    tick();
+    const id = setInterval(tick, intervalMs);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [intervalMs]);
+  return state;
+}
 
 type DaemonState = { reachable: boolean; url: string };
 type StateSnap = {
@@ -22,6 +57,7 @@ export default function HealthPage() {
   const [snap, setSnap] = useState<StateSnap | null>(null);
   const [connected, setConnected] = useState(false);
   const [uiReady, setUiReady] = useState<boolean | null>(null);
+  const engines = useEngineProbes();
   const esRef = useRef<EventSource | null>(null);
 
   // Console readiness (004 US3): /readyz reflects whether the BFF can reach the gateway — distinct
@@ -107,6 +143,34 @@ export default function HealthPage() {
                 : '—'}
             </Row>
           </dl>
+        </Panel>
+      </div>
+
+      {/* 021 T454 (FR-249): per-engine probe dots — one per serving subsystem */}
+      <div className="mb-6">
+        <Panel title="engines" hint="per-engine health probes — a down engine is distinctly not-ok">
+          <ul className="grid gap-x-6 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
+            {ENGINE_PROBES.map((p) => {
+              const ok = engines[p.name];
+              return (
+                <li key={p.name} className="flex items-baseline justify-between gap-3 text-body-md">
+                  <span className="text-ink">
+                    <span className={ok === null ? 'text-ash' : ok ? 'st-success' : 'st-danger'}>
+                      [{ok === null ? '~' : ok ? '●' : 'x'}]
+                    </span>{' '}
+                    {p.name}
+                  </span>
+                  <span className={ok === null ? 'text-ash' : ok ? 'text-mute' : 'st-danger'}>
+                    {ok === null ? 'probing…' : ok ? 'ok' : 'DOWN'}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-2 text-caption-md text-ash">
+            [i] engine probes are liveness only — GPU residency is sequential by design (one lease),
+            so an engine can be healthy yet not resident.
+          </p>
         </Panel>
       </div>
 

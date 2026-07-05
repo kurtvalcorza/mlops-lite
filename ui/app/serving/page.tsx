@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { PageTitle } from '@/components/Panel';
-import { NoRenderer, RENDERERS } from '@/components/infer';
-import type { ServingState, TaskEntry } from '@/components/infer';
+import { NoRenderer, RENDERERS } from '@/components/serving';
+import type { ServingState, TaskEntry } from '@/components/serving';
+import { BatchPanel } from '@/components/serving/BatchPanel';
+import { LeaseView } from '@/components/serving/LeaseView';
 import { gwGet } from '@/lib/gw';
 
-/** Poll the gateway's GPU/lease state so the tab reflects what is actually resident (008 US3). */
+/** Poll the gateway's GPU/lease state so the stage reflects what is actually resident (008 US3). */
 function useServingState(intervalMs = 4000): ServingState | null {
   const [state, setState] = useState<ServingState | null>(null);
   useEffect(() => {
@@ -14,7 +16,7 @@ function useServingState(intervalMs = 4000): ServingState | null {
     const tick = () =>
       gwGet<ServingState>('serving/state')
         .then((s) => alive && setState(s))
-        .catch(() => {});
+        .catch(() => alive && setState(null)); // unknown, not stale — the lease view says so
     tick();
     const id = setInterval(tick, intervalMs);
     return () => {
@@ -25,8 +27,8 @@ function useServingState(intervalMs = 4000): ServingState | null {
   return state;
 }
 
-/** Discover the registry's serving tasks → one panel per task (009 US1, FR-077). Polled so a newly
- *  seeded modality appears without a reload. `null` until the first fetch resolves. */
+/** Discover the registry's serving tasks → one panel per task (009 US1, FR-077/FR-231). Polled so a
+ *  newly seeded modality appears without a reload. `null` until the first fetch resolves. */
 function useTasks(intervalMs = 8000): TaskEntry[] | null {
   const [tasks, setTasks] = useState<TaskEntry[] | null>(null);
   useEffect(() => {
@@ -45,15 +47,22 @@ function useTasks(intervalMs = 8000): TaskEntry[] | null {
   return tasks;
 }
 
-export default function InferPage() {
+// 021 T429 (FR-231..236): the serving stage — every promoted engine as a live panel under ONE GPU
+// lease (LeaseView), plus offline batch (moved here from runs). The default landing surface.
+export default function ServingPage() {
   const serving = useServingState();
   const tasks = useTasks();
 
   return (
     <>
-      <PageTitle sub="One panel per registry task. The API key stays server-side (BFF).">
-        infer
+      <PageTitle sub="Every promoted engine, live, under one GPU lease. The API key stays server-side (BFF).">
+        serving
       </PageTitle>
+
+      <div className="mb-6">
+        <LeaseView serving={serving} tasks={tasks} />
+      </div>
+
       {tasks === null ? (
         <p className="text-caption-md text-ash">[~] discovering tasks…</p>
       ) : tasks.length === 0 ? (
@@ -69,6 +78,10 @@ export default function InferPage() {
           })}
         </div>
       )}
+
+      <div className="mt-6">
+        <BatchPanel />
+      </div>
     </>
   );
 }
