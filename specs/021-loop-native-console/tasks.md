@@ -197,7 +197,7 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
 **Goal**: `/health` shows platform liveness + per-engine probe dots (FR-249).
 **Independent test**: `quickstart.md §US7`.
 
-- [ ] **T454** [US7] `app/health/page.tsx`: keep platform liveness (`platform/health` +
+- [x] **T454** [US7] `app/health/page.tsx`: keep platform liveness (`platform/health` +
   `platform/events`); add per-engine probe dots (serving/predict/vision/embed/transcribe/training
   health), a down engine shown distinctly not-ok (FR-249).
 - [ ] **T455** [US7] Validate US7 against `quickstart.md §US7`; lint + build green.
