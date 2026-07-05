@@ -79,17 +79,17 @@ badges + a persistent GPU pill; lands on `serving`; survives a platform outage (
 confirm-gated preempt, and prediction→monitoring traceability (FR-231..237).
 **Independent test**: `quickstart.md §US2`.
 
-- [ ] **T429** [US2] Wire the relocated `components/serving/*` panels into `app/serving/page.tsx`
+- [x] **T429** [US2] Wire the relocated `components/serving/*` panels into `app/serving/page.tsx`
   driven by `GET /serving/tasks` — one panel per promoted task, `NoRenderer` for an untagged version
   (FR-231/232). Preserve all five engines (stream/classify/tabular/transcribe/embed).
-- [ ] **T430** [P] [US2] `ui/components/serving/LeaseView.tsx`: holder + resident + serving-version +
+- [x] **T430** [P] [US2] `ui/components/serving/LeaseView.tsx`: holder + resident + serving-version +
   live `serving/tasks` list, visually marking lease-tenant (llm/vision/asr/training) vs off-lease
   (tabular/embed) engines (FR-234).
-- [ ] **T431** [P] [US2] `ui/components/serving/BatchPanel.tsx`: launch batch over `dataset@version`
+- [x] **T431** [P] [US2] `ui/components/serving/BatchPanel.tsx`: launch batch over `dataset@version`
   → poll `batch/:id` → result link (moved from the runs page) (FR-236).
-- [ ] **T432** [US2] Preemptive-swap control on the LLM panel: `preempt` gated behind `ConfirmDialog`
+- [x] **T432** [US2] Preemptive-swap control on the LLM panel: `preempt` gated behind `ConfirmDialog`
   naming the holder to evict (FR-235/250). Never presents a running job as preemptable.
-- [ ] **T433** [US2] LLM panel stream/trace split (FR-232/233): **stream mode** (`POST /infer/stream`)
+- [x] **T433** [US2] LLM panel stream/trace split (FR-232/233): **stream mode** (`POST /infer/stream`)
   shows the completion + `registry_version` (resolved from `serving/state`) + `load_ms`, no prediction
   id; **trace mode** (`POST /infer`, now allow-listed) shows the single-shot completion +
   `registry_version` + `prediction_id` + `load_ms` and the "label this prediction" hand-off deep-link

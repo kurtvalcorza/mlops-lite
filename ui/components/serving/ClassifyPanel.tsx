@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Panel } from '@/components/Panel';
 import { gwPost } from '@/lib/gw';
 import type { PanelProps } from './types';
@@ -19,6 +20,8 @@ export function ClassifyPanel({ serving }: PanelProps) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [fileName, setFileName] = useState('');
+  // 021 (FR-250): a pending swap-classify held until the shared ConfirmDialog confirms it.
+  const [pendingSwap, setPendingSwap] = useState<File | null>(null);
 
   const holder = serving?.holder;
   const heldByOther = !!holder && holder !== 'vision';
@@ -49,19 +52,19 @@ export function ClassifyPanel({ serving }: PanelProps) {
     [blocked],
   );
 
-  // On a swappable holder, confirm the cost before sending preempt=true; otherwise classify normally.
+  // On a swappable holder, confirm the cost before sending preempt=true; otherwise classify
+  // normally. 021 (FR-250): the confirm is the shared ConfirmDialog naming the holder to evict —
+  // the same friction primitive as the LLM panel's swap — replacing the old window.confirm.
   const onPick = useCallback(
     (file: File) => {
       if (blocked) return;
       if (swappable) {
-        if (window.confirm(`Evict the resident ${holderLabel} model (~2.5s reload) and classify?`)) {
-          handleFile(file, true);
-        }
+        setPendingSwap(file);
         return;
       }
       handleFile(file, false);
     },
-    [blocked, swappable, holderLabel, handleFile],
+    [blocked, swappable, handleFile],
   );
 
   return (
@@ -129,6 +132,25 @@ export function ClassifyPanel({ serving }: PanelProps) {
           </ul>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingSwap !== null}
+        title="preemptive swap"
+        body={
+          <>
+            The GPU lease is held by <span className="text-ink">{holderLabel}</span> with a model
+            resident. Classifying will <span className="st-warning">evict it</span> and load vision
+            (~2.5s reload; one model in VRAM, Principle II).
+          </>
+        }
+        confirmLabel={`evict ${holderLabel} & classify`}
+        onConfirm={() => {
+          const f = pendingSwap;
+          setPendingSwap(null);
+          if (f) handleFile(f, true);
+        }}
+        onCancel={() => setPendingSwap(null)}
+      />
     </Panel>
   );
 }
