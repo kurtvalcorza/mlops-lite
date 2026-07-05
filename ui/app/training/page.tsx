@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { Badge } from '@/components/Badge';
 import { PageTitle, Panel } from '@/components/Panel';
 import { GwError, gwGet, gwPost } from '@/lib/gw';
@@ -15,16 +16,14 @@ type RunRec = {
   metrics?: Record<string, unknown> | null;
   error?: string | null;
 };
+type ServingState = {
+  holder: string | null;
+  resident: boolean;
+  serving_model: string;
+  serving_version: string | null;
+};
 
 const TERMINAL = new Set(['completed', 'failed']);
-// 014 — the trainer emits batch terminal status as 'succeeded'/'failed' (not 'completed'); keep it
-// distinct so the launcher's poll loop actually stops and the spinner clears on a successful batch.
-const BATCH_TERMINAL = new Set(['succeeded', 'failed']);
-// 014 — batch has its OWN modality set: the trainer's /batch validator accepts only these (LLM, vision,
-// tabular). The training MODALITIES list (embeddings/asr) is invalid for batch and would 400; tabular is
-// valid here but absent there — so don't reuse it for the batch launcher.
-const BATCH_MODALITIES = ['llm', 'vision', 'tabular'] as const;
-type BatchModality = (typeof BATCH_MODALITIES)[number];
 
 // 012 — an HPO study: a best trial (winning params + eval metric → a registered, promotable version).
 type StudyBest = {
@@ -41,15 +40,28 @@ type StudyRec = {
   error?: string | null;
 };
 
-// 010 — the trainer dispatches one flow per modality; the form surfaces each modality's knobs (the
-// rest fall back to the flow's conservative VRAM-fitting defaults — FR-098).
+// 010/021 T451 (FR-219/220): the FIXED 4-way modality picker — each modality shows only ITS knobs
+// + its pinned default base; the rest fall to the flow's conservative VRAM-fitting defaults.
 const MODALITIES = ['llm', 'vision', 'embeddings', 'asr'] as const;
 type Modality = (typeof MODALITIES)[number];
 // Only these modalities can resume from a prior registered version (their artifact reloads as a
 // trainable warm start); LLM/ASR register a serving GGUF/ggml, not a trainable checkpoint.
 const CHAINABLE = new Set<Modality>(['vision', 'embeddings']);
+// Vision's architecture is locked (the classifier head is sized to the arch) — base is read-only.
+const LOCKED_BASE = new Set<Modality>(['vision']);
 
-export default function RunsPage() {
+// 021 T451: batch inference MOVED to /serving (it scores through the serving path, FR-236) — this
+// page launches training only; the old BatchLauncher is gone on purpose (no duplication).
+export default function TrainingPage() {
+  return (
+    <Suspense fallback={<p className="text-caption-md text-ash">[~] loading…</p>}>
+      <TrainingView />
+    </Suspense>
+  );
+}
+
+function TrainingView() {
+  const params = useSearchParams();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [dsKey, setDsKey] = useState(''); // "name@version"
   const [outputName, setOutputName] = useState('');
@@ -71,21 +83,49 @@ export default function RunsPage() {
   const [err, setErr] = useState('');
   const [rec, setRec] = useState<RunRec | null>(null);
   const [log, setLog] = useState<string[]>([]);
+  const [lease, setLease] = useState<ServingState | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const runPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    // 021 T450 (FR-217): the data → training hand-off — ?ds=name@version prefills the pin.
+    const ds = params.get('ds');
     gwGet<{ datasets: Dataset[] }>('datasets')
       .then((d) => {
         setDatasets(d.datasets || []);
-        const first = d.datasets?.[0];
-        if (first?.versions?.[0]) setDsKey(`${first.name}@${first.versions[0].version}`);
+        const all = (d.datasets || []).flatMap((x) =>
+          x.versions.map((v) => `${x.name}@${v.version}`),
+        );
+        if (ds && all.includes(ds)) setDsKey(ds);
+        else if (all[0]) setDsKey(all[0]);
       })
       .catch(() => setDatasets([]));
+    // 021 T452/T445: lineage drill-back — ?run=<id> polls an existing run's detail (GET /runs/:id).
+    const runId = params.get('run');
+    if (runId) pollRun(runId);
     return () => {
       esRef.current?.close();
       if (pollRef.current) clearInterval(pollRef.current);
+      if (runPollRef.current) clearInterval(runPollRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 021 T452 (FR-221): lease-aware launch — read serving/state so the operator sees a refusal
+  // coming BEFORE hitting launch (Principle II: the trainer refuses while a model is resident).
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      gwGet<ServingState>('serving/state')
+        .then((s) => alive && setLease(s))
+        .catch(() => alive && setLease(null));
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
     };
   }, []);
 
@@ -112,6 +152,31 @@ export default function RunsPage() {
     es.onerror = () => es.close();
   }, []);
 
+  // 021 T452 (FR-221): polled run detail via the newly allow-listed GET /runs/:id — used for the
+  // ?run= drill-back (models lineage → this run), where the SSE bridge may already be closed.
+  const pollRun = useCallback((runId: string) => {
+    if (runPollRef.current) clearInterval(runPollRef.current);
+    const tick = async () => {
+      try {
+        const r = await gwGet<RunRec>(`runs/${encodeURIComponent(runId)}`);
+        setRec({ run_id: runId, ...r });
+        setLog((l) =>
+          l.length === 0
+            ? [`[${new Date().toLocaleTimeString()}] watching ${runId} (drill-back)`]
+            : l,
+        );
+        if (r.status && TERMINAL.has(r.status) && runPollRef.current) {
+          clearInterval(runPollRef.current);
+          runPollRef.current = null;
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    };
+    tick();
+    runPollRef.current = setInterval(tick, 4000);
+  }, []);
+
   // 012 — poll an HPO study's status (studies/{id} is a plain GET, not SSE) until it finishes.
   const watchStudy = useCallback((studyId: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -130,6 +195,26 @@ export default function RunsPage() {
     tick();
     pollRef.current = setInterval(tick, 4000);
   }, []);
+
+  // 021 T452 (FR-222): 409 (lease busy) and 507 (over VRAM budget) are DISTINCT first-class
+  // refusals, not generic errors — each says what happened and what to do next.
+  const classifyRefusal = (e: unknown, what: string): boolean => {
+    if (e instanceof GwError && e.status === 409) {
+      setRefusal(
+        `Refused (409, lease busy): one model in VRAM at a time (Principle II). A serving model is ` +
+          `resident or another ${what} is active. Let it release (idle timeout) and retry.`,
+      );
+      return true;
+    }
+    if (e instanceof GwError && e.status === 507) {
+      setRefusal(
+        'Refused (507, over budget): the requested base model does not fit the VRAM budget. ' +
+          'Pick a smaller base or free the budget — this is admission control, not a failure.',
+      );
+      return true;
+    }
+    return false;
+  };
 
   const launch = async () => {
     if (!dsKey || !outputName.trim()) return;
@@ -151,7 +236,7 @@ export default function RunsPage() {
         seed,
         n_trials: nTrials,
       };
-      if (baseModel.trim()) sbody.base_model = baseModel.trim();
+      if (baseModel.trim() && !LOCKED_BASE.has(modality)) sbody.base_model = baseModel.trim();
       try {
         const res = await gwPost<{ study_id: string; status: string }>('studies', sbody);
         setStudy({ study_id: res.study_id, status: res.status });
@@ -161,15 +246,7 @@ export default function RunsPage() {
         ]);
         watchStudy(res.study_id);
       } catch (e) {
-        // 018 (T371): branch on the structured status, not the error-message text.
-        if (e instanceof GwError && e.status === 409) {
-          setRefusal(
-            'Refused: one model in VRAM at a time (Principle II). A model is resident in serving, ' +
-              'or another run/study is active. Let it release and retry.',
-          );
-        } else {
-          setErr(String(e));
-        }
+        if (!classifyRefusal(e, 'run/study')) setErr(String(e));
       } finally {
         setLaunching(false);
       }
@@ -184,7 +261,8 @@ export default function RunsPage() {
       modality,
       seed,
     };
-    if (baseModel.trim()) body.base_model = baseModel.trim();
+    // Vision's base is read-only in the form (locked arch) — never forwarded (FR-220).
+    if (baseModel.trim() && !LOCKED_BASE.has(modality)) body.base_model = baseModel.trim();
     // Chaining is only supported for vision + embeddings (their registered artifact reloads as a
     // trainable warm start); LLM serves a GGUF and ASR a ggml binary — neither is a trainable
     // checkpoint. Never forward parent_version outside the resumable modalities (field hidden too).
@@ -202,15 +280,7 @@ export default function RunsPage() {
       setLog([`[${new Date().toLocaleTimeString()}] launched ${res.run_id} (${res.status})`]);
       watch(res.run_id);
     } catch (e) {
-      // Principle II: the trainer refuses to start while the serving model is resident (409).
-      if (e instanceof GwError && e.status === 409) {
-        setRefusal(
-          'Refused: one model in VRAM at a time (Principle II). A model is resident in serving, ' +
-            'or another run is active. Let it release (idle timeout) and retry.',
-        );
-      } else {
-        setErr(String(e));
-      }
+      if (!classifyRefusal(e, 'run')) setErr(String(e));
     } finally {
       setLaunching(false);
     }
@@ -221,16 +291,33 @@ export default function RunsPage() {
   );
   const running = rec?.status && !TERMINAL.has(rec.status);
   const studyRunning = study?.status && !TERMINAL.has(study.status);
+  const leaseHeld = !!lease?.holder && lease.holder !== 'training';
 
   return (
     <>
       <PageTitle sub="Launch a fine-tune (LLM · vision · embeddings · ASR) on a pinned dataset version and watch it live.">
-        runs
+        training
       </PageTitle>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
         <Panel title="launch" hint="POST /runs">
-          <Field label="dataset @ version">
+          {/* FR-221: the lease state, read BEFORE launching — a refusal should never surprise */}
+          {lease !== null && (
+            <p className="mb-3 text-caption-md">
+              {leaseHeld ? (
+                <span className="st-warning">
+                  [!] GPU lease held by {lease.holder}
+                  {lease.resident ? ` (${lease.serving_model} resident)` : ''} — a launch now will be
+                  refused (409) until it releases.
+                </span>
+              ) : lease.holder === 'training' ? (
+                <span className="st-accent">[~] a training run already holds the GPU.</span>
+              ) : (
+                <span className="text-ash">[ ] GPU lease idle — clear to launch.</span>
+              )}
+            </p>
+          )}
+          <Field label="dataset @ version (pinned)">
             <select
               value={dsKey}
               onChange={(e) => setDsKey(e.target.value)}
@@ -266,12 +353,26 @@ export default function RunsPage() {
                 ))}
               </select>
             </Field>
-            <Field label="base model (optional)">
+            <Field
+              label={
+                LOCKED_BASE.has(modality) ? 'base model (locked arch)' : 'base model (pinned default)'
+              }
+            >
               <input
-                value={baseModel}
+                value={LOCKED_BASE.has(modality) ? '' : baseModel}
                 onChange={(e) => setBaseModel(e.target.value)}
-                placeholder="(flow default)"
-                className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
+                disabled={LOCKED_BASE.has(modality)}
+                placeholder={
+                  LOCKED_BASE.has(modality)
+                    ? 'pinned — the head is sized to the arch'
+                    : '(flow default)'
+                }
+                title={
+                  LOCKED_BASE.has(modality)
+                    ? 'vision trains a classifier head on a locked architecture — the base is not a knob'
+                    : undefined
+                }
+                className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash disabled:opacity-60"
               />
             </Field>
           </div>
@@ -343,13 +444,14 @@ export default function RunsPage() {
           >
             {launching ? '[~] launching…' : optimize ? '[+] launch study' : '[+] launch run'}
           </button>
-          {refusal && (
-            <p className="mt-3 text-caption-md st-warning">[!] {refusal}</p>
-          )}
+          {refusal && <p className="mt-3 text-caption-md st-warning">[!] {refusal}</p>}
           {err && <p className="mt-3 text-caption-md st-danger">[x] {err}</p>}
         </Panel>
 
-        <Panel title={study ? 'hpo study' : 'live run'} hint={study ? 'GET /studies/{id}' : 'GET /runs/{id}/events (SSE)'}>
+        <Panel
+          title={study ? 'hpo study' : 'live run'}
+          hint={study ? 'GET /studies/{id}' : 'GET /runs/{id}/events (SSE) · GET /runs/{id}'}
+        >
           {study && <StudyView study={study} />}
           {!study && !rec && <p className="text-body-md text-mute">[ ] no active run.</p>}
           {!study && rec && (
@@ -382,6 +484,14 @@ export default function RunsPage() {
                 {running && <div className="cursor" />}
               </div>
 
+              {rec.metrics && Object.keys(rec.metrics).length > 0 && (
+                <p className="mb-2 text-caption-md text-mute">
+                  metrics:{' '}
+                  {Object.entries(rec.metrics)
+                    .map(([k, v]) => `${k}=${String(v)}`)
+                    .join(' · ')}
+                </p>
+              )}
               {rec.error && <p className="text-caption-md st-danger">[x] {rec.error}</p>}
 
               {rec.status === 'completed' && rec.model && (
@@ -390,7 +500,7 @@ export default function RunsPage() {
                     [✓] registered {rec.model.name} v{rec.model.version}
                   </p>
                   <Link href="/models" className="st-accent underline">
-                    [→] promote it in models
+                    [→] view in models (promote it there)
                   </Link>
                 </div>
               )}
@@ -398,145 +508,7 @@ export default function RunsPage() {
           )}
         </Panel>
       </div>
-
-      <div className="mt-6">
-        <BatchLauncher datasets={datasets} />
-      </div>
     </>
-  );
-}
-
-// 014 US1 — offline batch inference launcher + status in the existing Runs surface (no new Batch tab).
-type BatchRec = {
-  batch_id?: string;
-  status?: string;
-  result?: { n_in: number; n_out: number; n_failed: number; result_uri: string } | null;
-  error?: string | null;
-};
-
-function BatchLauncher({ datasets }: { datasets: Dataset[] }) {
-  const [dsKey, setDsKey] = useState('');
-  const [model, setModel] = useState('');
-  const [modality, setModality] = useState<BatchModality>('llm');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const [rec, setRec] = useState<BatchRec | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
-
-  const opts = datasets.flatMap((d) =>
-    d.versions.map((v) => ({ key: `${d.name}@${v.version}`, label: `${d.name} @ ${v.version}` })),
-  );
-
-  const watch = (id: string) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    const tick = async () => {
-      try {
-        const b = await gwGet<BatchRec>(`batch/${encodeURIComponent(id)}`);
-        setRec(b);
-        if (b.status && BATCH_TERMINAL.has(b.status) && pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
-      } catch {
-        /* transient — keep polling */
-      }
-    };
-    tick();
-    pollRef.current = setInterval(tick, 4000);
-  };
-
-  const launch = async () => {
-    if (!dsKey || !model.trim()) return;
-    const [dataset_name, dataset_version] = dsKey.split('@');
-    setBusy(true);
-    setErr('');
-    setRec(null);
-    try {
-      const res = await gwPost<{ batch_id: string; status: string }>('batch', {
-        dataset_name,
-        dataset_version,
-        model: model.trim(),
-        modality,
-      });
-      setRec({ batch_id: res.batch_id, status: res.status });
-      watch(res.batch_id);
-    } catch (e) {
-      setErr(e instanceof GwError && e.status === 409
-        ? 'Refused: the daemon is busy (a run/study/batch is active).' : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const running = rec?.status && !BATCH_TERMINAL.has(rec.status);
-
-  return (
-    <Panel title="batch inference" hint="POST /batch — score a dataset version offline">
-      <div className="grid gap-2 sm:grid-cols-3">
-        <Field label="dataset @ version">
-          <select
-            value={dsKey}
-            onChange={(e) => setDsKey(e.target.value)}
-            className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink"
-          >
-            {opts.length === 0 && <option value="">(no datasets)</option>}
-            {opts.map((o) => (
-              <option key={o.key} value={o.key}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="model (alias or version)">
-          <input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="@serving"
-            className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink placeholder:text-ash"
-          />
-        </Field>
-        <Field label="modality">
-          <select
-            value={modality}
-            onChange={(e) => setModality(e.target.value as BatchModality)}
-            className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink"
-          >
-            {BATCH_MODALITIES.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </div>
-      <button
-        onClick={launch}
-        disabled={busy || !dsKey || !model.trim() || !!running}
-        className="mt-2 rounded-sm bg-ink px-4 py-1 text-button-md text-canvas disabled:opacity-40"
-      >
-        {busy ? '[~] launching…' : '[+] score dataset'}
-      </button>
-      {err && <p className="mt-3 text-caption-md st-danger">[x] {err}</p>}
-      {rec && (
-        <div className="mt-3 text-caption-md">
-          <Badge
-            tone={rec.status === 'succeeded' ? 'success' : rec.status === 'failed' ? 'danger' : 'accent'}
-          >
-            {rec.status}
-          </Badge>
-          {rec.error && <p className="mt-1 st-danger">[x] {rec.error}</p>}
-          {rec.result && (
-            <p className="mt-1 st-success">
-              [✓] {rec.result.n_out}/{rec.result.n_in} scored
-              {rec.result.n_failed > 0 ? ` · ${rec.result.n_failed} failed` : ''} ·{' '}
-              <span className="text-ash">{rec.result.result_uri}</span>
-            </p>
-          )}
-        </div>
-      )}
-    </Panel>
   );
 }
 
@@ -576,7 +548,7 @@ function StudyView({ study }: { study: StudyRec }) {
               .join(' · ')}
           </p>
           <Link href="/models" className="st-accent underline">
-            [→] promote it in models
+            [→] view in models (promote it there)
           </Link>
         </div>
       ) : (

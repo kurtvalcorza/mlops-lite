@@ -173,19 +173,19 @@ drill-back, and on-demand metrics (FR-224..229).
 fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
 **Independent test**: `quickstart.md §US6`.
 
-- [ ] **T449** [US6] `app/data/page.tsx`: keep register/list/dedupe; add version inspect (full
+- [x] **T449** [US6] `app/data/page.tsx`: keep register/list/dedupe; add version inspect (full
   manifest via `datasets/:name/:version` — **manifest only; no byte-download button**, the
   `download_url` is presigned against the internal store and is not browser-reachable, FR-215) and
   present validate as a gate-vs-warn
   readiness report (FR-214/215/216). No edit/delete/EDA (FR-218).
-- [ ] **T450** [P] [US6] "train on this version" hand-off from `data` → `/training?ds=<name>@<version>`
+- [x] **T450** [P] [US6] "train on this version" hand-off from `data` → `/training?ds=<name>@<version>`
   (FR-217, research R7).
-- [ ] **T451** [US6] `app/training/page.tsx`: fixed 4-way modality picker showing only that modality's
+- [x] **T451** [US6] `app/training/page.tsx`: fixed 4-way modality picker showing only that modality's
   knobs + pinned default base; base read-only for vision (locked arch); chain-from-parent enabled
   only for vision/embeddings; reads `ds` prefill (FR-219/220). **Remove the batch launcher from this
   page** — batch inference now lives in `serving` (T431/FR-236); this completes the move so batch is
   not duplicated across stages.
-- [ ] **T452** [P] [US6] Lease-aware launch: read `serving/state` before launch; surface 409 (busy) /
+- [x] **T452** [P] [US6] Lease-aware launch: read `serving/state` before launch; surface 409 (busy) /
   507 (over-budget) as distinct first-class refusals; poll `runs/:id` detail; "view in models"
   hand-off on completion (FR-221/222). No cancel/register/history surfaces (FR-223).
 - [ ] **T453** [US6] Validate US6 against `quickstart.md §US6`; lint + build green.
