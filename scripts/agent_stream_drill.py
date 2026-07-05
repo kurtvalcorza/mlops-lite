@@ -137,16 +137,24 @@ def measure_disconnect(agent_url: str, engine: str, verb: str, body: dict, *,
             "recovered_in_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
 
-def measure_multipart(agent_url: str, *, runs: int, timeout: float) -> dict:
-    """Vision classify RTT with the golden-style deterministic fixture image."""
+def _vision_multipart():
     sys.path.insert(0, os.path.join(REPO, "scripts"))
     from capture_goldens import _golden_png, _multipart_image  # same fixture as the US2 gate
-    body, ctype = _multipart_image(_golden_png())
+    return _multipart_image(_golden_png())
+
+
+def measure_multipart(agent_url: str, *, runs: int, timeout: float, preempt: bool = False) -> dict:
+    """Vision classify RTT with the golden-style deterministic fixture image. `preempt=True`
+    sends `?preempt=true` so the leg can run while another serving tenant is resident (the
+    stream leg leaves the LLM holding the slot — one model in VRAM): run 1 measures the
+    swap+load, warm runs are same-tenant no-ops."""
+    body, ctype = _vision_multipart()
+    path = "/engines/vision/classify" + ("?preempt=true" if preempt else "")
     times = []
     for _ in range(runs):
         c = _conn(agent_url, timeout=timeout)
         t0 = time.perf_counter()
-        c.request("POST", "/engines/vision/classify", body=body,
+        c.request("POST", path, body=body,
                   headers={"Content-Type": ctype})
         resp = c.getresponse()
         data = resp.read()
@@ -163,17 +171,28 @@ def measure_preempt_during_stream(agent_url: str, engine: str, verb: str, body: 
                                   target_engine: str, stall_gap_s: float, timeout: float) -> dict:
     """Fire a `?preempt=true` load of `target_engine` while a stream is mid-flight; record the
     observed behavior (409 refused vs drained-then-served — either can be correct per the lease
-    semantics; what matters is it MATCHES the documented behavior on both runtimes)."""
+    semantics; what matters is it MATCHES the documented behavior on both runtimes).
+
+    The contender must be a GPU tenant or no contention exists (CPU engines are off-lease). On
+    this platform the GPU verbs besides the streaming LLM are multipart (vision classify / asr
+    transcribe), so the default contender is a vision classify built from the golden fixture; a
+    JSON `{"rows": …}` predict is kept for any JSON-shaped target."""
     result = {}
+    if target_engine == "vision":
+        contender_body, contender_ctype = _vision_multipart()
+        contender_path = "/engines/vision/classify?preempt=true"
+    else:
+        contender_body = json.dumps({"rows": [{}]})
+        contender_ctype = "application/json"
+        contender_path = f"/engines/{target_engine}/predict?preempt=true"
 
     def preempt():
         time.sleep(0.3)  # let the stream get going
         t0 = time.perf_counter()
         try:
             c = _conn(agent_url, timeout=timeout)
-            c.request("POST", f"/engines/{target_engine}/predict?preempt=true",
-                      body=json.dumps({"rows": [{}]}),
-                      headers={"Content-Type": "application/json"})
+            c.request("POST", contender_path, body=contender_body,
+                      headers={"Content-Type": contender_ctype})
             resp = c.getresponse()
             result["status"] = resp.status
             result["body"] = resp.read(300).decode(errors="replace")
@@ -248,8 +267,11 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-multipart", action="store_true",
                     help="skip the vision leg (no GPU box / vision model)")
     ap.add_argument("--skip-preempt", action="store_true")
-    ap.add_argument("--preempt-target", default="tabular",
-                    help="engine whose ?preempt=true load contends with the stream")
+    ap.add_argument("--multipart-preempt", action="store_true",
+                    help="send the multipart leg with ?preempt=true (needed when the stream leg"
+                         " leaves the LLM resident — one model in VRAM)")
+    ap.add_argument("--preempt-target", default="vision",
+                    help="GPU engine whose ?preempt=true load contends with the stream")
     ap.add_argument("--baseline-ttft-ms", type=float, default=None)
     ap.add_argument("--baseline-stalls-max", type=int, default=None)
     ap.add_argument("--baseline-multipart-ms", type=float, default=None)
@@ -268,10 +290,9 @@ def main(argv=None) -> int:
     print(f"[drill] stream: ttft={stream['ttft_ms']}ms stalls={stream['stalls']} "
           f"(polls={stream['health_polls']}, poll_failures={stream['health_poll_failures']})",
           file=sys.stderr)
-    multipart = None
-    if not args.skip_multipart:
-        multipart = measure_multipart(agent, runs=args.runs, timeout=args.timeout)
-        print(f"[drill] multipart: {multipart['multipart_ms']}ms median", file=sys.stderr)
+    # Leg order matters under "one model in VRAM": every LLM leg runs while the LLM is the
+    # resident tenant; the vision multipart leg runs LAST (with --multipart-preempt when the
+    # stream legs leave the LLM holding the slot).
     disconnect = measure_disconnect(agent, args.engine, args.verb, body,
                                     stall_gap_s=args.stall_gap_s, timeout=args.timeout)
     print(f"[drill] disconnect: ok={disconnect['disconnect_ok']}", file=sys.stderr)
@@ -281,6 +302,11 @@ def main(argv=None) -> int:
             agent, args.engine, args.verb, body, target_engine=args.preempt_target,
             stall_gap_s=args.stall_gap_s, timeout=args.timeout)
         print(f"[drill] preempt-during-stream: {preempt['behavior']}", file=sys.stderr)
+    multipart = None
+    if not args.skip_multipart:
+        multipart = measure_multipart(agent, runs=args.runs, timeout=args.timeout,
+                                      preempt=args.multipart_preempt)
+        print(f"[drill] multipart: {multipart['multipart_ms']}ms median", file=sys.stderr)
 
     baselines = {"ttft_ms": args.baseline_ttft_ms, "stalls_max": args.baseline_stalls_max,
                  "multipart_ms": args.baseline_multipart_ms, "stall_gap_s": args.stall_gap_s}

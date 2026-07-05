@@ -1,0 +1,1 @@
+{"model": "vision-mobilenet", "device": "cuda", "predictions": [{"label": "cleaver", "score": 0.0132}, {"label": "hourglass", "score": 0.0123}, {"label": "hair spray", "score": 0.0117}, {"label": "theater curtain", "score": 0.011}, {"label": "safety pin", "score": 0.01}]}

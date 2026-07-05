@@ -1,0 +1,1 @@
+{"model": "tabular-lgbm", "device": "cpu", "features": ["f0", "f1", "f2", "f3"], "predictions": [{"prediction": 0, "score": 0.420189}, {"prediction": 1, "score": 0.942178}]}

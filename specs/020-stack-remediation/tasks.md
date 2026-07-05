@@ -119,7 +119,7 @@ components and a proven rollback story (now moot).
   clean), preempt-during-stream (409-vs-drain per lease semantics); appends a
   RuntimeBaselineRecord (data-model.md) to the runbook doc; offline smoke against a fake SSE
   child.
-- [ ] **T415** [US3] **[HW]** Run the drill on BOTH runtimes (quickstart §US3); record both
+- [x] **T415** [US3] **[HW]** Run the drill on BOTH runtimes (quickstart §US3); record both
   RuntimeBaselineRecords + the FR-205 verdict in `docs/on-hardware-validation-018.md`. Any
   stdlib baseline miss ⇒ flip the default to `uvicorn` and re-run the full agent suite on it;
   no miss ⇒ stdlib stays. Either way the loser's deletion is queued for the next increment
