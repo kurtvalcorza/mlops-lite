@@ -110,8 +110,8 @@ thrashes.
 
 Routing is **registry-metadata-driven for `/infer`** (009): every model version carries a `task` tag
 (text-generation / image-classification / embedding / asr / tabular) and a `serving_engine` tag. The
-`/infer` path and the Infer tab resolve their target off these tags (`resolve_serving_target`), and the
-**Infer tab renders one panel per `task`** discovered from the registry. The gateway's serving routers
+`/infer` path and the serving stage (the pre-021 “Infer tab”) resolve their target off these tags (`resolve_serving_target`), and the
+**serving stage renders one panel per `task`** discovered from the registry. The gateway's serving routers
 proxy the **byte-compatible** per-engine paths on the agent (`${AGENT_URL}/engines/<id>/…`); a single
 `AGENT_URL` replaced the six per-daemon URLs the pre-018 gateway used. Fine-tuned versions (010) land
 with the same serving tags **plus lineage** (`base_model`, parent run) so adapters can be chained.
@@ -181,13 +181,22 @@ only `AGENT_URL`.
 > It no longer arbitrates the GPU: admission inside the agent is the sole authority. State is at
 > `:8099/status`; the gateway aggregates reachability at `/platform/health` (ASR marked `optional`).
 
-## Operator console (003 + 004)
+## Operator console (003 + 004, loop-native since 021)
 
 A Next.js operator console (native WSL, `127.0.0.1`, terminal/man-page aesthetic, JetBrains Mono) sits
-over a key-injecting BFF and is itself a supervised daemon. Tabs cover infer / models / datasets / runs
-/ monitor / platform (+ a **policies** editor since 018), with live updates over gateway SSE
-(`/infer/stream`, `/platform/events`, `/runs/{id}/events`). 004 hardened the BFF (route-allowlist,
-same-origin/CSRF guard, CSP/security headers, scoped Grafana embed) and added a `/readyz` probe.
+over a key-injecting BFF and is itself a supervised daemon. Since **021** the navigation IS the
+lifecycle loop — `data → training → models → serving → monitoring → retraining ⟲` — with live
+per-stage status glyphs, a persistent off-axis **GPU-lease pill** (holder + resident model), and
+`health` off-axis right. `/` lands on `serving`; the old tab paths (`/infer`, `/datasets`, `/runs`,
+`/monitor`) redirect to their loop-stage homes. The serving stage renders one panel per registry
+`task` (dynamic per-task renderers) plus the full lease view and batch; monitoring gained the
+read-side (drift + quality histories, labels by prediction id, one-shot retrain with
+cooldown-as-outcome); retraining hosts the standing policy editor (form+JSON), the per-model cycle
+board, and the suggestions inbox; models centers the preview→promote gate with lineage drill-back
+and override-with-reason. Live updates ride gateway SSE (`/infer/stream`, `/platform/events`,
+`/runs/{id}/events`). 004 hardened the BFF (route-allowlist, same-origin/CSRF guard, CSP/security
+headers, scoped Grafana embed) and added a `/readyz` probe; 021 extended the allow-list by 13
+already-existing endpoints (no backend change).
 
 ## Platform re-architecture — the GPU host agent (018)
 
@@ -253,7 +262,7 @@ the guarantees are the same:
   evict→load. The gateway only *reads* the current holder for the UI status line.
 - **Vision-on-GPU** — the vision engine child loads its classifier to `cuda` as a tenant and holds the
   slot across load+inference; it refuses (gateway `409`) while another tenant holds the GPU.
-- **Infer tab** shows a read-only `serving:` status line; `classify` is disabled-with-hint while the GPU
+- **Serving stage** (pre-021: the Infer tab) shows a read-only `serving:` status line; `classify` is disabled-with-hint while the GPU
   is held — or offers **Swap & classify** (017) when the holder is another serving model.
 
 ## Swap-on-demand (017 — 008's A2 fast-follow)
@@ -271,7 +280,7 @@ model in VRAM throughout**.
 - **Training is never preempted** — a `preempt=true` request against a training/HPO/batch holder is
   **refused** (`409`); a GPU job is structurally non-preemptable.
 - **Default is byte-for-byte 008** — with `preempt` omitted/false, behavior is unchanged refuse-if-held.
-- **UI** — the Infer tab's `classify` "GPU busy" dead-end becomes a cost-stating **"Swap & classify"**
+- **UI** — the serving stage’s `classify` "GPU busy" dead-end becomes a cost-stating **"Swap & classify"**
   confirm; a training holder keeps the disabled hint.
 
 ## Evaluation gates (011)
@@ -505,3 +514,4 @@ and served live at `http://localhost:8080/docs`.
 | 018 | platform-rearchitecture | GPU host agent (in-process admission, T364), one lifecycle + thin adapters, transactional swap, durable job journal, jobs fold-in (T362), shared `platformlib` contracts, closed declarative policy loop; constitution v1.5.0 |
 | 019 | review-remediation-018 | Ten verified fixes to the 018 fold-in: journal durability, admission self-recovery, swap target-probe, idempotent retrains, lifecycle race, single-flight swap, contract conformance, per-engine budgets, deterministic verdict selection |
 | 020 | stack-remediation | **Built + [HW]-validated** — object-store exit (→ Garage; decommissioned), "Bento-ectomy" (byte-identical golden gates; venv 216→195), agent-runtime verdict keep-stdlib; no new capability |
+| 021 | loop-native-console | Front-end-only IA rebuild: the nav IS the loop (`data → training → models → serving → monitoring → retraining ⟲`) with live stage badges + GPU-lease pill; monitoring read-side, retraining stage (policies/cycle board/suggestions), promote-gate centerpiece, LLM stream/trace split; 13 allow-list additions, zero backend change |

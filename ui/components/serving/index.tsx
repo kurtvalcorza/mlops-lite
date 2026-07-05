@@ -1,7 +1,7 @@
-// Renderer map for the task-driven Infer tab (009 US1, FR-077). The tab discovers the registry's
-// serving `task`s and renders one panel per task by looking it up here; a task with no entry falls
-// to NoRenderer (a read-only placeholder, never a broken tab). Adding a modality = register a model
-// with a `task` tag (backend) + add one line to this map (frontend) — no tab re-plumbing.
+// Renderer map for the task-driven serving stage (009 US1 FR-077 → 021 FR-231). The stage
+// discovers the registry's serving `task`s and renders one panel per task by looking it up here; a
+// task with no entry falls to NoRenderer (a read-only placeholder, never a broken page). Adding a
+// modality = register a model with a `task` tag (backend) + add one line to this map (frontend).
 //
 // Lease-governed renderers (stream/classify/transcribe) gate on the GPU lease state; the always-on
 // CPU renderers (embed/predict) ignore it (FR-082). Each renderer takes the same PanelProps.

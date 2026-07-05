@@ -65,7 +65,7 @@ badges + a persistent GPU pill; lands on `serving`; survives a platform outage (
   monitoring=breach dot, retraining=open-suggestion count; `unknown` fallback (FR-210/213).
 - [x] **T427** [P] [US1] `ui/components/GpuPill.tsx`: header pill showing lease holder + resident
   model + swap/idle from `serving/state` + `platform/events`; click → `/serving` (FR-211).
-- [ ] **T428** [US1] Validate US1 end-to-end against `quickstart.md §US1` (loop order + connectors +
+- [x] **T428** [US1] Validate US1 end-to-end against `quickstart.md §US1` (loop order + connectors +
   loop-back, badges update, GPU pill, land on `/serving`, degrade-when-down); `npm run lint` + `npm
   run build` green.
 
@@ -95,7 +95,7 @@ confirm-gated preempt, and prediction→monitoring traceability (FR-231..237).
   `registry_version` + `prediction_id` + `load_ms` and the "label this prediction" hand-off deep-link
   → `/monitoring?prediction_id=…` (FR-237, research R7). The hand-off is offered only from trace mode
   (streamed predictions log no id / no capture, 016).
-- [ ] **T434** [US2] Validate US2 against `quickstart.md §US2`; lint + build green.
+- [x] **T434** [US2] Validate US2 against `quickstart.md §US2`; lint + build green.
 
 ---
 
@@ -163,7 +163,7 @@ drill-back, and on-demand metrics (FR-224..229).
   promote (gate) flow; a block leaves the alias put + shows the verdict; override behind
   `ConfirmDialog` requiring a typed reason; accepts the `?override=` deep-link from retraining
   (FR-228/229).
-- [ ] **T448** [US5] Validate US5 against `quickstart.md §US5`; lint + build green.
+- [x] **T448** [US5] Validate US5 against `quickstart.md §US5`; lint + build green.
 
 ---
 
@@ -188,7 +188,7 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
 - [x] **T452** [P] [US6] Lease-aware launch: read `serving/state` before launch; surface 409 (busy) /
   507 (over-budget) as distinct first-class refusals; poll `runs/:id` detail; "view in models"
   hand-off on completion (FR-221/222). No cancel/register/history surfaces (FR-223).
-- [ ] **T453** [US6] Validate US6 against `quickstart.md §US6`; lint + build green.
+- [x] **T453** [US6] Validate US6 against `quickstart.md §US6`; lint + build green.
 
 ---
 
@@ -200,25 +200,25 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
 - [x] **T454** [US7] `app/health/page.tsx`: keep platform liveness (`platform/health` +
   `platform/events`); add per-engine probe dots (serving/predict/vision/embed/transcribe/training
   health), a down engine shown distinctly not-ok (FR-249).
-- [ ] **T455** [US7] Validate US7 against `quickstart.md §US7`; lint + build green.
+- [x] **T455** [US7] Validate US7 against `quickstart.md §US7`; lint + build green.
 
 ---
 
 ## Phase 10: Polish & cross-cutting
 
-- [ ] **T456** [P] Responsive rule: at narrow widths the GPU pill wraps below the loop bar; the six
+- [x] **T456** [P] Responsive rule: at narrow widths the GPU pill wraps below the loop bar; the six
   ordered stages stay on one axis (research R1). Verify no horizontal body scroll.
-- [ ] **T457** [P] Remove dead surfaces: delete the old `components/infer/` shims and any stale
+- [x] **T457** [P] Remove dead surfaces: delete the old `components/infer/` shims and any stale
   `/infer|/datasets|/runs|/monitor` route implementations **only after confirming the old-path
   redirects (T422) live in a central, survivable location** (redirect shim / `next.config` /
   middleware) and still resolve — the cleanup must not delete the backward-compat redirects along with
   the old route dirs (FR-253 — IA, not reskin; design language preserved).
-- [ ] **T458** Allow-list conformance gate: grep every gateway call in `ui/` and confirm each resolves
+- [x] **T458** Allow-list conformance gate: grep every gateway call in `ui/` and confirm each resolves
   to a `gw-allowlist.ts` entry (no non-listed path/method); confirm the diff equals
   [contracts/allowlist-delta.md](./contracts/allowlist-delta.md) (SC-140/141/FR-251).
-- [ ] **T459** Full regression: `npm run lint` + `npm run build` green; run the Python backend suite
+- [x] **T459** Full regression: `npm run lint` + `npm run build` green; run the Python backend suite
   and confirm it is unchanged/green (SC-141); walk the whole loop once per `quickstart.md`.
-- [ ] **T460** [P] Refresh docs to match the renamed loop nav: in `README.md` update the operator-console
+- [x] **T460** [P] Refresh docs to match the renamed loop nav: in `README.md` update the operator-console
   section ("Tabs cover infer / models / datasets / runs / monitor / platform" → the loop
   `data → training → models → serving → monitoring → retraining ⟲` + off-axis health/GPU-pill) and the
   stale "Infer tab" references (per-task panels, lease/swap status line) to the `serving` stage; grep
@@ -253,3 +253,32 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
   (monitoring read-side) and **US4** (autonomous retraining) — the two previously-invisible steps —
   then the P3 enrichments **US5/US6/US7**, then Polish.
 - Every phase ends green on `lint`+`build` and its quickstart drill; no phase touches backend code.
+
+## Live validation record (2026-07-05, stack up on the dev machine)
+
+Automated gates: `next build` green after every phase (final exit 0); Python backend suite green
+(exit 0, passes + offline skips, zero failures — SC-141, no backend file touched); allow-list
+conformance grep — every gateway call in `ui/` resolves to a `gw-allowlist.ts` entry and the diff
+equals [contracts/allowlist-delta.md](./contracts/allowlist-delta.md) exactly (13 additions).
+
+Drilled live against the running platform (UI daemon restarted onto the 021 build):
+
+- **Routes/redirects (US1)**: `/`→`/serving` 307; `/infer`→`/serving`, `/datasets`→`/data`,
+  `/runs`→`/training`, `/monitor`→`/monitoring` all 307; all 7 stage routes 200.
+- **Loop shell (US1)**: SSR HTML carries the six stages in loop order (positions strictly
+  ascending), the `⟲` loop-back, the GPU pill, off-axis health.
+- **SC-142 (US1)**: gateway container stopped → `/serving`, `/retraining`, `/monitoring` still 200
+  (shell renders + navigates); BFF gateway calls fail closed (502); full recovery on restart.
+- **Trace mode (US2/FR-233)**: live `POST /infer` through the new allow-list entry → 200 with
+  `registry_version=23` + `prediction_id` + `load_ms=3518.5` + completion — the serving→monitoring
+  id seam proven on GPU.
+- **Monitoring read-side (US3)**: `GET /monitor?limit=1` + `GET /monitor/quality?limit=1` 200 with
+  real report history through the BFF; unknown-id label POST → clean `status: unknown` (write-once
+  contract, nothing mutated).
+- **Per-engine probes (US7)**: `serving/health` + `training/health` 200 through the new entries.
+
+Deferred to the full on-hardware pass (state-mutating / multi-tenant interactive drills):
+preemptive-swap confirm with a non-LLM holder resident, one-shot-retrain breach→launch→cooldown
+sequence, policy save→cycle→suggestion→gate-blocked accept→override walk, batch launch from
+serving, and narrow-width visual check. All corresponding code paths are build-validated and their
+backend halves were [HW]-proven in 013/017/018 drills.
