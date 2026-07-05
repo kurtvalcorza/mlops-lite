@@ -34,7 +34,7 @@ def _req(method, path, body=None, timeout=60):
 def main() -> int:
     _, h = _req("GET", "/vision/health")
     if not h.get("reachable"):
-        print("[SKIP] BentoML vision service not running (bash serving/bento/run.sh)")
+        print("[SKIP] BentoML vision service not running (bash serving/children/run.sh)")
         return 0
     print(f"[OK] vision service reachable ({h.get('backend')})")
 
