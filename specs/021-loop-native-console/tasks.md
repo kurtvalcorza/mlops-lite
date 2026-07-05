@@ -42,7 +42,7 @@ task is `npm run lint` + `npm run build` (type-check); each story's behavioural 
 
 ## Phase 2: Foundational (blocking prerequisite for the live shell + stages)
 
-- [ ] **T424** Shared live-state hook `ui/lib/useLiveState.ts` (or `lib/`-level helper): subscribes to
+- [x] **T424** Shared live-state hook `ui/lib/useLiveState.ts` (or `lib/`-level helper): subscribes to
   `platform/events` via `lib/sse.ts` with light per-stage polling fallback, and degrades to
   `unknown`/at-rest when the platform is unreachable (research R2 / FR-213). Consumed by the stage
   badges (US1) and the GPU pill (US1) and several stages. Validate: emits live values with the stack
@@ -56,14 +56,14 @@ task is `npm run lint` + `npm run build` (type-check); each story's behavioural 
 badges + a persistent GPU pill; lands on `serving`; survives a platform outage (FR-208..213).
 **Independent test**: `quickstart.md §US1`.
 
-- [ ] **T425** [US1] `ui/components/LoopNav.tsx` (rebuilding `Nav.tsx`): render the six stages in loop
+- [x] **T425** [US1] `ui/components/LoopNav.tsx` (rebuilding `Nav.tsx`): render the six stages in loop
   order `data → training → models → serving → monitoring → retraining` with directional connectors +
   a loop-back marker; place `health` + the GPU-pill slot off-axis (right) (FR-208/209). Mount in
   `app/layout.tsx`. Per [contracts/nav-and-routes.md](./contracts/nav-and-routes.md).
-- [ ] **T426** [P] [US1] `ui/components/StageBadge.tsx`: per-stage live status glyph fed by
+- [x] **T426** [P] [US1] `ui/components/StageBadge.tsx`: per-stage live status glyph fed by
   `useLiveState` — training=active-run, models=candidate-awaiting-promote, serving=resident engine,
   monitoring=breach dot, retraining=open-suggestion count; `unknown` fallback (FR-210/213).
-- [ ] **T427** [P] [US1] `ui/components/GpuPill.tsx`: header pill showing lease holder + resident
+- [x] **T427** [P] [US1] `ui/components/GpuPill.tsx`: header pill showing lease holder + resident
   model + swap/idle from `serving/state` + `platform/events`; click → `/serving` (FR-211).
 - [ ] **T428** [US1] Validate US1 end-to-end against `quickstart.md §US1` (loop order + connectors +
   loop-back, badges update, GPU pill, land on `/serving`, degrade-when-down); `npm run lint` + `npm
