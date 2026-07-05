@@ -71,10 +71,10 @@ else
     || fail "torch cu128 install failed (check the driver vs the cu128 wheels)"
 fi
 "$PY" -m pip install -q -r "$REPO/training/requirements.txt" || fail "training requirements install failed"
-"$PY" -m pip install -q -r "$REPO/serving/bento/requirements.txt" || fail "bento requirements install failed"
-# fsspec hold (007): datasets 3.1.0 caps fsspec<=2024.9.0 but bentoml needs >=2025.7.0 — the re-resolve
-# above can downgrade it and break bentoml. Pin to the validated 2026.6.0 LAST so it wins (overrides
-# datasets' conservative cap; both work). See scripts/native_env.lock.
+"$PY" -m pip install -q -r "$REPO/serving/children/requirements.txt" || fail "children requirements install failed"
+# fsspec hold (007/020): datasets 3.1.0 caps fsspec<=2024.9.0; the platform runs the validated
+# 2026.6.0 (originally forced by the now-retired bentoml, kept — both work). Pin it LAST so the
+# re-resolve above can't downgrade it. See scripts/native_env.lock.
 "$PY" -m pip install -q 'fsspec==2026.6.0' || fail "fsspec==2026.6.0 pin failed"
 if "$PY" -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)'; then
   ok "torch.cuda available (capability $("$PY" -c 'import torch;print(torch.cuda.get_device_capability())'))"

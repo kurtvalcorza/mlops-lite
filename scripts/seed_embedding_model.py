@@ -54,7 +54,7 @@ def main() -> int:
         print(f"[FAIL] could not promote {NAME} v{version}: {e}", file=sys.stderr)
         return 1
     print(f"registered {NAME} v{version} (task=embedding, serving_engine=bentoml, promoted @serving)")
-    print("done. start the service:  bash serving/bento/embed_run.sh")
+    print("done. start the service:  bash serving/children/embed_run.sh")
     return 0
 
 

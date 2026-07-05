@@ -78,7 +78,7 @@ def main() -> int:
     c.set_registered_model_alias(NAME, "serving", mv.version)
     print(f"registered {NAME} v{mv.version} -> {source}  (task=tabular, serving_engine=bentoml, "
           f"promoted @serving)")
-    print("done. start the service:  bash serving/bento/tabular_run.sh")
+    print("done. start the service:  bash serving/children/tabular_run.sh")
     return 0
 
 

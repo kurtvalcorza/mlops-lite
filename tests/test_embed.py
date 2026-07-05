@@ -34,7 +34,7 @@ def _req(method, path, body=None, timeout=120):
 def main() -> int:
     _, h = _req("GET", "/embed/health")
     if not h.get("reachable"):
-        print("[SKIP] embeddings service not running (bash serving/bento/embed_run.sh)")
+        print("[SKIP] embeddings service not running (serving/children/embed_run.sh)")
         return 0
     print(f"[OK] embeddings service reachable ({h.get('backend')})")
 

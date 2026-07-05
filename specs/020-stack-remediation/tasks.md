@@ -39,7 +39,7 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
   (data-model.md shape), exit 0 iff `parity: true`. Tests `tests/test_migrate_store.py`
   (two-FakeS3 seams): copies all, re-run `copied == 0` (SC-127), reverse direction, report
   shape, >1,000-key pagination, size-mismatch re-copy, count+bytes (never ETag) parity.
-- [ ] **T404** [US1] **[HW]** Candidate spike (FR-202 gate; quickstart §US1.1, research R2
+- [x] **T404** [US1] **[HW]** Candidate spike (FR-202 gate; quickstart §US1.1, research R2
   checklist): MLflow artifact round-trip incl. one multi-hundred-MB multipart upload;
   `platformlib.store` pagination; `_missing()` 404 discrimination; duplicate-PUT write-once;
   idle RSS at rest recorded (`docker stats --no-stream`, ≥5 min idle — SC-130 gate:
@@ -47,7 +47,7 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
   env-seam flip to the empty candidate (flows self-create data), flipped back before
   migration**. Record in `docs/on-hardware-validation-018.md`. A miss ⇒ switch to
   SeaweedFS per R1 and repeat (same plan, same tasks).
-- [ ] **T405** [US1] **[HW]** Migrate → cutover → rollback proof → soak (quickstart §US1.2–4;
+- [x] **T405** [US1] **[HW]** Migrate → cutover → rollback proof → soak (quickstart §US1.2–4;
   FR-199/200): forward run `parity: true`, re-run `copied: 0`; flip the cutover env contract —
   **assert `S3_ENDPOINT_URL` is unset (or flip it in lockstep) and that every host consumer has
   `MLFLOW_S3_ENDPOINT_URL` exported to the Garage host port (`:3900`, not the baked `:9000`
@@ -91,11 +91,11 @@ components and a proven rollback story (now moot).
   `_bento_cpu.py` → `_child_cpu.py` (launch path + `unavailable` pip-hint strings ONLY — the
   adapter contract, verbs, and error vocabulary untouched); offline adapter/contract suites
   updated for the rename and pass unchanged otherwise.
-- [ ] **T411** [US2] **[HW]** Per-child golden gates (FR-203; quickstart §US2.1–3): capture
+- [x] **T411** [US2] **[HW]** Per-child golden gates (FR-203; quickstart §US2.1–3): capture
   pre-swap goldens → swap → replay byte-identical, one child at a time (vision on the GPU box;
   embed/tabular anywhere with the venv). Any diff ⇒ revert that child's launch path (old child
   stays on disk until all three pass).
-- [ ] **T412** [US2] Retirement (FR-204; only after T411 passes ×3): delete `serving/bento/`;
+- [x] **T412** [US2] Retirement (FR-204; only after T411 passes ×3): delete `serving/bento/`;
   remove `bentoml` from the venv requirements; reinstall + `pip check`;
   `pip list | grep -i bento` empty; suite + replayed goldens green; venv package count strictly
   decreased (SC-131).

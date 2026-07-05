@@ -19,15 +19,18 @@ torchvision==0.26.0+cu128
 #                                  (007: mlflow-skinny 2.18.0->3.14.0 [US1]; prefect 3.1.4->3.7.6 [US5].
 #                                  010: sentence-transformers==3.3.1 added to training reqs — the
 #                                  embeddings fine-tune flow imports it directly; ALREADY in-venv from
-#                                  serving/bento (009 embeddings service), so this is a documentation
+#                                  the 009 embeddings service (bento then; serving/children since 020), so this is a documentation
 #                                  pin, not a new install, and reuses the frozen cu128 torch (NO stack
 #                                  bump — GPU/FT stack frozen per 010).
-#                                  fsspec held at 2026.6.0 — datasets 3.1.0 caps it <=2024.9.0 but a venv
-#                                  re-resolve must NOT downgrade it or bentoml 1.4.39 [fsspec>=2025.7.0]
-#                                  breaks. torch-family/transformers/datasets FROZEN.)
-#   serving/bento/requirements.txt -> bentoml==1.4.39 pillow==12.2.0 sentence-transformers==3.3.1
-#                                  lightgbm==4.5.0 joblib==1.4.2  (007 US5: pillow 11.0.0->12.2.0,
-#                                  already resolved in-venv via torchvision; bentoml already latest 1.x)
+#                                  fsspec held at 2026.6.0 — datasets 3.1.0 caps it <=2024.9.0; the
+#                                  hold was originally forced by bentoml (retired at 020 T412) and the
+#                                  validated 2026.6.0 stays. torch-family/transformers/datasets FROZEN.)
+#   serving/children/requirements.txt -> fastapi==0.138.1 uvicorn[standard]==0.49.0
+#                                  python-multipart==0.0.20 pillow==12.2.0 sentence-transformers==3.3.1
+#                                  lightgbm==4.5.0 joblib==1.4.2 nvidia-ml-py==13.610.43
+#                                  (020 T412: replaces serving/bento/requirements.txt — bentoml + its
+#                                  exclusive transitive deps removed; nvidia-ml-py, the agent's pynvml
+#                                  provider, was a silent bentoml stowaway and is now pinned first-party)
 #
 # Operator console (003 UI) — Node/UI tier (004 US2, T087). bootstrap.sh enforces a Node floor and
 # runs `npm ci` against ui/package-lock.json (the exact JS dep tree is pinned there, not here).
