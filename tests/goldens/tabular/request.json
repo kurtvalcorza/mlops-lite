@@ -1,5 +1,0 @@
-{
-  "path": "/engines/tabular/predict",
-  "method": "POST",
-  "content_type": "application/json"
-}

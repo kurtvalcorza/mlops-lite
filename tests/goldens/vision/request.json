@@ -1,5 +1,0 @@
-{
-  "path": "/engines/vision/classify",
-  "method": "POST",
-  "content_type": "multipart/form-data; boundary=mlops-golden-boundary-7f3a9c"
-}

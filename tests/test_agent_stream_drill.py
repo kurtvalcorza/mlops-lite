@@ -25,6 +25,7 @@ import agent_stream_drill as drill  # noqa: E402
 
 class FakeAgent(BaseHTTPRequestHandler):
     frame_delays = [0.0, 0.05, 0.05]   # per-frame sleeps; a test can inject a stall
+    seen = []                          # (path, content_type) of every POST — choreography asserts
 
     def log_message(self, *a):
         pass
@@ -43,6 +44,7 @@ class FakeAgent(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+        FakeAgent.seen.append((self.path, self.headers.get("Content-Type", "")))
         if self.path.startswith("/engines/llm/infer/stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -78,6 +80,7 @@ def agent():
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeAgent)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     FakeAgent.frame_delays = [0.0, 0.05, 0.05]
+    FakeAgent.seen = []
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
 
@@ -112,6 +115,27 @@ def test_preempt_during_stream_records_behavior(agent):
                                               timeout=10)
     assert out["preempt_status"] == 409 and out["behavior"] == "refused-409"
     assert out["stream_completed_frames"] == 3
+
+
+def test_preempt_contender_is_vision_multipart(agent):
+    # 020 T415 choreography: the swap contender must be a GPU tenant — for target "vision" the
+    # drill posts a MULTIPART classify with ?preempt=true (a CPU JSON predict can never contend).
+    out = drill.measure_preempt_during_stream(agent, "llm", "infer", BODY,
+                                              target_engine="vision", stall_gap_s=1.0,
+                                              timeout=10)
+    assert out["preempt_status"] == 200 and out["behavior"] == "served"
+    contender = [p for p in FakeAgent.seen if p[0].startswith("/engines/vision/classify")]
+    assert contender, "no vision contender request reached the agent"
+    path, ctype = contender[0]
+    assert "preempt=true" in path
+    assert ctype.startswith("multipart/")
+
+
+def test_multipart_preempt_flag_sends_query_param(agent):
+    out = drill.measure_multipart(agent, runs=1, timeout=10, preempt=True)
+    assert out["multipart_ms"] > 0
+    sent = [p for p, _ in FakeAgent.seen if p.startswith("/engines/vision/classify")]
+    assert sent and all("preempt=true" in p for p in sent)
 
 
 def test_record_shape_and_baseline_misses(agent, tmp_path):
