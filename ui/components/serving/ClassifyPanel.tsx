@@ -103,8 +103,10 @@ export function ClassifyPanel({ serving }: PanelProps) {
         {blocked ? (
           <>
             <span className="st-danger">[!]</span>
-            <span className="mt-1">GPU busy: training run active</span>
-            <span className="mt-1 text-ash">training is never preempted — wait for it to finish</span>
+            {/* `blocked` covers training AND kind="job" holders (batch/retrain) — use the dynamic
+                holder label so the copy is honest for a job, not hardcoded to "training". */}
+            <span className="mt-1">GPU busy: {holderLabel} active</span>
+            <span className="mt-1 text-ash">{holderLabel} is never preempted — wait for it to finish</span>
           </>
         ) : swappable ? (
           <>
