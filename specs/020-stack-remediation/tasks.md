@@ -146,7 +146,7 @@ components and a proven rollback story (now moot).
 
 ## Phase 7: Polish & governance
 
-- [ ] **T418** Constitution Principle V **default-stack wording refresh** — operator decision
+- [x] **T418** Constitution Principle V **default-stack wording refresh** — operator decision
   (queued with 018's T378; one amendment covers both): the illustrative stack list updates to
   the real components (Garage, MLflow, Prefect-ephemeral, PyTorch+PEFT, llama.cpp/whisper.cpp +
   FastAPI children behind the agent, hand-rolled PSI + Prometheus/Grafana); rule text unchanged.
