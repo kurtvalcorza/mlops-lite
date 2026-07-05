@@ -37,17 +37,26 @@ one) so bookmarks/telemetry do not hard-break; not a hard requirement (single op
 | Stage | Badge signal | Source |
 |---|---|---|
 | data | (none required; optional latest-version tick) | `GET /datasets` |
-| training | active-run indicator | run SSE / `platform/events` |
-| models | candidate-awaiting-promotion | `GET /models` + serving pointer |
+| training | GPU-resident-training indicator | `GET /serving/state` (`holder == "training"`) |
+| models | candidate-awaiting-promotion | `GET /models` + per-model `GET /models/:name` (N+1) |
 | serving | resident engine name | `GET /serving/state` |
 | monitoring | latest-breach dot | `GET /monitor` / `GET /monitor/quality` |
 | retraining | open-suggestion count | `GET /suggestions?state=open` |
 | (badge fallback) | `unknown`/at-rest when platform unreachable | — (FR-213) |
 
+> **training badge limitation**: with no runs-list endpoint (the spec's documented backend gap,
+> FR-223), the only derivable live training signal is the GPU lease holder — so the badge reflects
+> *GPU-resident* training, not queued/CPU-side runs. `platform/events`/`runs/:id/events` can't feed it
+> (the snapshot carries no run state; the run-SSE needs a run id the shell doesn't hold).
+> **models badge** is an N+1 read (list, then per-model version check) — acceptable at single-operator
+> scale, but not a single poll.
+
 ## GPU pill (FR-211)
 
 - Always visible in the header.
-- Shows: lease `holder` (llm/vision/training/null), `resident` model name, swap/idle state.
+- Shows: lease `holder` (`llm`/`vision`/`asr`/`training`/`null` — since 018/T364 the holder is the
+  admission tenant, ASR included; a `kind="job"` holder such as batch/retrain surfaces as its job
+  label), `resident` model name, swap/idle state.
 - Click → opens `/serving` (the full LeaseView).
 - Source: `GET /serving/state` + `platform/events`.
 

@@ -26,10 +26,16 @@ task is `npm run lint` + `npm run build` (type-check); each story's behavioural 
   `ui/components/serving/*` (StreamPanel, ClassifyPanel, TabularPanel, TranscribePanel, EmbedPanel,
   NoRenderer, index, types) as a pure move + import-path update; no behaviour change yet (research
   R3). Validate: `npm run build` clean.
-- [ ] **T422** [P] Route renames as file moves (content unchanged for now): `app/datasets`→`app/data`,
+- [ ] **T422** Route renames as file moves (content unchanged for now): `app/datasets`→`app/data`,
   `app/runs`→`app/training`, `app/infer`→`app/serving`, `app/monitor`→`app/monitoring`; add
-  `app/retraining/page.tsx` stub; update `app/page.tsx` redirect `/infer`→`/serving` (FR-212). Add
-  old-path→new-path redirects. Validate: each new route renders its (pre-rebuild) page.
+  `app/retraining/page.tsx` stub. **`app/page.tsx` today redirects the root `/`→`/infer`** — change it
+  to `/`→`/serving` (FR-212). Add explicit old-path→new-path redirects: `/infer`→`/serving`,
+  `/datasets`→`/data`, `/runs`→`/training`, `/monitor`→`/monitoring`, placed in a **central, survivable
+  location** (retained redirect shim, `next.config`, or middleware — NOT inside the deleted old route
+  dirs, so T457's cleanup can't remove them). **Not `[P]`: run after T421** — the moved `app/serving`
+  page imports the relocated `components/serving` (today `app/infer/page.tsx` imports
+  `@/components/infer`), so parallel moves would race on that import. Validate: each new route renders
+  its (pre-rebuild) page; every old path 3xx-redirects to its new home.
 - [ ] **T423** [P] Shared `ConfirmDialog` primitive in `ui/components/ConfirmDialog.tsx` — supports a
   warning body and an optional required-reason text field (backs all three high-trust actions;
   research R5 / FR-250). Validate: renders, blocks confirm until a required reason is entered.
@@ -198,8 +204,10 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
 - [ ] **T456** [P] Responsive rule: at narrow widths the GPU pill wraps below the loop bar; the six
   ordered stages stay on one axis (research R1). Verify no horizontal body scroll.
 - [ ] **T457** [P] Remove dead surfaces: delete the old `components/infer/` shims and any stale
-  `/infer|/datasets|/runs|/monitor` code once redirects are confirmed (FR-253 — IA, not reskin;
-  design language preserved).
+  `/infer|/datasets|/runs|/monitor` route implementations **only after confirming the old-path
+  redirects (T422) live in a central, survivable location** (redirect shim / `next.config` /
+  middleware) and still resolve — the cleanup must not delete the backward-compat redirects along with
+  the old route dirs (FR-253 — IA, not reskin; design language preserved).
 - [ ] **T458** Allow-list conformance gate: grep every gateway call in `ui/` and confirm each resolves
   to a `gw-allowlist.ts` entry (no non-listed path/method); confirm the diff equals
   [contracts/allowlist-delta.md](./contracts/allowlist-delta.md) (SC-140/141/FR-251).

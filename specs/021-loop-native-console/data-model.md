@@ -22,7 +22,8 @@ The nav's model of one lifecycle step.
 - `state`: `live | at-rest | unknown` (unknown when platform unreachable)
 
 ### LeaseState — `GET /serving/state`
-- `holder`: `llm | vision | training | null`
+- `holder`: `llm | vision | asr | training | null` (since 018/T364 the holder is whichever admission
+  tenant holds the GPU — ASR included; a `kind="job"` holder like batch/retrain surfaces as its job)
 - `resident`: boolean
 - `serving_model`, `serving_version`
 - Powers the GPU pill (FR-211) and the serving LeaseView (FR-234). Read-only.
