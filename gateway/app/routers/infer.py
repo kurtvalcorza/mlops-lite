@@ -12,12 +12,12 @@ from pydantic import BaseModel
 
 from .. import quality, registry, tracing
 from ..serving import (
-    SERVING_MODEL,
     ModelTooLargeError,
     ServingBusyError,
     ServingError,
     gpu_state,
     health,
+    llm_identity,
     run_inference,
 )
 
@@ -35,29 +35,24 @@ class InferRequest(BaseModel):
     preempt: bool = False  # 017: opt-in swap — evict a resident *serving* model first (default 008 refuse)
 
 
-async def _resolve_serving_version() -> str | None:
-    """Registry version currently serving the LLM (FR-006/FR-075).
-
-    /infer always proxies to the single llama supervisor configured by SERVING_MODEL, so SERVING_MODEL's
-    `@serving` alias is authoritative for the reported version — resolve it FIRST. This preserves pre-009
-    /infer behavior exactly (T156): the promoted version is reported even when it predates 009's `task`
-    tags, and a *different* promoted text-generation model can never be mis-reported as the served one.
-    (The earlier task-first resolve mis-fired when SERVING_MODEL's `@serving` version was untagged but a
-    text-generation tag existed elsewhere — `resolve_serving_target` then returned that other model's
-    version, since a candidate must be BOTH `task`-tagged AND its model's `@serving` version.)
-
-    The task-based resolve remains only as a fallback for the edge where SERVING_MODEL has nothing
-    promoted to `@serving`. Best-effort — any failure yields None (the response just omits the version).
-    """
-    try:
-        served = await run_in_threadpool(registry.get_serving, SERVING_MODEL)
-        if served:
-            return served["version"]
-        target = await run_in_threadpool(
-            registry.resolve_serving_target, "text-generation", SERVING_MODEL)
-        return target["version"] if target else None
-    except Exception:
-        return None
+async def _served_identity() -> dict:
+    """The identity every surface attributes this inference to (022 US2, FR-260/261/262): the
+    AGENT-REPORTED {serving_model, serving_version} — the agent is the only component that knows
+    what is actually resident, so the response's registry_model/registry_version, the logged
+    prediction, and `/serving/state` all name the same model+version (the pre-022 divergence —
+    `model: ops-bot-v2` logged as `registry_model: qwen…` — cannot recur). When the agent doesn't
+    report a registry version (env-default binding on a legacy agent), the version falls back to
+    the reported MODEL's own `@serving` alias — still keyed to the served name, never to the
+    fixed SERVING_MODEL config."""
+    ident = await llm_identity()
+    if ident["serving_model"] != "unknown" and ident["serving_version"] is None:
+        try:
+            served = await run_in_threadpool(registry.get_serving, ident["serving_model"])
+            if served:
+                ident["serving_version"] = served["version"]
+        except Exception:
+            pass  # best-effort — the response just omits the version
+    return ident
 
 
 @router.post("/infer")
@@ -69,7 +64,7 @@ async def infer(req: InferRequest):
     """
     start_ns = time.time_ns()
     result = None
-    registry_version = None
+    served_model, registry_version = "unknown", None
     # Pessimistic default: any UNEXPECTED failure (e.g. a malformed supervisor response) keeps the trace
     # errored — only the known-good path flips it to OK just before returning (006 Codex review).
     trace_status = "ERROR"
@@ -106,12 +101,15 @@ async def infer(req: InferRequest):
             LOAD_LATENCY.observe(result["load_ms"] / 1000.0)
         INFER_LATENCY.observe(result.get("infer_ms", 0) / 1000.0)
         INFER_REQUESTS.labels(status="ok").inc()
-        registry_version = await _resolve_serving_version()
+        # 022 US2 (FR-260/261/262): attribute everything — response identity, prediction log,
+        # trace — to the AGENT-REPORTED served identity, not the fixed SERVING_MODEL config.
+        ident = await _served_identity()
+        served_model, registry_version = ident["serving_model"], ident["serving_version"]
         trace_status, outcome = "OK", "completed"  # success is known — flip the pessimistic default
         # 013/FR-119: log the served prediction off the request path (fire-and-forget, fail-open) so it
         # can be scored later against a delayed label. Returns a synchronous id regardless of store state.
         prediction_id = quality.log_prediction(
-            SERVING_MODEL, registry_version, "text-generation", req.prompt, result.get("text"))
+            served_model, registry_version, "text-generation", req.prompt, result.get("text"))
         # 016 (FR-146): also route the prompt to the bounded recoverable-input capture (uniform replay
         # corpus across modalities), so it can be shadow-replayed. The served decoding settings ride along
         # so a replay reproduces them, not the scorer defaults. Fire-and-forget + fail-open.
@@ -119,7 +117,7 @@ async def infer(req: InferRequest):
                               options={"max_tokens": req.max_tokens, "temperature": req.temperature})
         return {
             "status": "completed",
-            "registry_model": SERVING_MODEL,
+            "registry_model": served_model,
             "registry_version": registry_version,
             "prediction_id": prediction_id,
             **result,
@@ -128,7 +126,7 @@ async def infer(req: InferRequest):
         attrs = {
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
-            "model": SERVING_MODEL,
+            "model": served_model,
             "status": outcome,
         }
         if result:
@@ -156,10 +154,22 @@ async def serving_health():
 @router.get("/serving/state")
 async def serving_state():
     """GPU/lease state for the Infer status line (008 US3, FR-068): {holder, resident,
-    serving_model, serving_version}. holder ∈ {llm, vision, training, null}; the version is the
-    registry @serving pointer. Read-only; the API key never reaches the browser (BFF contract)."""
+    serving_model, serving_version, base, adapter}. holder ∈ {llm, vision, training, null}.
+
+    022 (FR-260, T470): the model+version are the AGENT-REPORTED served identity (what is actually
+    resident, or what the next load would serve when cold) — `unknown` when the agent is
+    unreachable, never a stale config guess. `base`/`adapter` expose a served fine-tune's resolved
+    provenance (FR-274). Read-only; the API key never reaches the browser (BFF contract)."""
     state = await gpu_state()
-    state["serving_version"] = await _resolve_serving_version()
+    if state["serving_model"] != "unknown" and state["serving_version"] is None:
+        # Legacy-agent tolerance: no registry_version reported → the served NAME's own @serving
+        # alias (still keyed to the reported name — the same rule as _served_identity).
+        try:
+            served = await run_in_threadpool(registry.get_serving, state["serving_model"])
+            if served:
+                state["serving_version"] = served["version"]
+        except Exception:
+            pass
     return state
 
 

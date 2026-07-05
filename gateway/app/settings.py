@@ -32,7 +32,11 @@ TABULAR_URL = f"{AGENT_URL}/engines/tabular"
 ASR_URL = f"{AGENT_URL}/engines/asr"
 TRAINER_URL = AGENT_URL  # the jobs surface serves the legacy /train|/study|/batch|/shadow-replay aliases
 
-import os as _os  # noqa: E402 — the two non-topology settings
+import os as _os  # noqa: E402 — the non-topology settings
 
 SERVING_MODEL = _os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 MLFLOW_TRACKING_URI = _os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+# 022 (FR-255): the gated promote requests the agent's /control/reload so the newly selected
+# serving-LLM goes live. Same secret vocabulary as the agent (sent as X-Agent-Control; the SWAP_
+# name survives as the deprecated pre-018 alias).
+AGENT_CONTROL_SECRET = _os.getenv("AGENT_CONTROL_SECRET") or _os.getenv("SWAP_CONTROL_SECRET", "")

@@ -8,13 +8,20 @@ single named alias (`serving`) always points at the version US1 should resolve.
 The MLflow server version is pinned in infra/mlflow (3.14.0, 007 US1); this client matches it.
 """
 import os
+import time
 from typing import Optional
 
 from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
+from platformlib import llmresolve
+
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 SERVING_ALIAS = "serving"
+
+# 022: the configured default base — what serves when no serving-LLM was ever selected (the
+# ActiveServingLLM pointer's documented unset behavior, data-model.md).
+DEFAULT_LLM = os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 
 # 009 US1 — registry routing metadata (FR-074). Every version SHOULD carry these version tags; the
 # gateway resolves "the serving model+engine for task X" from them rather than a hard-coded
@@ -128,6 +135,91 @@ def promote(name: str, version: str, override: bool = False) -> dict:
             "promoted": True, "verdict": verdict}
 
 
+# --- 022 US1/US4: the active serving-LLM pointer + LLM target resolution ---------------------------
+#
+# The pointer (data-model.md §ActiveServingLLM) lives in the relational store (T461), NOT in an
+# MLflow alias — it spans model NAMES (base vs fine-tune), which a per-model alias cannot express
+# (research R1). Reads are best-effort (unset/unreachable ⇒ the configured default base — the
+# documented unset behavior); the WRITE fails loud (RegistryError) so a promote whose go-live
+# pointer didn't stick is surfaced, never silent.
+
+
+def _store():
+    from platformlib import store
+    return store
+
+
+def get_serving_llm() -> Optional[dict]:
+    """The active serving-LLM selection {model_name, selected_at, selected_by}, or None when unset
+    (or the store is unreachable — both read as 'the configured default base serves')."""
+    try:
+        s = _store()
+        conn = s.connect()
+        try:
+            return s.get_serving_llm(conn)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — best-effort read; unset ⇒ default base
+        return None
+
+
+def set_serving_llm(model_name: str, actor: str = "operator") -> dict:
+    """Record `model_name` as the active serving LLM (022 US1 — the gated promote IS the go-live
+    action; this is its persistence half, the agent reload is the other). Fail-loud."""
+    try:
+        s = _store()
+        conn = s.connect()
+        try:
+            s.set_serving_llm(conn, model_name, time.time(), actor)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — normalize driver/connection errors
+        raise RegistryError(f"active serving-LLM pointer write failed: {e}") from e
+    return {"model_name": model_name, "selected_by": actor}
+
+
+def active_serving_llm_name() -> str:
+    """The model name that SHOULD be serving text-generation: the pointer, else the configured
+    default base (FR-276 — the disambiguator when several LLM models hold a promoted alias)."""
+    rec = get_serving_llm()
+    return rec["model_name"] if rec else DEFAULT_LLM
+
+
+def llm_target_info(name: str, version: str) -> Optional[dict]:
+    """Pre-promotion resolution check for a text-generation version (022 T467/T474, FR-265).
+
+    Returns None when (name, version) is not a text-generation target (task tag or inferred kind
+    — T478), else {task, kind, base, error}: `error` is set when the target cannot resolve at the
+    REGISTRY level (adapter with no/unresolvable base — the artifact-presence half is the agent's
+    probe). The promote route refuses on `error` BEFORE the gate runs, so the alias — and the
+    currently-served LLM — stay unchanged."""
+    c = _client()
+    try:
+        mv = c.get_model_version(name, str(version))
+    except MlflowException as e:
+        raise RegistryError(str(e)) from e
+    tags = dict(mv.tags or {})
+    task = tags.get(TASK_TAG) or llmresolve.task_from_kind(tags)
+    if task != llmresolve.TEXT_GENERATION:
+        return None
+    kind = llmresolve.effective_kind(tags)
+    info = {"task": task, "kind": kind, "base": None, "error": None}
+    if kind == llmresolve.KIND_ADAPTER:
+        base_ref = tags.get(llmresolve.BASE_MODEL_TAG)
+        if not base_ref:
+            info["error"] = (f"{name} v{version} is a LoRA adapter with no base_model lineage — "
+                             f"its base cannot be resolved (FR-264/265)")
+            return info
+        try:
+            bmv = llmresolve.resolve_base_version(c, base_ref)
+            info["base"] = {"name": bmv.name, "version": str(bmv.version), "source": bmv.source}
+        except llmresolve.LLMResolutionError as e:
+            info["error"] = str(e)
+        except MlflowException as e:
+            raise RegistryError(str(e)) from e
+    return info
+
+
 # --- 009 US1: task/serving-engine routing metadata ------------------------------------------------
 
 def set_version_tags(name: str, version: str, tags: dict) -> dict:
@@ -218,7 +310,36 @@ def resolve_serving_target(task: str, prefer_name: Optional[str] = None) -> Opti
             return entry  # the configured backend model wins over any other task-mate
         if first is None:
             first = entry
+    if first is None and task == llmresolve.TEXT_GENERATION:
+        # 022 T478 (FR-267) defense-in-depth: a legacy promoted LLM version with NO task tag
+        # (kind/format only, pre-backfill) is invisible to the tag search above — infer its task
+        # from the artifact kind so no valid LLM version is stranded as unroutable.
+        try:
+            models = c.search_registered_models()
+        except MlflowException as e:
+            raise RegistryError(str(e)) from e
+        for m in models:
+            sv = (dict(m.aliases or {})).get(SERVING_ALIAS)
+            if not sv:
+                continue
+            try:
+                mv = c.get_model_version(m.name, sv)
+            except MlflowException:
+                continue
+            tags = dict(mv.tags or {})
+            if tags.get(TASK_TAG) or llmresolve.task_from_kind(tags) != task:
+                continue  # tagged versions were already considered by the search above
+            entry = {"name": m.name, "version": str(sv), "task": task,
+                     "serving_engine": _resolve_engine(c, mv), "source": mv.source}
+            if prefer_name is not None and m.name == prefer_name:
+                return entry
+            if first is None:
+                first = entry
     return first
+
+
+#: The lineage tags surfaced per LLM serving target (FR-268: base / parent / dataset provenance).
+_LINEAGE_KEYS = ("base_model", "dataset_name", "dataset_version", "parent_version", "lineage")
 
 
 def list_tasks() -> list:
@@ -226,7 +347,13 @@ def list_tasks() -> list:
     `@serving` version, reporting its `task`/`serving_engine` (FR-077). The Infer tab renders one
     panel per task; a serving version with no `task` tag (legacy, pre-009) is reported as task=None
     so the UI degrades it to a read-only "no renderer" placeholder rather than breaking the tab.
-    """
+
+    022 (T478/T479): a text-generation version's task is INFERRED from its artifact kind when the
+    tag is missing (legacy fine-tunes render a real LLM panel, not "no renderer" — FR-267), each
+    LLM entry carries its base-vs-adapter `kind` + lineage (FR-268), and the text-generation rows
+    are filtered to the ACTIVE serving-LLM pointer (FR-276): a promote moves only its own model's
+    `@serving` alias, so several LLM models can each retain one — but only the active-pointer
+    model is the live target; a previously-active LLM must not linger as a stale duplicate."""
     c = _client()
     try:
         models = c.search_registered_models()
@@ -242,10 +369,21 @@ def list_tasks() -> list:
         except MlflowException:
             continue
         tags = dict(mv.tags or {})
-        out.append({
+        task = tags.get(TASK_TAG) or llmresolve.task_from_kind(tags)
+        entry = {
             "model": m.name,
             "version": str(sv),
-            "task": tags.get(TASK_TAG),
+            "task": task,
             "serving_engine": _resolve_engine(c, mv),
-        })
+        }
+        if task == llmresolve.TEXT_GENERATION:
+            entry["kind"] = llmresolve.effective_kind(tags)
+            lineage = {k: tags[k] for k in _LINEAGE_KEYS if tags.get(k)}
+            entry["lineage"] = lineage or None
+        out.append(entry)
+    text_gen = [e for e in out if e["task"] == llmresolve.TEXT_GENERATION]
+    if len(text_gen) > 1:
+        active = active_serving_llm_name()
+        keep = next((e for e in text_gen if e["model"] == active), text_gen[0])
+        out = [e for e in out if e["task"] != llmresolve.TEXT_GENERATION or e is keep]
     return out

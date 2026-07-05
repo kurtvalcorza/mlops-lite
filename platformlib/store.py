@@ -171,10 +171,21 @@ CREATE TABLE IF NOT EXISTS suggestions (
   resolved_at       timestamptz,
   actor             text
 );
+
+-- 022 T461 (data-model.md §ActiveServingLLM): the ONE platform-scoped pointer naming the active
+-- text-generation model. A single row (the CHECKed boolean PK makes a second row impossible);
+-- absent row ⇒ the configured default base serves (today's behavior). Additive — no version bump.
+CREATE TABLE IF NOT EXISTS serving_llm (
+  singleton   boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  model_name  text NOT NULL,
+  selected_at timestamptz NOT NULL,
+  selected_by text NOT NULL
+);
 """
 
 #: The tables bootstrap() must create — used by the test + a post-bootstrap self-check.
-TABLES = ("meta", "predictions", "labels", "capture_index", "jobs", "policies", "suggestions")
+TABLES = ("meta", "predictions", "labels", "capture_index", "jobs", "policies", "suggestions",
+          "serving_llm")
 
 
 class StoreError(Exception):
@@ -524,6 +535,45 @@ def resolve_suggestion(conn, suggestion_id: str, state: str, actor: str, resolve
             (state, _dt(resolved_at), actor, suggestion_id))
         row = cur.fetchone()
         return _suggestion_row(row) if row else None
+
+
+# ==================================================================================================
+# 022 T461 — the ActiveServingLLM pointer (data-model.md §ActiveServingLLM)
+# ==================================================================================================
+#
+# One platform-scoped row naming the active text-generation model. Written by the gateway's gated
+# promote (022 US1 — promote = go live); read by the host agent's cold-load resolver
+# (hostagent/serving_llm.py). Unset ⇒ the configured default base serves (today's behavior), so a
+# fresh store changes nothing until an operator promotes an LLM. Timestamps follow the house rule:
+# epoch floats at the seam, timestamptz in the column.
+
+
+def set_serving_llm(conn, model_name: str, selected_at, selected_by: str) -> None:
+    """Point the active serving-LLM at `model_name` (upsert — the singleton PK keeps it one row)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO serving_llm (singleton, model_name, selected_at, selected_by) "
+            "VALUES (true, %s, %s, %s) ON CONFLICT (singleton) DO UPDATE SET "
+            "model_name = EXCLUDED.model_name, selected_at = EXCLUDED.selected_at, "
+            "selected_by = EXCLUDED.selected_by",
+            (model_name, _dt(selected_at), selected_by))
+
+
+def get_serving_llm(conn):
+    """The active serving-LLM selection {model_name, selected_at, selected_by}, or None when unset
+    (⇒ the configured default base serves)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT model_name, selected_at, selected_by FROM serving_llm")
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"model_name": row[0], "selected_at": _epoch(row[1]), "selected_by": row[2]}
+
+
+def clear_serving_llm(conn) -> None:
+    """Unset the pointer — back to the configured default base (tests/reset; no operator surface)."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM serving_llm")
 
 
 # ==================================================================================================

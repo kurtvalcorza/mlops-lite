@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
-from .. import evaluation, quality, registry, shadow
+from .. import evaluation, quality, registry, serving, shadow
 from ..settings import TRAINER_URL
 
 router = APIRouter()
@@ -32,6 +32,10 @@ class RegisterRequest(BaseModel):
 class PromoteRequest(BaseModel):
     version: str
     override: bool = False  # 011 FR-104: explicitly bypass a hard-gate block (promote-with-regression)
+    # 022 (FR-258): promoting a text-generation version IS the served-LLM switch; when it would
+    # displace a RESIDENT serving model the agent requires this operator confirmation (the console
+    # sets it after the ConfirmDialog naming the displaced model). Ignored for non-LLM versions.
+    preempt: bool = False
 
 
 class EvaluateRequest(BaseModel):
@@ -84,7 +88,16 @@ def promote(name: str, req: PromoteRequest):
     """Promote a version to serving, **through the evaluation gate** (011 FR-105). The response carries
     the gate verdict and whether the alias moved (`promoted`): a default hard-gate block keeps the
     alias put with `promoted=false`; `pass`/`warn` (or an explicit `override`) moves it. US1 inference
-    then resolves to the serving version (FR-006)."""
+    then resolves to the serving version (FR-006).
+
+    022 (FR-255 — promote = go live, one operator action): for a TEXT-GENERATION version this route
+    is also the served-LLM switch. In order: (1) an adapter whose base does not resolve is refused
+    HERE, before the gate — the alias and the currently-served LLM stay unchanged (FR-265);
+    (2) a promoted alias move also writes the ActiveServingLLM pointer (T461/T464); (3) the agent
+    is asked for the immediate controlled reload — refused/deferred reloads (job holder, missing
+    operator confirm) are surfaced in `serving_llm`, never silent (FR-259). This route is the ONLY
+    go-live surface: the retraining policy path calls `registry.promote` directly and so can gate a
+    candidate but can never switch the served LLM (FR-275)."""
     try:
         versions = registry.list_versions(name)
     except registry.RegistryError as e:
@@ -92,11 +105,28 @@ def promote(name: str, req: PromoteRequest):
     if not any(v["version"] == str(req.version) for v in versions):
         raise HTTPException(status_code=404, detail=f"{name!r} has no version {req.version}")
     try:
+        llm_target = registry.llm_target_info(name, req.version)
+    except registry.RegistryError as e:
+        raise HTTPException(status_code=502, detail=f"registry error: {e}")
+    if llm_target and llm_target.get("error"):
+        REGISTRY_OPS.labels(op="promote", status="refused").inc()
+        raise HTTPException(status_code=409, detail=f"promotion refused: {llm_target['error']}")
+    try:
         res = registry.promote(name, req.version, override=req.override)
     except registry.RegistryError as e:
         REGISTRY_OPS.labels(op="promote", status="error").inc()
         raise HTTPException(status_code=502, detail=f"registry error: {e}")
     REGISTRY_OPS.labels(op="promote", status="blocked" if not res.get("promoted", True) else "ok").inc()
+    if llm_target and res.get("promoted"):
+        try:
+            registry.set_serving_llm(name, actor="operator")
+            res["serving_llm"] = {"active": name, "kind": llm_target["kind"],
+                                  "base": llm_target["base"],
+                                  "reload": serving.request_llm_reload(preempt=req.preempt)}
+        except registry.RegistryError as e:
+            # The alias moved but the go-live pointer didn't stick — surface it; a re-promote of
+            # the same version retries both halves idempotently.
+            res["serving_llm"] = {"active": None, "error": str(e)}
     return res
 
 

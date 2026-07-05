@@ -142,17 +142,23 @@ async def infer_stream(req: StreamRequest):
             # The streamed tokens aren't buffered (the SSE bytes stay byte-identical), so the output is
             # left uncaptured — the prediction id + prompt + version are still logged for later labeling.
             if outcome == "completed":
-                # Fully off the response path: schedule the version-resolve + store write as a detached
+                # Fully off the response path: schedule the identity-resolve + store write as a detached
                 # task so the generator's teardown (the chunked-encoding terminator) isn't delayed by a
                 # registry call (Codex P2). The streamed bytes are already delivered + unaffected.
                 async def _log():
-                    try:
-                        served = await run_in_threadpool(registry.get_serving, serving.SERVING_MODEL)
-                        version = served["version"] if served else None
-                    except Exception:
-                        version = None
-                    quality.log_prediction(serving.SERVING_MODEL, version, "text-generation",
-                                           req.prompt, None)
+                    # 022 US2 (FR-261): attribute the streamed prediction to the AGENT-REPORTED
+                    # served identity — not the fixed SERVING_MODEL config (the divergence that
+                    # corrupted a served fine-tune's quality window). Version falls back to the
+                    # served NAME's own @serving alias when the agent reports none (legacy agent).
+                    ident = await serving.llm_identity()
+                    model, version = ident["serving_model"], ident["serving_version"]
+                    if model != "unknown" and version is None:
+                        try:
+                            served = await run_in_threadpool(registry.get_serving, model)
+                            version = served["version"] if served else None
+                        except Exception:
+                            version = None
+                    quality.log_prediction(model, version, "text-generation", req.prompt, None)
                     # 016 (FR-146): do NOT capture streamed prompts. The streamed output isn't logged
                     # (prediction=None), so join_window excludes these as champion-unscorable — but a
                     # capture would still consume the per-modality ring-buffer cap, evicting replayable

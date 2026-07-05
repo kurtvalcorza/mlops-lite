@@ -129,6 +129,10 @@ services:
       # since host.docker.internal can't cross WSL distros.
       AGENT_URL: ${AGENT_URL:-http://host.docker.internal:8100}
       SERVING_MODEL: ${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}
+      # 022 (FR-255): the gated promote requests the agent's /control/reload so a promoted LLM
+      # goes live at once. Empty when the agent runs open (the default); must MATCH the agent's
+      # AGENT_CONTROL_SECRET when one is set (sent as X-Agent-Control).
+      AGENT_CONTROL_SECRET: ${AGENT_CONTROL_SECRET:-}
       # Garage/S3 for the dataset registry (US3) — the store-minted pair (T406 cutover).
       MLFLOW_S3_ENDPOINT_URL: http://garage:3900
       AWS_ACCESS_KEY_ID: "${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env (scripts/gen_secrets --record-garage)}"
