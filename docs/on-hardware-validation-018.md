@@ -293,3 +293,113 @@ byte-identical on FRESH child spawns post-uninstall; full suite 491 passed.
 > transitive dep; no requirements file named it. A naive "remove bentoml + its exclusive deps"
 > would have silently degraded admission to the static-budget fallback. It is now pinned
 > first-party in `serving/children/requirements.txt`.
+### RuntimeBaselineRecord — `stdlib` (2026-07-05 08:09:04)
+
+```json
+{
+  "runtime": "stdlib",
+  "measured_at": "2026-07-05 08:09:04",
+  "ttft_ms": 1.0,
+  "stalls": 0,
+  "stream": {
+    "runs": 5,
+    "ttft_ms": 1.0,
+    "ttft_ms_max": 2.5,
+    "stalls": 0,
+    "stall_gap_s": 1.0,
+    "frames_median": 66,
+    "health_polls": 42,
+    "health_poll_failures": 0,
+    "health_poll_ms_median": 4.3
+  },
+  "multipart_ms": 17.1,
+  "disconnect_ok": true,
+  "disconnect": {
+    "disconnect_ok": true,
+    "next_request_ttft_ms": 24.9,
+    "recovered_in_ms": 876.8
+  },
+  "swap_contention": {
+    "preempt_status": 200,
+    "behavior": "served",
+    "preempt_latency_ms": 8262.3,
+    "stream_completed_frames": 66
+  },
+  "baselines": {
+    "ttft_ms": 2000.0,
+    "stalls_max": 0,
+    "multipart_ms": 3000.0,
+    "stall_gap_s": 1.0
+  },
+  "misses": [],
+  "meets_baselines": true
+}
+```
+
+### RuntimeBaselineRecord — `uvicorn` (2026-07-05 08:10:44)
+
+```json
+{
+  "runtime": "uvicorn",
+  "measured_at": "2026-07-05 08:10:44",
+  "ttft_ms": 1.6,
+  "stalls": 0,
+  "stream": {
+    "runs": 5,
+    "ttft_ms": 1.6,
+    "ttft_ms_max": 3.6,
+    "stalls": 0,
+    "stall_gap_s": 1.0,
+    "frames_median": 66,
+    "health_polls": 284,
+    "health_poll_failures": 0,
+    "health_poll_ms_median": 3.0
+  },
+  "multipart_ms": 13.6,
+  "disconnect_ok": true,
+  "disconnect": {
+    "disconnect_ok": true,
+    "next_request_ttft_ms": 12.2,
+    "recovered_in_ms": 5779.5
+  },
+  "swap_contention": {
+    "preempt_status": 200,
+    "behavior": "served",
+    "preempt_latency_ms": 5050.8,
+    "stream_completed_frames": 66
+  },
+  "baselines": {
+    "ttft_ms": 2000.0,
+    "stalls_max": 0,
+    "multipart_ms": 3000.0,
+    "stall_gap_s": 1.0
+  },
+  "misses": [],
+  "meets_baselines": true
+}
+```
+
+## 020 T415 — agent runtime drill verdict (FR-205; SC-132)
+
+**VERDICT: `keep-stdlib`.** Both RuntimeBaselineRecords above (same box, same session, LLM
+prewarmed, 5 runs each, 1.0 s stall gap, ~10 Hz concurrent `/health` polling):
+
+| Measure | baseline | stdlib | uvicorn |
+|---|---|---|---|
+| stream TTFT median (transport TTFB to the first SSE frame) | ≤ 2000 ms | **1.0 ms** | 1.6 ms |
+| inter-frame stalls (max across runs) | 0 | **0** (42 polls, 0 failures) | 0 (284 polls, 0 failures) |
+| multipart RTT median (vision classify, warm) | ≤ 3000 ms | **17.1 ms** | 13.6 ms |
+| mid-stream disconnect → next request clean | true | **true** | true |
+| preempt-during-stream (vision `?preempt=true` contender) | matches lease semantics | **drained → served** | drained → served |
+
+No stdlib baseline miss ⇒ per FR-205/T415 the default stays `stdlib`; the transports are
+equivalent within noise on every duty. These are the runbook's FIRST numeric stream baselines
+(017/018 recorded functional stream smokes only) — established here, compared A/B in-session.
+Note: TTFT is measured to the first SSE `data:` frame (the adapter's start frame), i.e. the
+transport's time-to-first-byte — the right A/B measure for a TRANSPORT decision; token latency
+is the backend's, identical under both.
+
+The losing runtime's code path + the `AGENT_RUNTIME` switch are queued for deletion in the next
+increment (research R7 — no permanent dual matrix). Drill leg-order/choreography fixes that this
+run motivated (multipart `?preempt=true`, GPU-shaped preempt contender, LLM legs before the
+vision leg — one model in VRAM) ship with this record.
