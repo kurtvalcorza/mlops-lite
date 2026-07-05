@@ -130,17 +130,17 @@ and cooldown-as-outcome (FR-238..242).
 suggestions inbox with gate-safe accept (FR-243..248).
 **Independent test**: `quickstart.md §US4`.
 
-- [ ] **T440** [US4] `ui/components/retraining/PolicyEditor.tsx`: form + JSON toggle over one policy
+- [x] **T440** [US4] `ui/components/retraining/PolicyEditor.tsx`: form + JSON toggle over one policy
   document; whole-document validated PUT; structured-400 field errors inline (FR-243/244, research
   R6).
-- [ ] **T441** [US4] Auto-promote control in the editor: off by default; enabling requires a
+- [x] **T441** [US4] Auto-promote control in the editor: off by default; enabling requires a
   `ConfirmDialog` warning "the platform will move @serving without you" (FR-245/250).
-- [ ] **T442** [P] [US4] `ui/components/retraining/CycleBoard.tsx`: per-model last-check / next-due /
+- [x] **T442** [P] [US4] `ui/components/retraining/CycleBoard.tsx`: per-model last-check / next-due /
   pending-retrain from `GET /policies/:model/status` (FR-246).
-- [ ] **T443** [P] [US4] `ui/components/retraining/SuggestionsInbox.tsx`: `GET /suggestions?state=`
+- [x] **T443** [P] [US4] `ui/components/retraining/SuggestionsInbox.tsx`: `GET /suggestions?state=`
   filter; accept (gated promote) / dismiss; a blocked accept stays open and deep-links →
   `/models?override=<name>@<version>` (FR-247, research R7).
-- [ ] **T444** [US4] Assemble `app/retraining/page.tsx`; render the reciprocal manual-vs-standing
+- [x] **T444** [US4] Assemble `app/retraining/page.tsx`; render the reciprocal manual-vs-standing
   framing — a short in-page note that these policies run the *same* monitoring checks on a *standing
   schedule* (the manual, one-shot counterpart lives in `monitoring`; same gate, same cooldown)
   (FR-248). Validate against `quickstart.md §US4`; lint + build green.
