@@ -57,13 +57,20 @@ controlled reload — no `.env` edit, no manual restart (FR-254/255).
 - [ ] **T465** [US1] `hostagent/adapters/llama.py` — call the T463 resolver in `spawn()` /
   `ensure_loaded()` to bind `self.model` (base) + `self.lora` (adapter, or None) from the registry
   before launching `llama-server` (spawn already appends `--lora` when set — commit `c28ca97`). This
-  **supersedes** the static `MODEL`/`LORA` env knob (env becomes a fallback/default only).
+  **supersedes** the static `MODEL`/`LORA` env knob (env becomes a fallback/default only). Also set
+  the adapter's **response identity** (`self.alias` / the `model` field echoed by `forward()` and
+  `stream()`) to the resolved `model_name` (+version) on each load — not the static `MODEL_ALIAS` env
+  — so the `/infer` response's `model` matches the registry record (FR-262; spec review PR #64 §2).
   `available()` verifies the resolved artifacts. Validate: with a promoted version, a cold load serves
-  it; `pytest` covers resolve→spawn arg construction.
-- [ ] **T466** [US1] Reload-on-select through the existing swap: a control path that reloads the `llm`
-  engine to the resolved target via `hostagent/swap.py` admission (evict → free → load), idempotent
-  no-op when already resident, target-probed before any evict (FR-256/257). Reuses `preempt_for`; no
-  new admission mechanism.
+  it and the response `model` names it; `pytest` covers resolve→spawn arg construction + the alias.
+- [ ] **T466** [US1] Reload-on-select under admission — TWO cases (admission tenancy is per-engine,
+  not per-model; spec review PR #64 §1): **cross-tenant** (non-LLM/job holder) reuses
+  `hostagent/swap.py:preempt_for` (evict → free → load); **same-tenant model switch** (the `llm`
+  engine already resident with a *different* model — where `preempt_for` is a no-op) performs an
+  explicit **force-reload: unload the `llm` child → `ensure_loaded()`** so it re-spawns with the newly
+  resolved artifact (FR-255 immediate / SC-144). Idempotent no-op only when the resolved
+  model+version is already resident; target-probed before any unload/evict (FR-256/257). `pytest`
+  covers the same-tenant force-reload path (promote B while A resident → B actually loads).
 - [ ] **T467** [US1] Make the **gated promote itself the go-live action** (Clarifications 2026-07-05:
   promote = go live, one action — no separate "select" gesture): promoting a text-generation version
   through `POST models/:name/promote` (011/015) MUST also write the ActiveServingLLM pointer (T464) and
@@ -133,7 +140,13 @@ selectable LLM panels; legacy untagged versions are backfilled (FR-266/267/268/2
   version is stranded as `task:null` even before the backfill runs.
 - [ ] **T479** [US4] Surface a version's base-vs-adapter `kind` + lineage in `GET /serving/tasks` and
   the models detail so the console renders a working LLM panel (not "no renderer") and shows what would
-  be promoted (FR-268/270).
+  be promoted (FR-268/270). **Also make `serving/tasks` authoritative to the active-serving-LLM
+  pointer (FR-276; spec review PR #64 §3):** `registry.list_tasks()` emits one row per model with ANY
+  promoted `@serving` alias, and a promote only moves *that model's* alias (a previously-promoted LLM's
+  stale `@serving` alias is left set), so two text-generation models can both appear. The
+  text-generation serving target MUST be filtered/preferred to the **active pointer's** model (mirror
+  `resolve_serving_target`'s existing `prefer_name` disambiguation) so the console shows exactly one
+  live LLM, no stale duplicate. `pytest` covers the two-promoted-LLMs dedup.
 - [ ] **T480** [US4] Validate US4 against quickstart §US4 (new fine-tune task-tagged; backfill
   idempotent + selectable; promoted fine-tune renders a working panel); `pytest` green.
 

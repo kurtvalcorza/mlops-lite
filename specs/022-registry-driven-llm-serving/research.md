@@ -64,15 +64,28 @@ cold-load resolution, extended to base+adapter.
 
 ## R4. Reload-on-select (make a promote take effect live)
 
-- **Decision**: Selecting/promoting the serving LLM issues an **agent reload of the `llm` engine** —
-  evict the current holder → load the resolved target — through the existing admission/swap
-  (`hostagent/swap.py:preempt_for`). If a **serving** model is resident, the console gates it behind
-  the established operator-confirmed swap (021 `ConfirmDialog`, naming the holder). A running
-  training/HPO/batch **job is never preempted** — the select is refused/deferred with the existing
-  409 reason. If the target is already resident, it is an idempotent no-op.
-- **Rationale**: Reuses 017/018 swap wholesale; honors Principle II (sequential, one-tenant); gives
-  the operator the "it's live now" feedback the current idle-release-only path can't. The swap
-  target-probe (`available()`) already guards a bad artifact from evicting a working holder.
+- **Decision**: Selecting/promoting the serving LLM issues an **agent reload of the `llm` engine** to
+  the resolved target. Two cases, because admission tenancy is **per-engine** (`"llm"`), not
+  per-model:
+  - **Cross-tenant** (a *non-LLM* holder — vision/asr — or a job holds the GPU): reuse
+    `hostagent/swap.py:preempt_for` unchanged — evict the serving holder (operator-confirmed via the
+    021 `ConfirmDialog`, naming it) → load; a running training/HPO/batch **job is never preempted**
+    (refused/deferred with the existing 409).
+  - **Same-tenant** (the `llm` engine is already resident, serving a *different* model — the common
+    US1 case: model A serving, promote model B): `preempt_for` is a **no-op** here — it treats
+    `holder["tenant"] == "llm" == target` as satisfied and calls `ensure_loaded()`, which
+    short-circuits when the child is resident+ready (`hostagent/lifecycle.py`), so the running
+    `llama-server` keeps serving the OLD GGUF. This case therefore needs an **explicit same-tenant
+    force-reload**: **unload the `llm` child → `ensure_loaded()`** so it re-spawns with the newly
+    resolved base+adapter. This is distinct from `preempt_for`'s cross-engine eviction and is
+    **required** for FR-255's "immediate reload" / SC-144 — reusing `preempt_for` alone silently
+    fails the model switch (spec review PR #64, finding §1).
+  - If the target resolves to the **same** model+version already resident, it is an idempotent no-op.
+- **Rationale**: Reuses 017/018 swap for the cross-tenant case; adds a minimal same-tenant force-reload
+  (the swap machinery has no model identity, only engine identity) so a model switch actually takes
+  effect. Honors Principle II — the force-reload is still evict→load, one tenant, never two-resident.
+  The swap target-probe (`available()`) already guards a bad artifact from evicting a working holder;
+  the same-tenant path probes the resolved target before unloading, likewise.
 - **Alternatives considered**: wait for idle-release then next-load resolves the new target
   (rejected — the change isn't visibly live; poor operator UX and racy to demonstrate); restart the
   agent (rejected — that's the SSH-level quirk 022 removes).

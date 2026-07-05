@@ -44,6 +44,8 @@ registry record, not a bare filesystem path (R2/R7).
 `{ model_name, version, base_gguf, adapter_gguf|null }`.
 - Full-model: `base_gguf = source`, `adapter_gguf = null`.
 - Adapter: `adapter_gguf = source`, `base_gguf = resolve(base_model → registered base version.source)`.
+  `base_model` MUST resolve **directly** to a `kind=full-model` version; an adapter pointing at another
+  adapter is a resolution error (no multi-hop chain — PR #64 R2 note).
 - If the base is unresolvable/absent ⇒ **resolution error** → the promote/select is refused, the
   currently-served LLM unchanged (FR-265).
 
@@ -56,6 +58,10 @@ registry record, not a bare filesystem path (R2/R7).
 ### LLMServingTarget — `GET /serving/tasks` (generalized)
 The text-generation entry now always carries a non-null `task` (FR-266/267) and its base-vs-adapter
 `kind` + lineage, so the console renders a real LLM panel and shows what would be promoted (FR-268/270).
+The text-generation target is **filtered/preferred to the active-serving-LLM pointer** (FR-276): since
+a promote moves only its own model's `@serving` alias, several LLM models can each retain a promoted
+alias — but only the active-pointer model is the live target, so the list surfaces exactly one live
+LLM, no stale duplicate (PR #64 §3).
 
 ## State transitions (all lease-safe; the UI only reflects them)
 

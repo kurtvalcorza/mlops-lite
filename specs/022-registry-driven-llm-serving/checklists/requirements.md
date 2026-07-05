@@ -37,9 +37,18 @@
   Assumptions, and Dependencies sections as the decision record. Domain vocabulary that the whole
   platform is built on — GPU lease / one-tenant VRAM (Principle II), LoRA adapter, model registry —
   is used deliberately and is not an implementation leak.
-- **ID space**: continues the shared FR/SC space — FR-254..275, SC-143..151 (prior max FR-253,
-  SC-142; FR-275 added by the 2026-07-05 clarification — the operator-only automation boundary).
-  Tasks continue from T461.
+- **ID space**: continues the shared FR/SC space — FR-254..276, SC-143..151 (prior max FR-253,
+  SC-142; FR-275 added by the 2026-07-05 clarification — operator-only automation boundary; FR-276
+  added by the PR #64 spec review — serving-target authoritative to the active pointer). Tasks
+  continue from T461.
+- **Spec review (PR #64, @claude; @codex rate-limited)**: 3 code-grounded findings fixed in-spec —
+  §1 the same-tenant LLM model switch needs an explicit force-reload (unload → ensure_loaded), since
+  `preempt_for` no-ops when the holder tenant already == the target engine (research R4, contract,
+  T466); §2 the adapter's `/infer` response `model` echo must use the resolved identity, not the
+  static `MODEL_ALIAS` env (FR-262, T465); §3 `serving/tasks` must be filtered to the active pointer
+  so a previously-promoted LLM isn't a stale duplicate (FR-276, T479). Plus the R2 base-resolution
+  rule made explicit (direct full-model base; adapter-of-adapter = resolution error). No Principle II
+  violation was found; the one-tenant invariant holds throughout.
 - **Clarifications (2026-07-05)**: 4 decisions ratified — promote = immediate go-live activation
   (FR-255), operator-only served-LLM switching (FR-275), scope kept to the LLM serving quirks (Out of
   Scope), immediate controlled reload (FR-255). All four matched the recommended options; no spec

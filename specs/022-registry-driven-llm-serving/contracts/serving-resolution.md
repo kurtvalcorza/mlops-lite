@@ -25,6 +25,12 @@ Given the active `model_name`:
      `source` GGUF (a local/zoo file).
 3. The engine spawns `llama-server -m <base_gguf> [--lora <adapter_gguf>]`.
 
+**Base-resolution rule (no multi-hop chains)**: an adapter's `base_model` MUST resolve **directly** to
+a `kind=full-model` text-generation version (a base GGUF). An adapter whose `base_model` points at
+**another adapter** is a **resolution error** (refused per FR-265), not a multi-hop walk — LLM LoRA
+fine-tunes train from a full base, so a single hop is sufficient and avoids ambiguous stacked-adapter
+serving (spec review PR #64, R2 note).
+
 **Invariants**:
 - Resolution is a pure read of {active pointer, registry}. No network fetch; the base + adapter GGUFs
   MUST already be present locally.
@@ -36,14 +42,21 @@ Given the active `model_name`:
 
 ## Reload under the single-GPU lease (R4 — Principle II)
 
-- A select/promote requests the agent reload the `llm` engine to the resolved target via the existing
-  admission/swap (`evict → free → load`), strictly sequential — **never two models resident**
-  (FR-257/SC-147).
-- If a resident **serving** model would be displaced, the operator MUST confirm (naming the holder)
-  before eviction (FR-258).
-- If a **training/HPO/batch job** holds the GPU, the reload is **refused/deferred** with the existing
-  409-style reason; the job is never preempted (FR-259/SC-150).
-- If the resolved target is already resident, the reload is an idempotent no-op.
+Admission tenancy is **per-engine** (`"llm"`), not per-model, so a served-LLM switch has two cases —
+both strictly sequential, **never two models resident** (FR-257/SC-147):
+
+- **Cross-tenant** (a non-LLM engine or a job holds the GPU): reuse the existing swap
+  (`hostagent/swap.py:preempt_for`, `evict → free → load`). A resident **serving** model is displaced
+  only after operator confirm (naming the holder, FR-258); a **training/HPO/batch job** is
+  **refused/deferred** (never preempted, FR-259/SC-150).
+- **Same-tenant model switch** (the `llm` engine is already resident with a *different* model — the
+  common US1 case): `preempt_for` is a **no-op** (it treats the same engine tenant as satisfied and
+  `ensure_loaded()` short-circuits when resident+ready). This case MUST perform an explicit
+  **force-reload — unload the `llm` child → `ensure_loaded()`** — so `llama-server` re-spawns with the
+  newly resolved base+adapter (FR-255 immediate reload / SC-144). Reusing `preempt_for` alone here
+  silently keeps serving the old GGUF (spec review PR #64, §1).
+- If the resolved target is the **same** model+version already resident, the reload is an idempotent
+  no-op (no force-reload).
 - The target is probed (available / not-wedged) **before** any eviction, so a bad artifact never
   evicts a working holder (existing swap guard).
 

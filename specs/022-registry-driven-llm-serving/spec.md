@@ -164,6 +164,7 @@ Switching the served LLM while another model is resident follows the platform's 
 **Automation boundary**
 
 - **FR-275**: Changing the live served LLM MUST be **operator-initiated** in this feature. An auto-promote / retraining policy MAY register and gate a candidate, but MUST NOT automatically switch the served LLM (no unattended served-LLM swap under the GPU lease); automatic served-LLM switching is deferred to a follow-up (Clarifications 2026-07-05).
+- **FR-276**: The text-generation serving target the console shows and serves MUST reflect the **single active serving LLM** — after switching between differently-named LLM models, a previously-active model MUST NOT keep appearing as a live text-generation serving target (no stale/duplicate LLM entries). The serving-target list is filtered/preferred to the active-serving-LLM selection (spec review PR #64, §3).
 
 ### Key Entities
 
