@@ -14,6 +14,15 @@ Across the platform, four serving engines — vision, embeddings, ASR, tabular �
 
 This feature closes that gap: the LLM becomes a registry-driven, console-operable engine like the others. Promoting a text-generation version — a full base model **or** a LoRA fine-tune (adapter on its base) — makes it serve, under the platform's single-GPU lease, with the served identity reported honestly everywhere it appears.
 
+## Clarifications
+
+### Session 2026-07-05
+
+- Q: When an operator promotes a text-generation version, should it immediately become the live served LLM, or is activation a separate step? → A: **Promote = go live** — promoting a text-generation version both moves that model's `@serving` alias **and** makes it the active served LLM in one operator action; there is no separate "activate" gesture.
+- Q: Should the reload happen immediately on switch, or lazily on the next request? → A: **Immediate controlled reload** — the switch evicts → loads at promote time so the change is live at once (not deferred to the next inference).
+- Q: May a retraining/auto-promote policy automatically switch the served LLM (auto-on-green), or is it operator-only? → A: **Operator-only for 022** — an auto-promote policy MAY register and gate a candidate, but the live LLM switch is operator-initiated; automatic served-LLM switching is deferred to a follow-up.
+- Q: Should 022 stay focused on the LLM serving quirks, or fold in the other 021-era quirks? → A: **Keep 022 focused** on the four LLM serving quirks; the browser-unreachable dataset byte-download (021 FR-215) and full logging/labeling of streamed LLM predictions (016) are deferred to their own specs.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Promote an LLM and it actually serves (Priority: P1)
@@ -113,7 +122,7 @@ Switching the served LLM while another model is resident follows the platform's 
 **Registry-driven serving**
 
 - **FR-254**: The served text-generation model MUST be determined by the registry's `@serving` text-generation target, resolved the same way the other engines resolve theirs — not by a fixed host-level configuration value.
-- **FR-255**: Promoting a text-generation version to serving MUST change which model produces subsequent inference, with no host-level configuration edit and no manual process restart.
+- **FR-255**: Promoting a text-generation version to serving MUST change which model produces subsequent inference, with no host-level configuration edit and no manual process restart. Promoting **is** the activation — a single operator action that both moves the model's `@serving` alias and makes it the active served LLM — and it takes effect via an **immediate** controlled reload (evict → load at promote time), not a deferred/lazy load (Clarifications 2026-07-05).
 - **FR-256**: A text-generation model that is a full standalone model MUST remain servable unchanged; the non-adapter path preserves today's behavior byte-for-byte (companion to FR-263).
 
 **Single-GPU lease (Principle II)**
@@ -152,6 +161,10 @@ Switching the served LLM while another model is resident follows the platform's 
 - **FR-273**: The change MUST NOT introduce a new always-on resident process and MUST stay within the platform's VRAM/RAM/disk budgets (Principle III).
 - **FR-274**: A served LLM's identity and provenance (base + adapter, version, lineage) MUST be observable/recorded so a served configuration is reproducible (Principle VI).
 
+**Automation boundary**
+
+- **FR-275**: Changing the live served LLM MUST be **operator-initiated** in this feature. An auto-promote / retraining policy MAY register and gate a candidate, but MUST NOT automatically switch the served LLM (no unattended served-LLM swap under the GPU lease); automatic served-LLM switching is deferred to a follow-up (Clarifications 2026-07-05).
+
 ### Key Entities
 
 - **Text-generation serving target**: the registry `@serving` pointer for the LLM task, resolving to a specific model + version and the artifact set required to serve it (a full model artifact, **or** a base artifact + a LoRA adapter artifact).
@@ -181,7 +194,7 @@ Switching the served LLM while another model is resident follows the platform's 
 - Base model artifacts for supported fine-tune bases are available locally (or resolvable) consistent with the frozen local model zoo and the disk budget (Principle III). The set of supported bases is bounded by what the platform already ships.
 - The adapter-serving engine capability began as the `LORA` env prototype (commit `c28ca97` on this branch); this feature **generalizes** it from host-env-driven to registry-resolved (base + adapter from lineage) and is the first implemented increment.
 - Single local operator; the existing key-injecting proxy is the only access control (no new auth/roles).
-- The default served LLM remains a full base model unless an operator promotes a fine-tune; promotions are operator-initiated (this feature does not auto-promote LLMs — the existing retraining policy layer governs that).
+- The default served LLM remains a full base model unless an operator promotes a fine-tune; changing the live served LLM is operator-initiated (a retraining policy MAY gate a candidate but MUST NOT auto-switch the served LLM in 022 — FR-275).
 
 ## Dependencies
 
@@ -194,6 +207,8 @@ Switching the served LLM while another model is resident follows the platform's 
 
 - **Multi-LLM concurrent serving** — still one model in VRAM at a time (Principle II); this feature selects *which* one, not *how many*.
 - **Non-LLM engines** — vision/embeddings/ASR/tabular already resolve from the registry; they are the reference behavior and are unchanged.
-- **Streaming prediction capture limitations** (feature 016) — streamed predictions' logging/capture behavior is unchanged; only their *identity* correctness is in scope.
+- **Streaming prediction capture limitations** (feature 016) — streamed predictions' logging/capture behavior is unchanged; only their *identity* correctness is in scope. Full logging/labeling of streamed LLM predictions is a separate follow-up spec (Clarifications 2026-07-05).
 - **New training/fine-tuning capabilities** — this feature is about *serving* what is registered; training is unchanged except for the descriptor/lineage stamping needed for discoverability (FR-266).
+- **Automatic served-LLM switching** — a retraining policy auto-switching the live LLM (auto-on-green) is out of scope; changing the live LLM is operator-initiated here (FR-275).
+- **Other 021-era quirks** — the dataset version byte-download being browser-unreachable (021 FR-215) is a real but unrelated data-stage surface; it is deferred to its own spec, not bundled here (Clarifications 2026-07-05).
 - **Authentication / multi-user / roles** — unchanged.

@@ -37,8 +37,14 @@
   Assumptions, and Dependencies sections as the decision record. Domain vocabulary that the whole
   platform is built on — GPU lease / one-tenant VRAM (Principle II), LoRA adapter, model registry —
   is used deliberately and is not an implementation leak.
-- **ID space**: continues the shared FR/SC space — FR-254..274, SC-143..151 (prior max FR-253,
-  SC-142). Tasks will continue from T461.
+- **ID space**: continues the shared FR/SC space — FR-254..275, SC-143..151 (prior max FR-253,
+  SC-142; FR-275 added by the 2026-07-05 clarification — the operator-only automation boundary).
+  Tasks continue from T461.
+- **Clarifications (2026-07-05)**: 4 decisions ratified — promote = immediate go-live activation
+  (FR-255), operator-only served-LLM switching (FR-275), scope kept to the LLM serving quirks (Out of
+  Scope), immediate controlled reload (FR-255). All four matched the recommended options; no spec
+  contradiction introduced; tasks.md already honors them (no auto-switch task; T465–T467 are
+  operator-initiated + immediate-reload).
 - **Priorities**: US1 (promote-to-serve) and US2 (honest served identity) are P1 — together they are
   the correctness-complete MVP that makes the LLM a registry-driven, console-operable engine. US3
   (serve LoRA fine-tunes) and US4 (fine-tunes discoverable) are P2 — they make a *fine-tune* usable
