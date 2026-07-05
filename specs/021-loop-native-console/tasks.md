@@ -153,13 +153,13 @@ suggestions inbox with gate-safe accept (FR-243..248).
 drill-back, and on-demand metrics (FR-224..229).
 **Independent test**: `quickstart.md §US5`.
 
-- [ ] **T445** [US5] `app/models/page.tsx`: list with the `@serving` champion marked; version rows
+- [x] **T445** [US5] `app/models/page.tsx`: list with the `@serving` champion marked; version rows
   with `ui/components/models/LineageLinks.tsx` (run_id→training, tags→data/base/parent); a
   no-`run_id` version visually distinct as seeded/imported (FR-224/225).
-- [ ] **T446** [P] [US5] `ui/components/models/EvaluatePanel.tsx`: evaluate BUTTON (modality-default
+- [x] **T446** [P] [US5] `ui/components/models/EvaluatePanel.tsx`: evaluate BUTTON (modality-default
   one-click) + advanced disclosure to override benchmark/metric; compare challenger↔champion
   (FR-226/227).
-- [ ] **T447** [US5] `ui/components/models/PromoteGate.tsx`: preview (evaluate, no alias move) →
+- [x] **T447** [US5] `ui/components/models/PromoteGate.tsx`: preview (evaluate, no alias move) →
   promote (gate) flow; a block leaves the alias put + shows the verdict; override behind
   `ConfirmDialog` requiring a typed reason; accepts the `?override=` deep-link from retraining
   (FR-228/229).
