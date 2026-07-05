@@ -17,8 +17,8 @@ task is `npm run lint` + `npm run build` (type-check); each story's behavioural 
 ## Phase 1: Setup (shared, mechanical — unblocks everything)
 
 - [ ] **T420** Extend the BFF allow-list per [contracts/allowlist-delta.md](./contracts/allowlist-delta.md):
-  add the ~12 entries (`datasets/:name/:version`; `runs/:id`; `monitor`; `monitor/quality/check`;
-  `monitor/quality`; `monitor/labels`; and the 6 per-engine health probes) to
+  add the 13 entries (`datasets/:name/:version`; `runs/:id`; `POST infer` (LLM trace mode); `monitor`;
+  `monitor/quality/check`; `monitor/quality`; `monitor/labels`; and the 6 per-engine health probes) to
   `ui/lib/gw-allowlist.ts`, and re-section existing policy/suggestion/engine comments under the loop
   vocabulary (`serving`/`retraining`/…). No proxy route logic change. Validate: `isAllowed` returns
   true for each new pair; `npm run build` clean.
@@ -89,9 +89,12 @@ confirm-gated preempt, and prediction→monitoring traceability (FR-231..237).
   → poll `batch/:id` → result link (moved from the runs page) (FR-236).
 - [ ] **T432** [US2] Preemptive-swap control on the LLM panel: `preempt` gated behind `ConfirmDialog`
   naming the holder to evict (FR-235/250). Never presents a running job as preemptable.
-- [ ] **T433** [US2] Show `registry_version` + `prediction_id` + `load_ms` on the LLM result and a
-  "label this prediction" hand-off deep-link → `/monitoring?prediction_id=…` (FR-233/237, research
-  R7).
+- [ ] **T433** [US2] LLM panel stream/trace split (FR-232/233): **stream mode** (`POST /infer/stream`)
+  shows the completion + `registry_version` (resolved from `serving/state`) + `load_ms`, no prediction
+  id; **trace mode** (`POST /infer`, now allow-listed) shows the single-shot completion +
+  `registry_version` + `prediction_id` + `load_ms` and the "label this prediction" hand-off deep-link
+  → `/monitoring?prediction_id=…` (FR-237, research R7). The hand-off is offered only from trace mode
+  (streamed predictions log no id / no capture, 016).
 - [ ] **T434** [US2] Validate US2 against `quickstart.md §US2`; lint + build green.
 
 ---
@@ -171,7 +174,9 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
 **Independent test**: `quickstart.md §US6`.
 
 - [ ] **T449** [US6] `app/data/page.tsx`: keep register/list/dedupe; add version inspect (full
-  manifest + presigned download via `datasets/:name/:version`) and present validate as a gate-vs-warn
+  manifest via `datasets/:name/:version` — **manifest only; no byte-download button**, the
+  `download_url` is presigned against the internal store and is not browser-reachable, FR-215) and
+  present validate as a gate-vs-warn
   readiness report (FR-214/215/216). No edit/delete/EDA (FR-218).
 - [ ] **T450** [P] [US6] "train on this version" hand-off from `data` → `/training?ds=<name>@<version>`
   (FR-217, research R7).

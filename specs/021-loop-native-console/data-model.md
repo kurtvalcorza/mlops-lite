@@ -34,7 +34,8 @@ The nav's model of one lifecycle step.
 
 ### DatasetVersion — `GET /datasets`, `GET /datasets/:name`, `GET /datasets/:name/:version`
 - `name`, `version`, `size_bytes`, `sha256`, `format`, `uri`
-- version detail adds the manifest + presigned download (FR-215)
+- version detail adds the manifest (FR-215); `download_url` is present but presigned against the
+  internal store (not browser-reachable) — **inspect-only, byte download deferred**
 
 ### ValidationReport — `POST /datasets/:name/:version/validate`
 - `passed`, `rules[]` (`name`, `passed`, `disposition: gate | warn`, `value`, `threshold`, `detail`)
@@ -58,9 +59,12 @@ The nav's model of one lifecycle step.
 - promote: `promoted` (did the alias move), `verdict` (`pass | warn | block`), `override` honored
 - evaluate: logged metric (no reload); compare: per-metric champion↔challenger winner
 
-### InferenceResult — `POST /infer/stream` (SSE) + siblings (`vision/classify`, `predict`, `embed`, `transcribe`)
-- LLM: completion text, `registry_version`, `prediction_id`, `load_ms` (FR-233)
-- each result logs a prediction + captures input → the serving→monitoring seam
+### InferenceResult — `POST /infer/stream` (SSE, stream mode) + `POST /infer` (trace mode) + siblings (`vision/classify`, `predict`, `embed`, `transcribe`)
+- LLM **stream mode** (`/infer/stream`): completion text, `registry_version` (from `serving/state`),
+  `load_ms` — **no `prediction_id`** (streamed prediction logged with no id, no input capture, 016)
+- LLM **trace mode** (`/infer`): completion, `registry_version`, `prediction_id`, `load_ms` (FR-233)
+- **prediction-logging engines** (LLM trace, `vision/classify`, `transcribe`) log a prediction +
+  capture input → the serving→monitoring seam; **`embed` and `predict` log no prediction** (no id)
 
 ### BatchJob — `POST /batch` (202), `GET /batch/:id`
 - launch over `dataset@version` → poll `status` → result link (FR-236)

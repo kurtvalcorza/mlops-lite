@@ -8,12 +8,17 @@ untouched.
 
 `:param` matches exactly one path segment (as today).
 
-## Additions (~12 entries — all target endpoints ALREADY EXIST)
+## Additions (13 entries — all target endpoints ALREADY EXIST)
 
 ### data stage
 | Method | Pattern | For |
 |---|---|---|
-| GET | `datasets/:name/:version` | version detail (manifest + presigned download) — FR-215 |
+| GET | `datasets/:name/:version` | version detail — **manifest inspect only**; the `download_url` is presigned against the internal store and is not browser-reachable, so byte download is deferred (FR-215) |
+
+### serving stage
+| Method | Pattern | For |
+|---|---|---|
+| POST | `infer` | LLM **trace mode** — single-shot inference returning `registry_version` + `prediction_id` + `load_ms`, and the path that logs the prediction + input capture feeding monitoring (FR-232/233) |
 
 ### training stage
 | Method | Pattern | For |
@@ -58,7 +63,6 @@ dataset/run/model entries under `data`/`training`/`models` — comment relabelin
 | Method | Pattern | Why |
 |---|---|---|
 | POST | `models` | interactive model register/upload is deferred to **feature 022** (BYOM) — FR-230 |
-| POST | `infer` | non-stream LLM inference stays unproxied; serving is stream-only — FR-232 |
 | GET | `runs` (list) | no such gateway endpoint exists — run history is a documented backend gap, out of scope |
 | GET | `metrics`, `GET /` | machine/scrape endpoints, not UI surfaces |
 

@@ -19,8 +19,8 @@ already-present dynamic per-task panel machinery (`ui/components/infer/*`), the 
 proxy (`ui/app/api/gw/[...path]`), the `Panel`/`Badge` primitives, and the SSE helper
 (`ui/lib/sse.ts`). Rename/relocate the stage routes to the loop vocabulary, add two new stage views
 (`retraining`, and `serving` absorbing batch), add shell chrome (loop nav + GPU pill + stage
-badges), and extend the proxy allow-list (`ui/lib/gw-allowlist.ts`) to the ~12 already-existing
-endpoints the new read/label surfaces need. **No gateway/backend/API changes.** Principle II is
+badges), and extend the proxy allow-list (`ui/lib/gw-allowlist.ts`) to the 13 already-existing
+endpoints the new read/label/trace surfaces need. **No gateway/backend/API changes.** Principle II is
 visualize-only: the sole lease-affecting action is the already-sanctioned operator-confirmed
 preemptive swap, gated behind a confirmation.
 
@@ -59,7 +59,7 @@ operator key injected server-side; **no gateway/backend/API changes**; monospace
 existing primitives preserved (IA change, not a reskin); Principle II untouched (visualize-only).
 
 **Scale/Scope**: 6 ordered loop stages + 2 off-axis surfaces (GPU pill, health); 5 serving engine
-panels + batch; ~12 allow-list additions; single operator. Requirement IDs FR-208..253, SC-134..142;
+panels + batch; 13 allow-list additions; single operator. Requirement IDs FR-208..253, SC-134..142;
 tasks from T420.
 
 ## Constitution Check
@@ -101,7 +101,7 @@ specs/021-loop-native-console/
 ├── data-model.md        # Phase 1 — UI-facing view models (read models over existing endpoints)
 ├── quickstart.md        # Phase 1 — per-US browser validation drills
 ├── contracts/
-│   ├── allowlist-delta.md   # the ~12 BFF proxy allow-list additions + re-sectioning
+│   ├── allowlist-delta.md   # the 13 BFF proxy allow-list additions + re-sectioning
 │   └── nav-and-routes.md     # loop-nav contract: stage order, routes, badges, chrome, hand-offs
 ├── checklists/
 │   └── requirements.md  # spec quality checklist (done)
@@ -134,7 +134,7 @@ ui/                                  # the only package touched (front-end)
 │   ├── retraining/                  # NEW: PolicyEditor (form+JSON toggle), CycleBoard, SuggestionsInbox
 │   ├── Badge.tsx / Panel.tsx        # existing primitives — reused
 └── lib/
-    ├── gw-allowlist.ts              # EXTEND: ~12 additions + re-section policy/suggestion entries under retraining (contracts/allowlist-delta.md)
+    ├── gw-allowlist.ts              # EXTEND: 13 additions (incl. POST infer trace mode) + re-section policy/suggestion entries under retraining (contracts/allowlist-delta.md)
     ├── gw.ts                        # existing typed proxy client — reused (maybe minor typed helpers)
     └── sse.ts                       # existing EventSource helper — reused for badges/lease/live logs
 ```

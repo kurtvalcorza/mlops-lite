@@ -80,16 +80,18 @@ originates. High daily value; independently demonstrable.
 **Independent Test**: With several tasks promoted, open `serving`; confirm one panel renders per
 promoted task, each engine can be exercised, the lease view shows holder/resident/version and
 distinguishes lease-tenant from off-lease engines, preempt requires confirmation, and an LLM
-response reports its registry version and prediction id.
+trace-mode response reports its registry version and prediction id.
 
 **Acceptance Scenarios**:
 
 1. **Given** promoted models for several tasks, **When** the operator opens `serving`, **Then** one
    panel renders per promoted task, and a serving version with no task tag renders a read-only
    "no renderer" placeholder rather than an error.
-2. **Given** the operator submits an LLM prompt, **When** the response streams, **Then** the panel
-   shows the completion, the resolved registry version that served it, the created prediction id,
-   and the cold-start load time; **and** the prediction id is presented as feeding monitoring.
+2. **Given** the operator submits an LLM prompt in **stream mode**, **When** the response streams,
+   **Then** the panel shows the completion, the resolved registry version that served it, and the
+   cold-start load time (no prediction id — streams are not champion-scorable). **And given** the
+   operator submits in **trace mode** (`POST /infer`), **Then** the panel additionally shows the
+   created prediction id, presented as feeding monitoring with a "label this prediction" hand-off.
 3. **Given** a model is resident and the operator requests a preemptive swap, **When** they trigger
    preempt, **Then** the UI first shows a confirmation naming the current holder to be evicted, and
    only proceeds on explicit confirmation.
@@ -192,13 +194,13 @@ runs the gate with override gated behind a typed reason.
 
 ### User Story 6 - Data and training as the loop's entry (Priority: P3)
 
-An operator uses `data` to register, inspect, download, and validate immutable dataset versions and
+An operator uses `data` to register, inspect, and validate immutable dataset versions and
 to hand a pinned version directly to training; and uses `training` to launch fine-tune runs and HPO
 studies with a fixed modality picker whose knobs, default base, editability, and chaining rules
 match each modality — with launch aware of the GPU lease and a hand-off to the resulting registered
 version.
 
-**Why this priority**: Both tabs already function; 021 adds the inspect/download and validate-as-gate
+**Why this priority**: Both tabs already function; 021 adds the manifest-inspect and validate-as-gate
 surfaces, the loop hand-offs, and honest modality affordances. Enrichment, not a new capability.
 
 **Independent Test**: Register and validate a dataset version, then jump to training with it
@@ -207,9 +209,9 @@ chain field to the chainable modalities, and surfaces a VRAM/busy refusal as a f
 
 **Acceptance Scenarios**:
 
-1. **Given** a dataset version, **When** the operator inspects it, **Then** the full manifest and a
-   download of the pinned bytes are available, and validation renders a readiness report with gate
-   vs. warn dispositions.
+1. **Given** a dataset version, **When** the operator inspects it, **Then** the full manifest is
+   shown (byte download deferred — the presigned URL targets the internal store, FR-215), and
+   validation renders a readiness report with gate vs. warn dispositions.
 2. **Given** a validated version, **When** the operator chooses "train on this version", **Then**
    `training` opens with that dataset version pre-filled.
 3. **Given** the training launcher, **When** the operator selects a modality, **Then** only that
@@ -286,8 +288,11 @@ serving subsystem render, and a down engine shows a distinct state.
 
 - **FR-214**: `data` MUST let the operator register a dataset version, list datasets, and browse a
   dataset's versions, indicating when identical content dedupes to an existing version.
-- **FR-215**: `data` MUST let the operator inspect a pinned version's full manifest and download its
-  pinned bytes.
+- **FR-215**: `data` MUST let the operator inspect a pinned version's full manifest. Downloading the
+  pinned bytes is OUT OF SCOPE for 021: the version's `download_url` is presigned against the internal
+  object-store endpoint (not browser-reachable, and SigV4 covers the Host header so the BFF cannot
+  rewrite it) — a browser download needs a public-presign backend change, which is deferred (would
+  break the no-backend-change guarantee; belongs in a later feature).
 - **FR-216**: `data` MUST present dataset validation as an explicit pre-train readiness report,
   distinguishing gate failures (blocking) from warnings (advisory).
 - **FR-217**: `data` MUST provide a "train on this version" hand-off that opens `training` with the
@@ -335,12 +340,16 @@ serving subsystem render, and a down engine shows a distinct state.
 
 - **FR-231**: `serving` MUST render one panel per promoted task, discovered dynamically, and MUST show
   a read-only placeholder for a promoted version that carries no task renderer.
-- **FR-232**: `serving` MUST make every promoted engine usable — LLM (streaming), vision
-  classification, tabular prediction, embeddings, and speech transcription — using each engine's
-  existing request shape.
-- **FR-233**: An LLM response MUST report the resolved registry version that served it, the created
-  prediction id, and the cold-start load time, and MUST present the prediction id as feeding
-  monitoring.
+- **FR-232**: `serving` MUST make every promoted engine usable — LLM, vision classification, tabular
+  prediction, embeddings, and speech transcription — using each engine's existing request shape. The
+  LLM panel MUST offer both a **stream mode** (interactive completion over `POST /infer/stream`) and a
+  **trace mode** (single-shot `POST /infer`); the latter is the traceable, prediction-logging path.
+- **FR-233**: In LLM **trace mode** (`POST /infer`) the response MUST report the resolved registry
+  version that served it, the created prediction id, and the cold-start load time, and MUST present
+  the prediction id as feeding monitoring. **Stream mode** MUST report the resolved registry version
+  (from `serving/state`) and the load time, but does NOT surface a prediction id — the streamed path
+  logs the prediction with no id returned and no input capture (016 decision: streamed predictions are
+  champion-unscorable), so the monitoring hand-off is offered only from trace mode.
 - **FR-234**: `serving` MUST provide a full lease view (holder, resident model, serving version, and
   the live per-task list) that visually distinguishes lease-tenant engines from off-lease engines.
 - **FR-235**: A manual preemptive swap MUST be gated behind a confirmation that names the holder to be
@@ -437,8 +446,10 @@ serving subsystem render, and a down engine shows a distinct state.
   policied model, and accept or dismiss a suggestion from the console — a surface that does not exist
   today.
 - **SC-138**: Every promoted engine (LLM, vision, tabular, embeddings, speech) is exercisable from the
-  serving stage, and each inference shows the registry version that served it and the prediction id it
-  created.
+  serving stage. The engines that log predictions — LLM trace mode (`POST /infer`), vision, and
+  transcribe — additionally surface the registry version that served it, the created prediction id,
+  and the monitoring hand-off. Embeddings and tabular are exercisable but log no prediction (no id);
+  LLM stream mode surfaces the registry version + load time but no id.
 - **SC-139**: Every high-trust action (promote-override, preemptive swap, enabling auto-promote)
   requires an explicit confirmation step and cannot be completed with a single unguarded click.
 - **SC-140**: 100% of the console's gateway calls resolve through the allow-listed proxy; no view
@@ -457,19 +468,21 @@ serving subsystem render, and a down engine shows a distinct state.
 - **Backend is frozen for 021**: every capability maps to an endpoint that already exists; the feature
   adds no gateway/backend/API surface. The only non-UI change is extending the browser-facing proxy
   allow-list to the following already-existing endpoints: the dataset-version detail read, the run
-  detail read, the drift-history read, the quality-check and quality-history endpoints, the label
-  submission, and the six per-engine health probes. All promote/evaluate/compare, policy, suggestion,
-  and serving-engine routes are already allow-listed (policy/suggestion routes are only re-grouped
-  under the retraining stage).
+  detail read, the single-shot `POST /infer` (LLM trace mode — already returns registry version +
+  prediction id + load time and feeds capture/quality), the drift-history read, the quality-check and
+  quality-history endpoints, the label submission, and the six per-engine health probes. All
+  promote/evaluate/compare, policy, suggestion, and serving-engine routes are already allow-listed
+  (policy/suggestion routes are only re-grouped under the retraining stage).
 - **Principle II is visualize-only**: the UI surfaces lease state and offers only the
   already-sanctioned operator-confirmed preemptive swap; it never changes admission, lifecycle, or
   swap semantics. A running training/HPO/batch job is never presented as preemptable.
 - **Deferred / out of scope** (explicitly not in 021): a shadow-replay UI; interactive model
   registration/upload from the console — this becomes **feature 022, "external / pretrained model
   import" (bring-your-own-model)**, which requires a new upload endpoint and per-modality packaging;
-  non-streaming single-shot LLM inference (streaming only); a persistent run/study history list (needs
-  a new backend list endpoint); and a columnar per-version metrics view (needs metrics folded into the
-  version listing).
+  **browser download of pinned dataset bytes** (FR-215 — the `download_url` is presigned against the
+  internal object-store endpoint and is not browser-reachable; a public-presign backend change is
+  deferred); a persistent run/study history list (needs a new backend list endpoint); and a columnar
+  per-version metrics view (needs metrics folded into the version listing).
 - **No new architectures/modalities**: the fixed modality set and the locked serving architecture are
   reflected, not extended.
 - **Design continuity**: the existing monospace design language and UI primitives are reused; no

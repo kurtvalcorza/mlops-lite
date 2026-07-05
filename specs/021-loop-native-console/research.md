@@ -45,10 +45,10 @@ front-end rebuild. No NEEDS CLARIFICATION markers remain.
 
 ## R4. Allow-list discipline — the one non-UI change
 
-- **Decision**: Extend `ui/lib/gw-allowlist.ts` with ~12 entries for already-existing endpoints:
-  dataset-version detail, run detail, drift history, quality check + history, label submission, and
-  the six per-engine health probes; re-section the already-present policy/suggestion entries under a
-  `retraining` comment block. No proxy route logic changes. See
+- **Decision**: Extend `ui/lib/gw-allowlist.ts` with 13 entries for already-existing endpoints:
+  dataset-version detail, run detail, `POST infer` (LLM trace mode), drift history, quality check +
+  history, label submission, and the six per-engine health probes; re-section the already-present
+  policy/suggestion entries under a `retraining` comment block. No proxy route logic changes. See
   [contracts/allowlist-delta.md](./contracts/allowlist-delta.md).
 - **Rationale**: the BFF allow-list is the security seam (FR-032 lineage) — the operator key is
   injected only for allow-listed method+path pairs, so a foreign page cannot ride it to an arbitrary

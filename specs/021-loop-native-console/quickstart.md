@@ -21,9 +21,11 @@ Contracts: [nav-and-routes](./contracts/nav-and-routes.md), [allowlist-delta](./
 
 1. With several tasks promoted, open `/serving`. Expected: one panel per promoted task; an untagged
    serving version → read-only "no renderer" placeholder.
-2. Submit an LLM prompt. Expected: streamed completion + the resolved registry version + the created
-   `prediction_id` + cold-start load time; the `prediction_id` is shown as feeding monitoring, with a
-   "label this prediction" hand-off.
+2. Submit an LLM prompt in **stream mode**. Expected: streamed completion + the resolved registry
+   version + cold-start load time, and **no** `prediction_id` (streams are not champion-scorable).
+   Then submit in **trace mode** (`POST /infer`). Expected: completion + registry version +
+   `prediction_id` + load time; the `prediction_id` is shown as feeding monitoring, with a "label this
+   prediction" hand-off.
 3. Exercise vision / tabular / transcribe / embed panels — each returns its result.
 4. Launch a batch job over a `dataset@version`; poll it to a result link (all within `/serving`).
 5. With a model resident, trigger a preemptive swap. Expected: a confirm dialog names the holder to
@@ -65,9 +67,9 @@ Contracts: [nav-and-routes](./contracts/nav-and-routes.md), [allowlist-delta](./
 
 ## US6 — data & training entry (P3)
 
-1. Open `/data`; register a version; inspect it → full manifest + download; validate → readiness
-   report with gate vs warn dispositions. Click "train on this version" → `/training` opens with
-   `dataset@version` prefilled.
+1. Open `/data`; register a version; inspect it → full manifest (inspect-only; no byte-download
+   button — download deferred, FR-215); validate → readiness report with gate vs warn dispositions.
+   Click "train on this version" → `/training` opens with `dataset@version` prefilled.
 2. In `/training`, select each modality → only its knobs + pinned default base show; vision's base is
    read-only/locked; the chain-from-parent field appears only for vision/embeddings.
 3. Launch a run while a serving model is resident such that admission refuses → the busy/over-budget
