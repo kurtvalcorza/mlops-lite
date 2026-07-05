@@ -54,7 +54,7 @@ class ProcGroup:
 def bento_spawn(run_sh_path: str):
     """Spawn a BentoML service via its run.sh on a fresh loopback port, in its OWN process group so
     the whole worker tree is reap-able (see ProcGroup). Returns (port, ProcGroup). The run scripts
-    honor BENTO_HOST/BENTO_PORT and source .env for their MinIO creds — the agent stays torch-free
+    honor BENTO_HOST/BENTO_PORT and source .env for their Garage creds — the agent stays torch-free
     (research R10) by wrapping them rather than importing their heavy deps."""
     port = free_port()
     env = dict(os.environ, BENTO_HOST="127.0.0.1", BENTO_PORT=str(port))

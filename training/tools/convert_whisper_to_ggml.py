@@ -81,7 +81,7 @@ def convert_whisper_to_ggml(hf_model_dir: str, out_path: str, quant: str = "q8_0
     Two steps, each fail-loud (no partial version on failure — FR-093):
       1. convert-h5-to-ggml.py  → an f16 `ggml-model.bin` in out_path's directory
       2. quantize <f16> <out_path> q8_0
-    Returns `out_path`. The caller (asr_finetune) uploads it to MinIO + registers the version.
+    Returns `out_path`. The caller (asr_finetune) uploads it to Garage + registers the version.
     """
     if not os.path.exists(HF_CONVERT):
         raise FileNotFoundError(f"whisper.cpp HF converter not found at {HF_CONVERT} "

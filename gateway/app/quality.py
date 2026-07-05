@@ -13,7 +13,7 @@ Design (mirrors the siblings it lives beside):
     and the write happens off the request path (Principle II / FR-119 / SC-075).
   - **US4 (T374): the high-churn INDEX moves to the relational `gateway` DB** (`platformlib.store`):
     a `predictions` row + a write-once `labels` row + a `capture_index` row per served prediction. The
-    **bulky/variable bodies stay in MinIO** — the prediction OUTPUT at `payload_ref`, the recoverable
+    **bulky/variable bodies stay in Garage** — the prediction OUTPUT at `payload_ref`, the recoverable
     input at `input_ref` — so scoring `window()` is one indexed predictions⋈labels join (FR-186,
     SC-111) instead of listing + reading every object. Quality REPORTS + shadow verdicts stay objects
     (no relational table). Write-once is now the `labels` PRIMARY KEY (FR-185) — the in-process
@@ -196,7 +196,7 @@ def log_prediction(model_name, model_version, modality, input_ref, prediction,
     """Log a served prediction off the request path and return its **prediction id** (generated
     synchronously so the caller can return it regardless of whether the store write succeeds).
 
-    Fire-and-forget + fail-open (FR-119): the MinIO write runs on a bounded daemon thread; any failure
+    Fire-and-forget + fail-open (FR-119): the Garage write runs on a bounded daemon thread; any failure
     (or a disabled flag) is swallowed, so serving is never altered or broken. The input ref / prediction
     body are stored only when `QUALITY_CAPTURE_IO` is on (mirrors `MLFLOW_TRACE_CAPTURE_IO`)."""
     pid = prediction_id or uuid.uuid4().hex
@@ -216,7 +216,7 @@ def log_prediction(model_name, model_version, modality, input_ref, prediction,
         return pid
 
     def _run():
-        # The OUTPUT body stays in MinIO (variable size); the INDEX row goes to the relational store so
+        # The OUTPUT body stays in Garage (variable size); the INDEX row goes to the relational store so
         # the scoring window is an indexed join, not an object scan (US4). A `streamed` prediction has no
         # captured output → recorded with streamed=True, excluded from scoring by the caller.
         try:
@@ -246,7 +246,7 @@ def log_prediction(model_name, model_version, modality, input_ref, prediction,
 
 
 def _s3():
-    """The MinIO/S3 client. Lazy so the pure logic imports without boto3 (018 T362.1: from the shared
+    """The Garage/S3 client. Lazy so the pure logic imports without boto3 (018 T362.1: from the shared
     platformlib factory, dropping the `.datasets`/`app.datasets` dual-fallback — FR-176)."""
     from platformlib.s3io import _s3 as ds_s3
     return ds_s3()
@@ -397,7 +397,7 @@ def capture_input(prediction_id: str, modality: str, recoverable_input, *, optio
         return
 
     def _run():
-        # The recoverable input BODY stays in MinIO (`input_ref`); the `capture_index` row is the
+        # The recoverable input BODY stays in Garage (`input_ref`); the `capture_index` row is the
         # indexed handle the shadow-replay window joins on (US4). Both fail-open.
         try:
             _put_json(key, record)

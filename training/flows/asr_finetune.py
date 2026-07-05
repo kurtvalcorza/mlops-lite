@@ -157,7 +157,7 @@ def _train_and_merge(audios, texts, out_dir, *, base_model, lr, epochs,
 
 def _register(output_name, ggml_path, run_id, *, base_model, dataset_name, dataset_version,
               parent_version, parent_run_id, device):
-    """Upload the q8_0 `ggml-*.bin` to MinIO and register a `task=asr` whisper.cpp version + lineage
+    """Upload the q8_0 `ggml-*.bin` to Garage and register a `task=asr` whisper.cpp version + lineage
     (FR-094). The whisper.cpp server loads the ggml from a local path; the registry entry is the
     routing pointer (mirrors scripts/seed_asr_model.py)."""
     from mlflow.exceptions import MlflowException

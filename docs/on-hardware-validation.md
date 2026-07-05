@@ -1,8 +1,11 @@
-# On-hardware validation runbook — increment 018 (platform re-architecture)
+# On-hardware validation runbook — increments 018 (platform re-architecture) + 020 (stack remediation)
 
 Target box: RTX 5070 Ti (12 GB), WSL2 Ubuntu + Rancher Desktop. Model on the 015–017 runbook.
 018 folds every native daemon into ONE GPU host agent (`hostagent/`); at completion the platform
 runs **two** supervised native processes — the agent and the UI — under the shrunken supervisor.
+The 020 records (store exit → Garage, Bento-ectomy golden gates, agent-runtime drill + verdict,
+decommission) share this document — one [HW] record chain per box (renamed from the `-018`
+filename at T419 once both increments' records landed).
 
 Records the on-hardware success criteria for the 018 [HW] tasks: **T365** (SC-106..110), **T372**
 (SC-112), **T377** (SC-111). Offline coverage (unit/integration) lands with the suite; these are the
@@ -403,3 +406,33 @@ The losing runtime's code path + the `AGENT_RUNTIME` switch are queued for delet
 increment (research R7 — no permanent dual matrix). Drill leg-order/choreography fixes that this
 run motivated (multipart `?preempt=true`, GPU-shaped preempt contender, LLM legs before the
 vision leg — one model in VRAM) ship with this record.
+
+## 020 T406 — decommission (FR-201; SC-129) — operator-confirmed
+
+**DONE — zero unmaintained components.** The operator confirmed the full decommission
+(services + volume + source repoints). Sequence, per contract §decommission:
+
+1. **Quiesced writers** (gateway stopped; supervisor + agent + orphaned children killed), then
+   the **final forward pass: `copied: 0` on every bucket, `parity: true`**
+   ([report](migration-report-020-final.json)).
+2. **Compose**: `minio` + `createbuckets` services, the `miniodata` volume, and the pinned
+   digests removed; `mlflow`/`gateway` depend on `garage-init` and carry the Garage endpoint +
+   store-minted credential pair (`:?` fail-fast, FR-017). The running containers, the volume,
+   and the cached images were removed from the live host.
+3. **Source defaults repointed** (the seam's baked fallbacks): `platformlib/store.py` + `s3io.py`
+   (`http://minio:9000` → `http://garage:3900`), `hostagent/run.sh`, `training/flows/*`, the
+   seed scripts, `scripts/bootstrap.sh` + `reseed_registry.sh`, the children run scripts
+   (`:9000` → `:3900`, cred bridges → the Garage pair), `tests/test_foundation.py` (the old
+   store's health probe → a Garage TCP probe; its S3 port has no unauthenticated health path),
+   `tests/test_exposure.py` (port sweep + agent-path checks reworked), `scripts/check_secrets.sh`
+   (the retired store's shipped-default pattern replaced by a Garage key-id pattern),
+   `gen_secrets` (retired pair no longer generated), `.env.example`, README (mermaid node,
+   stack list, 020 section → BUILT; the frozen-CVE-digest note retired with the service), and
+   `scripts/bootstrap_buckets.py` deleted (pre-compose relic; garage-init owns bootstrap).
+4. **Gates**: `docker compose config` clean; the source-tree
+   `grep -rin 'minio|:9000'` over `*.py|*.sh|*.yml|*.ps1|*.toml` (excluding `specs/`/`docs/`)
+   returns **zero**; full offline suite green; **stack restarts clean on Garage alone**
+   (agent + gateway healthy, datasets served, live `/infer` + preempt swap pass).
+
+The US1 rollback story is now moot by design — the migration reports + the proven flip live in
+this document as the record.

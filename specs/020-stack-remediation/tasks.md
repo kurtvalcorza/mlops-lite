@@ -45,7 +45,7 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
   idle RSS at rest recorded (`docker stats --no-stream`, ≥5 min idle — SC-130 gate:
   ≤ incumbent); offline suite + golden flows green against the candidate **via a temporary
   env-seam flip to the empty candidate (flows self-create data), flipped back before
-  migration**. Record in `docs/on-hardware-validation-018.md`. A miss ⇒ switch to
+  migration**. Record in `docs/on-hardware-validation.md`. A miss ⇒ switch to
   SeaweedFS per R1 and repeat (same plan, same tasks).
 - [x] **T405** [US1] **[HW]** Migrate → cutover → rollback proof → soak (quickstart §US1.2–4;
   FR-199/200): forward run `parity: true`, re-run `copied: 0`; flip the cutover env contract —
@@ -55,7 +55,7 @@ Setup is the only shared prerequisite (T401 → US1; T402 → US2/US3).
   merely that flows pass (contract §cutover, endpoint-precedence note); golden flows + full suite
   pass unchanged (SC-128); one rollback flip proven, then forward again; MigrationReports kept
   under `docs/`.
-- [ ] **T406** [US1] **[HW]** Decommission (FR-201; operator confirms FIRST): quiesce writers
+- [x] **T406** [US1] **[HW]** Decommission (FR-201; operator confirms FIRST): quiesce writers
   (contract §concurrent-write: stop gateway + agent, or at minimum the policy scheduler +
   prediction/capture logging), then final forward run
   `copied: 0` everywhere; execute the contract checklist (compose services/volumes/digests,
@@ -120,7 +120,7 @@ components and a proven rollback story (now moot).
   RuntimeBaselineRecord (data-model.md) to the runbook doc; offline smoke against a fake SSE
   child.
 - [x] **T415** [US3] **[HW]** Run the drill on BOTH runtimes (quickstart §US3); record both
-  RuntimeBaselineRecords + the FR-205 verdict in `docs/on-hardware-validation-018.md`. Any
+  RuntimeBaselineRecords + the FR-205 verdict in `docs/on-hardware-validation.md`. Any
   stdlib baseline miss ⇒ flip the default to `uvicorn` and re-run the full agent suite on it;
   no miss ⇒ stdlib stays. Either way the loser's deletion is queued for the next increment
   (research R7 — no permanent dual matrix). Runbook note: the `-018` doc name is deliberate
@@ -150,7 +150,7 @@ components and a proven rollback story (now moot).
   (queued with 018's T378; one amendment covers both): the illustrative stack list updates to
   the real components (Garage, MLflow, Prefect-ephemeral, PyTorch+PEFT, llama.cpp/whisper.cpp +
   FastAPI children behind the agent, hand-rolled PSI + Prometheus/Grafana); rule text unchanged.
-- [ ] **T419** [P] Env-surface docs: `.env.example` gains `AGENT_RUNTIME` (with the
+- [x] **T419** [P] Env-surface docs: `.env.example` gains `AGENT_RUNTIME` (with the
   decision-window note) and the Garage endpoint/credential block with the cutover-contract
   cross-reference; rename `docs/on-hardware-validation-018.md` →
   `docs/on-hardware-validation.md` (both increments' records; runs LAST, after the [HW]

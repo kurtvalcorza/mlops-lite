@@ -1,7 +1,7 @@
 """Offline-capability check (T041, SC-007).
 
 The P1–P2 flows — health, dataset register/list, model register/promote — depend only on local
-services (gateway, MLflow, MinIO), so they work air-gapped once images are pulled and the model
+services (gateway, MLflow, Garage), so they work air-gapped once images are pulled and the model
 is cached (FR-013/FR-014). This test runs those flows end-to-end and confirms success.
 
 To *hard-verify* offline (optional): cut the gateway's external egress and re-run, e.g.
@@ -36,14 +36,14 @@ def _req(method, path, body=None):
 
 
 def main() -> int:
-    # Foundational health (gateway → its own process; MLflow/MinIO reachability proven by the flows).
+    # Foundational health (gateway → its own process; MLflow/Garage reachability proven by the flows).
     s, h = _req("GET", "/healthz")
     if s != 200 or h.get("status") != "ok":
         print(f"[FAIL] /healthz -> {s} {h}")
         return 1
     print("[OK] gateway healthy")
 
-    # US3 dataset flow (MinIO only).
+    # US3 dataset flow (Garage only).
     s, d = _req("POST", "/datasets",
                 {"name": DS, "content_b64": base64.b64encode(b"a,b\n1,2\n").decode(), "format": "csv"})
     s2, lst = _req("GET", f"/datasets/{DS}")

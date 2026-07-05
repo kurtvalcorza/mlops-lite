@@ -15,7 +15,7 @@ need no GPU.
 US4 (T374): the replay window resolves through the relational `capture_index⋈predictions⋈labels`
 join (`quality._store.replay_window`) — one bounded, TTL-filtered index scan — instead of listing
 every `inputs/<modality>/` object and reading three objects per pid. Only the recoverable input body
-and the champion's logged output are still fetched from MinIO (on the ≤`window_n` joined rows).
+and the champion's logged output are still fetched from Garage (on the ≤`window_n` joined rows).
 FR-176: quality is now imported package-relative (the trainer reaches these cores through
 `platformlib.gateway_bridge`, never by loading shadow.py standalone).
 """
@@ -107,7 +107,7 @@ def resolve_window(name, version, modality, *, window_n=None, now=None, ttl_s=No
     `capture_index⋈predictions⋈labels` `store.replay_window` (a bounded, indexed, TTL-filtered scan
     of the newest `window_n` rows) — not a listing of every `inputs/<modality>/` object. Only the
     recoverable input body (`input_ref`) and the champion's logged output (`payload_ref`) are then
-    GET from MinIO, on those ≤`window_n` rows.
+    GET from Garage, on those ≤`window_n` rows.
 
     Two robustness properties beyond the pure join:
       - **TTL filter at resolve time**, not just on capture-write: if traffic for a modality stops,
@@ -116,7 +116,7 @@ def resolve_window(name, version, modality, *, window_n=None, now=None, ttl_s=No
         key parse. `now`/`ttl_s` are injectable for tests; `ttl_s<=0` disables (as `inputs_to_prune`).
       - **Store-read failures surface** (ShadowError) instead of silently dropping a row: a failed
         window query aborts, and for the per-row body GETs only a *confirmed-missing* object
-        (404/NoSuchKey — a prune race) is skipped; a transient MinIO error aborts the replay rather
+        (404/NoSuchKey — a prune race) is skipped; a transient Garage error aborts the replay rather
         than compute an advisory verdict on a partial, biased window.
     """
     window_n = quality.WINDOW_N if window_n is None else window_n

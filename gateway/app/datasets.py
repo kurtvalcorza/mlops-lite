@@ -1,10 +1,10 @@
-"""Content-addressed dataset registry on MinIO (T024/T025, US3).
+"""Content-addressed dataset registry on Garage (T024/T025, US3).
 
 DVC is the plan's default for data versioning, but it needs a git repo + the `dvc` CLI and a
 git-commit per version — an awkward fit for a container-internal, API-driven flow, and it adds
 weight that cuts against Principle III (Lightweight Footprint). Principle V (OSS & Swappable)
 lets us deliver the *same guarantees* — named, versioned, **immutable** dataset references —
-directly on the MinIO `datasets` bucket via content addressing:
+directly on the Garage `datasets` bucket via content addressing:
 
     a dataset version IS the sha256 of its bytes.
 

@@ -14,10 +14,10 @@ REPO="$(cd "$DIR/../.." && pwd)"
 
 VENV="${VENV:-$HOME/mlops-train}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:${MLFLOW_PORT:-5500}}"  # resolve @serving
-export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:9000}"
+export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:3900}"
 # Bridge object-store creds -> AWS_* for boto3; fail fast if neither is set (FR-017).
-export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:?set MINIO_ROOT_USER (.env / scripts/gen_secrets)}}"
-export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (.env / scripts/gen_secrets)}}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID (.env / scripts/gen_secrets)}}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${GARAGE_SECRET_ACCESS_KEY:?set GARAGE_SECRET_ACCESS_KEY (.env / scripts/gen_secrets)}}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export TABULAR_MODEL="${TABULAR_MODEL:-tabular-lgbm}"
 PORT="${BENTO_PORT:-${TABULAR_PORT:-8094}}"

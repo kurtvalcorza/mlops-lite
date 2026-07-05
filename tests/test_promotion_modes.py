@@ -233,13 +233,13 @@ def test_default_shadow_listing_failure_raises_never_reads_as_green():
     # per-policy containment keeps the watch and retries next tick.
     class _BrokenS3:
         def list_objects_v2(self, **kw):
-            raise RuntimeError("minio down")
+            raise RuntimeError("garage down")
 
     try:
         _with_shadow_env(_BrokenS3(), None,
                          lambda: scheduler._default_shadow("qa-demo", "9", "llm"))
     except Exception as e:
-        assert "minio down" in str(e)
+        assert "garage down" in str(e)
     else:
         raise AssertionError("a listing failure must raise, not read as no-shadow-window")
 

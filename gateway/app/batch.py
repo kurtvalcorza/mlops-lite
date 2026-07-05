@@ -1,8 +1,8 @@
-"""Offline batch-inference core (014, US1) — score a whole dataset version, write results to MinIO.
+"""Offline batch-inference core (014, US1) — score a whole dataset version, write results to Garage.
 
 The platform serves online/sync only; this adds the offline complement: iterate every row of a
 registered dataset version through the **serving path** and write a **content-addressed** result
-artifact back to MinIO (mirroring `datasets.py` — sha256 of the result bytes ⇒ immutable, idempotent,
+artifact back to Garage (mirroring `datasets.py` — sha256 of the result bytes ⇒ immutable, idempotent,
 downloadable, manifested).
 
 **Mechanism (grilled A):** a GPU-backed batch runs as an **ephemeral Prefect flow on the native daemon**
@@ -32,7 +32,7 @@ class BatchError(Exception):
 
 
 def _s3():
-    """The MinIO/S3 client. Lazy so the pure core imports without boto3 (018 T362.1: from the shared
+    """The Garage/S3 client. Lazy so the pure core imports without boto3 (018 T362.1: from the shared
     platformlib factory, dropping the `.datasets`/`app.datasets` dual-fallback — FR-176)."""
     from platformlib.s3io import _s3 as ds_s3
     return ds_s3()
@@ -65,7 +65,7 @@ def run_batch(rows: list, predict_fn, *, abort_threshold: float = DEFAULT_ABORT_
 # --- content-addressed result write (mirrors datasets.register_dataset) ----------------------------
 
 def write_result(job_name: str, batch: dict, *, manifest_extra=None, s3=None) -> dict:
-    """Write the batch results to MinIO **content-addressed** (sha256 of the result bytes ⇒ version), as
+    """Write the batch results to Garage **content-addressed** (sha256 of the result bytes ⇒ version), as
     `batch/<job>/<version>/{data,manifest.json}` — immutable + idempotent (identical results ⇒ same
     version). Returns the version + the result URI + the manifest."""
     s3 = s3 or _s3()

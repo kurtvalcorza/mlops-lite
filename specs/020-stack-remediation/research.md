@@ -125,7 +125,7 @@ US1 **spike** before migration — the spike, not this document, is the gate (FR
   time-to-first-token and inter-token stall count under concurrent health polling; multipart
   round-trip latency; mid-stream client-disconnect recovery; behavior with a swap/preempt arriving
   during a stream. Baselines: the 017/018 runbook numbers. Verdict recorded in
-  `docs/on-hardware-validation-018.md` (the same doc the pending [HW] sweep writes). Miss ⇒ flip
+  `docs/on-hardware-validation.md` (the same doc the pending [HW] sweep writes). Miss ⇒ flip
   the default to `uvicorn`, re-run drill + full agent suite; meet ⇒ stdlib stays and the switch is
   removed at the following increment (no dead config left behind).
 - **Rationale**: the spec demands evidence, not fashion (FR-205); the dual switch is what makes

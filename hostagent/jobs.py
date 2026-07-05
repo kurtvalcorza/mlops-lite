@@ -365,7 +365,7 @@ class JobManager:
 
     def _run_batch(self, job_id: str, request: dict) -> dict:
         """One batch-inference job (014): score a dataset version through the existing serving path
-        and write a content-addressed result to MinIO. Runs IN-PROCESS and does NOT hold GPU
+        and write a content-addressed result to Garage. Runs IN-PROCESS and does NOT hold GPU
         admission — a GPU batch drives a serving engine (the admission holder); a tabular batch is
         off-GPU. `_gpu_batch_active` (set at submit) keeps a GPU batch's serving holder safe."""
         self._ensure_training_path()

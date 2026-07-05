@@ -4,7 +4,7 @@ Loads `gateway/app/quality.py` as a package member (so its `from . import evalua
 relative imports resolve — 018 FR-176 retired the standalone fallbacks). Two in-memory fakes stand in
 for the real backends so the join / label / capture / compute paths test without a live store:
 
-  * **FakeS3** — the MinIO `results` bucket (the bulky prediction-OUTPUT and captured-INPUT bodies, plus
+  * **FakeS3** — the Garage `results` bucket (the bulky prediction-OUTPUT and captured-INPUT bodies, plus
     the quality reports + shadow verdicts that stay objects under US4).
   * **FakeStore** — the relational `gateway` DB (`platformlib.store`): the `predictions` / `labels` /
     `capture_index` index rows the scoring `window()` and the shadow `replay_window()` join on. Mirrors

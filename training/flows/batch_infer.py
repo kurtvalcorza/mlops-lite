@@ -2,7 +2,7 @@
 
 The gateway (Docker) has no GPU, so batch can't run there — it runs **natively** where serving lives,
 launched via the gateway `POST /batch`. The flow scores every row of a registered dataset version
-through the **existing serving path** and writes a content-addressed result to MinIO via the gateway's
+through the **existing serving path** and writes a content-addressed result to Garage via the gateway's
 `batch.py` core (one implementation of the scoring/write logic, shared with the gateway).
 
 **Lease discipline (Principle II).** GPU-backed models (LLM, vision) are scored through the serving
@@ -92,7 +92,7 @@ def _predict_fn(modality: str):
 def batch_infer_flow(dataset_name: str, dataset_version: str, model: str, modality: str = "llm",
                      registry_version=None, abort_threshold: float = 0.5,
                      predict_fn=None) -> dict:
-    """Score `dataset_name@dataset_version` against `model` and write a content-addressed result to MinIO.
+    """Score `dataset_name@dataset_version` against `model` and write a content-addressed result to Garage.
     `predict_fn` is injectable for tests; by default the per-modality live serving predictor is used."""
     batch = _load_batch()
     predict = predict_fn or _predict_fn(modality)

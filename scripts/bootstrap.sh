@@ -93,7 +93,7 @@ else
     cmake --build ~/llama.cpp/build --config Release -j --target llama-server llama-cli"
 fi
 
-# 5. Seed models. The serving LLM is a local download (idempotent). The vision model goes to MinIO,
+# 5. Seed models. The serving LLM is a local download (idempotent). The vision model goes to Garage,
 #    so it's seeded best-effort only when the infra is up and the object is missing.
 echo "[5/6] seeding models ..."
 if [ -f "$GGUF" ]; then
@@ -103,13 +103,14 @@ else
   bash "$REPO/scripts/seed_models.sh" || fail "LLM download failed"
 fi
 
-# Vision model -> MinIO (optional, idempotent guard).
+# Vision model -> Garage (optional, idempotent guard).
 if [ -f "$REPO/.env" ]; then set -a; . "$REPO/.env"; set +a; fi
-MINIO_HEALTH="http://localhost:${MINIO_API_PORT:-9000}/minio/health/live"
-if curl -fs "$MINIO_HEALTH" >/dev/null 2>&1 && [ -n "${MINIO_ROOT_USER:-}" ]; then
-  export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-$MINIO_ROOT_USER}"
-  export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-$MINIO_ROOT_PASSWORD}"
-  export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:${MINIO_API_PORT:-9000}}"
+# Garage's S3 port has no unauthenticated HTTP health path — a TCP connect proves it is up.
+GARAGE_PORT="${GARAGE_S3_PORT:-3900}"
+if (exec 3<>"/dev/tcp/localhost/${GARAGE_PORT}") 2>/dev/null && [ -n "${GARAGE_ACCESS_KEY_ID:-}" ]; then
+  export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-$GARAGE_ACCESS_KEY_ID}"
+  export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-$GARAGE_SECRET_ACCESS_KEY}"
+  export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:${GARAGE_PORT}}"
   export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:${MLFLOW_PORT:-5500}}"
   if "$PY" - <<'PYEOF' 2>/dev/null
 import os, sys, boto3
@@ -124,13 +125,13 @@ except Exception:
     sys.exit(1)  # missing
 PYEOF
   then
-    ok "vision model already seeded in MinIO"
+    ok "vision model already seeded in Garage"
   else
-    step "seeding vision model -> MinIO"
+    step "seeding vision model -> Garage"
     "$PY" "$REPO/scripts/seed_vision_model.py" && ok "vision model seeded" || echo "  [warn] vision seed failed (non-fatal; serving smoke does not need it)"
   fi
 else
-  echo "  [skip] MinIO not up — seed the vision model later (after ./scripts/up_all.ps1):"
+  echo "  [skip] Garage not up — seed the vision model later (after ./scripts/up_all.ps1):"
   echo "         ~/mlops-train/bin/python scripts/seed_vision_model.py"
 fi
 

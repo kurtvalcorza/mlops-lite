@@ -57,7 +57,7 @@ if (-not $mlflowOk) {
     Write-Warning ("MLflow is not healthy at 127.0.0.1:$mlflowPort. If you are UPGRADING from MLflow 2.18, " +
         "the 3.x server cannot start against the old Postgres schema — run the one-time reset:`n" +
         "    .\scripts\reset_mlflow_3x.ps1 -Confirm`n" +
-        "(drops MLflow run/trace history; MinIO datasets/artifacts survive). Else: docker compose logs mlflow")
+        "(drops MLflow run/trace history; Garage datasets/artifacts survive). Else: docker compose logs mlflow")
 }
 
 # 3. Start the native daemons under the supervisor and wait for their health.

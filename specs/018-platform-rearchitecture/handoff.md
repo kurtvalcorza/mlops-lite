@@ -127,7 +127,7 @@ Per fold-in (T358–T361), the recipe SC-114 proved: one adapter module in `host
   `AGENT_URL`; free 8090–8095/8099; update `tests/conftest.py` fixtures (incl. the
   `MLOPS_LEGACY_LEASE_PATH` isolation, which becomes dead).
 - **T365 / T372 / T377 [HW]**: run the quickstart drills, record in
-  `docs/on-hardware-validation-018.md` (create it; 017's runbook is the model).
+  `docs/on-hardware-validation.md` (create it; 017's runbook is the model).
 - **US4 (T373–377)**: contracts/store-schema.md is written; `policy_status`'s O(N) suggestion
   scan and `_default_shadow`'s full-prefix listing are known object-scan hot spots the cutover
   should eliminate.

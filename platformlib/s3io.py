@@ -1,4 +1,4 @@
-"""Shared MinIO/S3 client factory + bucket constants (018 T362.1, FR-176).
+"""Shared Garage/S3 client factory + bucket constants (018 T362.1, FR-176).
 
 Extracted from `gateway/app/datasets.py` so the gateway cores that the native training flows reuse
 (`batch`, `quality`, `validation`) reach the object store through **one shared platformlib import**
@@ -16,14 +16,14 @@ import os
 import boto3
 from botocore.client import Config
 
-#: MinIO/S3 endpoint. `S3_ENDPOINT_URL` wins; else the MLflow artifact endpoint; else the compose host.
-S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL") or os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000")
+#: Garage/S3 endpoint. `S3_ENDPOINT_URL` wins; else the MLflow artifact endpoint; else the compose host.
+S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL") or os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://garage:3900")
 #: The dataset registry bucket (immutable, content-addressed dataset versions live here).
 BUCKET = os.getenv("DATASETS_BUCKET", "datasets")
 
 
 def _s3():
-    """A signature-v4 boto3 S3 client for MinIO. Lazy-call so importing this module needs no creds;
+    """A signature-v4 boto3 S3 client for Garage. Lazy-call so importing this module needs no creds;
     the credentials are read from the environment when a client is actually built."""
     return boto3.client(
         "s3",

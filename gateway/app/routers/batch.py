@@ -33,7 +33,7 @@ class BatchRequest(BaseModel):
 async def launch_batch(req: BatchRequest):
     """Launch a batch-inference job (async; poll GET /batch/{id}). Proxies to the native daemon, which
     scores every row through the existing serving tenant (the one-model-in-VRAM lease for GPU modalities;
-    off-lease for tabular) and writes a content-addressed result to MinIO. The daemon's `_active` gate
+    off-lease for tabular) and writes a content-addressed result to Garage. The daemon's `_active` gate
     serializes the batch against train/study; it does not acquire its own lease — serving owns VRAM."""
     async with httpx.AsyncClient(timeout=15) as client:
         try:

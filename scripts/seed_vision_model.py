@@ -2,7 +2,7 @@
 """Seed a vision model into the platform (T022, US1 vision/audio half of FR-002).
 
 Downloads a small pretrained image classifier (MobileNetV2), uploads its weights + ImageNet
-labels to the MinIO `models` bucket, and registers an MLflow model version — so the BentoML
+labels to the Garage `models` bucket, and registers an MLflow model version — so the BentoML
 service packages the model *from the registry/object store* (depends on US2), not from torch hub.
 
 Run in WSL with the training venv:  ~/mlops-train/bin/python scripts/seed_vision_model.py
@@ -18,7 +18,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 from torchvision.models import MobileNet_V2_Weights, mobilenet_v2
 
-S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:3900")
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("VISION_MODEL", "vision-mobilenet")

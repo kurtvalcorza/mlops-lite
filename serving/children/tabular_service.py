@@ -24,7 +24,7 @@ from botocore.client import Config
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:3900")
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("TABULAR_MODEL", "tabular-lgbm")

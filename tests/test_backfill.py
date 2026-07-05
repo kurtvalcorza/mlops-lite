@@ -1,4 +1,4 @@
-"""018 T376 — scripts/backfill_store.py (pre-US4 MinIO objects → the gateway Postgres store).
+"""018 T376 — scripts/backfill_store.py (pre-US4 Garage objects → the gateway Postgres store).
 
 Two layers, mirroring test_store_client.py:
   * **Offline (always run):** the JSONL journal fold (`_fold_journal`) rebuilds the final record per

@@ -25,7 +25,7 @@ Validation: cutover requires `parity == true` on a fresh forward run; decommissi
 requires a final forward run with `copied == 0` on every bucket (no stranded delta).
 ETags are deliberately NOT compared (multipart ETags are not portable across stores — R3).
 
-## RuntimeBaselineRecord (runbook entry, `docs/on-hardware-validation-018.md`)
+## RuntimeBaselineRecord (runbook entry, `docs/on-hardware-validation.md`)
 
 The FR-205 evidence; one per drill run, appended.
 

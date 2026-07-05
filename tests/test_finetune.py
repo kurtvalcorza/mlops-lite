@@ -26,7 +26,7 @@ POLL_TIMEOUT = int(os.getenv("FINETUNE_TIMEOUT", "1200"))
 DEMO_ROWS = [
     {"instruction": "What is MLOps-Lite?", "response": "A lightweight local MLOps platform."},
     {"instruction": "What GPU rule does it enforce?", "response": "One model in VRAM at a time."},
-    {"instruction": "How are datasets versioned?", "response": "By content hash on MinIO."},
+    {"instruction": "How are datasets versioned?", "response": "By content hash on Garage."},
 ]
 
 

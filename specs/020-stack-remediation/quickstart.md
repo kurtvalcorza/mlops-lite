@@ -59,7 +59,7 @@ Prereq: drive headroom ≥ current object population size ×2 (both stores co-re
    TTFT + stalls under concurrent `/health` polling; multipart round-trip; mid-stream client
    disconnect (next request must be clean); preempt-during-stream behavior (409-vs-drain per
    lease semantics). Repeat with `AGENT_RUNTIME=uvicorn`.
-3. Append both RuntimeBaselineRecords to `docs/on-hardware-validation-018.md`; verdict per
+3. Append both RuntimeBaselineRecords to `docs/on-hardware-validation.md`; verdict per
    FR-205: any stdlib baseline miss ⇒ default flips to uvicorn and the agent suite re-runs on it;
    no miss ⇒ stdlib stays. Either way the record exists (SC-132).
 4. Offline (anywhere): the parameterized agent HTTP suite passes on BOTH runtimes while the
