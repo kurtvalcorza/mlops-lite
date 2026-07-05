@@ -105,19 +105,19 @@ confirm-gated preempt, and prediction→monitoring traceability (FR-231..237).
 and cooldown-as-outcome (FR-238..242).
 **Independent test**: `quickstart.md §US3`.
 
-- [ ] **T435** [US3] `ui/components/monitoring/DriftPanel.tsx` + `QualityPanel.tsx`: run
+- [x] **T435** [US3] `ui/components/monitoring/DriftPanel.tsx` + `QualityPanel.tsx`: run
   `monitor/check` and `monitor/quality/check`; quality baseline auto-resolves with an advanced
   disclosure for baseline/window_n/drop_pct (FR-238/241).
-- [ ] **T436** [P] [US3] `ui/components/monitoring/HistoryList.tsx`: render `GET /monitor` and
+- [x] **T436** [P] [US3] `ui/components/monitoring/HistoryList.tsx`: render `GET /monitor` and
   `GET /monitor/quality` histories, newest first (FR-238).
-- [ ] **T437** [P] [US3] `ui/components/monitoring/LabelsPanel.tsx`: attach a label by `prediction_id`
+- [x] **T437** [P] [US3] `ui/components/monitoring/LabelsPanel.tsx`: attach a label by `prediction_id`
   (`monitor/labels`); accepts the `?prediction_id=` deep-link from serving; renders late/duplicate/
   unknown-id outcomes cleanly (FR-239).
-- [ ] **T438** [US3] One-shot "retrain if this breaches" on a check, labeled distinct from standing
+- [x] **T438** [US3] One-shot "retrain if this breaches" on a check, labeled distinct from standing
   policies, with the retrain spec auto-filled from the breached model (`dataset_version=latest`,
   modality/output prefilled, knobs defaulted) behind confirmation; render `skipped: cooldown` as a
   first-class outcome (FR-240/242).
-- [ ] **T439** [US3] Assemble `app/monitoring/page.tsx` from the panels; render the explicit
+- [x] **T439** [US3] Assemble `app/monitoring/page.tsx` from the panels; render the explicit
   manual-vs-standing framing — a short in-page note that these are *manual, one-shot* checks whose
   *standing, scheduled* counterpart lives in `retraining` (same checks, same gate, same cooldown)
   (FR-248). Validate against `quickstart.md §US3`; lint + build green.
