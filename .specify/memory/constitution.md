@@ -39,9 +39,8 @@ an explicit amendment.
 
 ### V. Open-Source & Swappable Components
 Each lifecycle stage is backed by a mainstream open-source tool behind a clear interface, so
-any one can be replaced without rewriting the others. Default stack (v1.5.1 refresh — the list
-is illustrative and tracks the real components; the RULE is this sentence's first and last
-clauses): Garage (S3 object storage), content-addressed dataset versions on the object store
+any one can be replaced without rewriting the others. Default stack: Garage (S3 object
+storage), content-addressed dataset versions on the object store
 (data versioning), MLflow (tracking + registry), Prefect ephemeral runs (orchestration),
 PyTorch + PEFT/LoRA (training), llama.cpp / whisper.cpp / slim FastAPI children behind the GPU
 host agent and a FastAPI gateway (serving), hand-rolled PSI + quality windows with
@@ -101,12 +100,6 @@ and task lists are reviewed for compliance with these principles.
 
 **Version**: 1.5.1 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-05
 
-> v1.5.1 (020 T418): Principle V's illustrative default-stack list refreshed to the real
-> components after the 020 remediation (MinIO→Garage exit; BentoML retired for slim
-> FastAPI children; DVC/Ollama/Evidently were long since realized by content-addressed
-> datasets, llama.cpp, and the hand-rolled monitors). Rule text unchanged — this principle's
-> own "Replacements are allowed" clause exercised twice in one increment.
-
 <!-- v1.1.0: genericized — machine-specific values extracted to hardware-profile.md; constraints
      now expressed relative to VRAM_GB / RAM_GB / FREE_DISK_GB.
      v1.2.0: hybrid GPU — when the container engine cannot pass the GPU through, GPU-bound
@@ -131,5 +124,11 @@ and task lists are reviewed for compliance with these principles.
      re-entrant lock guarding the holder-check + claim), superseding the pre-018 cross-process file lockfile
      (`serving/gpu_lease.py`, retired at T364). MINOR: the mechanism DESCRIPTION changed (cross-process lockfile
      → in-process lock); the RULE — at most one GPU tenant resident at any instant — is UNCHANGED and still
-     NON-NEGOTIABLE. -->
+     NON-NEGOTIABLE.
+     v1.5.1 (020-stack-remediation, T418): Principle V's ILLUSTRATIVE default-stack list refreshed to the
+     real components after 020 — Garage replaced the archived-upstream MinIO (migrated + decommissioned,
+     T404–T406); BentoML retired for slim FastAPI children behind the GPU host agent (T407–T412);
+     DVC/Ollama/Evidently were long since realized by content-addressed datasets, llama.cpp, and the
+     hand-rolled PSI/quality monitors. PATCH: wording-only — the rule ("behind a clear interface …
+     Replacements are allowed; lock-in is not") is unchanged; 020 exercised it twice. -->
 
