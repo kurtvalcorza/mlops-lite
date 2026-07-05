@@ -205,6 +205,13 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
   [contracts/allowlist-delta.md](./contracts/allowlist-delta.md) (SC-140/141/FR-251).
 - [ ] **T459** Full regression: `npm run lint` + `npm run build` green; run the Python backend suite
   and confirm it is unchanged/green (SC-141); walk the whole loop once per `quickstart.md`.
+- [ ] **T460** [P] Refresh docs to match the renamed loop nav: in `README.md` update the operator-console
+  section ("Tabs cover infer / models / datasets / runs / monitor / platform" → the loop
+  `data → training → models → serving → monitoring → retraining ⟲` + off-axis health/GPU-pill) and the
+  stale "Infer tab" references (per-task panels, lease/swap status line) to the `serving` stage; grep
+  `README.md` and any `docs/` for the old route/tab names (`infer`/`datasets`/`runs`/`monitor` as UI
+  surfaces) and reconcile. Docs-only; no code or contract change (FR-253 — IA rename, design language
+  preserved).
 
 ## Dependencies & order
 
@@ -214,7 +221,7 @@ fixed-modality picker + lease-aware launch + →models hand-off (FR-214..223).
   independently testable. **Soft** cross-links (graceful if the other stage isn't built): serving→
   monitoring label (T433→T437), retraining→models override (T443→T447), data→training (T450→T451),
   training→models (T452→T445).
-- **Polish (T456–T459)** last.
+- **Polish (T456–T460)** last.
 
 ## Parallel execution examples
 
