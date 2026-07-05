@@ -39,10 +39,13 @@ an explicit amendment.
 
 ### V. Open-Source & Swappable Components
 Each lifecycle stage is backed by a mainstream open-source tool behind a clear interface, so
-any one can be replaced without rewriting the others. Default stack: MinIO (storage), DVC
-(data versioning), MLflow (tracking + registry), Prefect (orchestration), PyTorch + PEFT/LoRA
-(training), Ollama + BentoML behind a FastAPI gateway (serving), Evidently + Prometheus/Grafana
-(monitoring). Replacements are allowed; lock-in is not.
+any one can be replaced without rewriting the others. Default stack (v1.5.1 refresh — the list
+is illustrative and tracks the real components; the RULE is this sentence's first and last
+clauses): Garage (S3 object storage), content-addressed dataset versions on the object store
+(data versioning), MLflow (tracking + registry), Prefect ephemeral runs (orchestration),
+PyTorch + PEFT/LoRA (training), llama.cpp / whisper.cpp / slim FastAPI children behind the GPU
+host agent and a FastAPI gateway (serving), hand-rolled PSI + quality windows with
+Prometheus/Grafana (monitoring). Replacements are allowed; lock-in is not.
 
 ### VI. Reproducibility & Observability
 Every experiment and model version MUST be tracked in MLflow; every dataset version recorded
@@ -96,7 +99,13 @@ lifecycle stage — requires a documented amendment with explicit justification 
 implementation. Complexity must always be justified against Principles II and III. All plans
 and task lists are reviewed for compliance with these principles.
 
-**Version**: 1.5.0 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-04
+**Version**: 1.5.1 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-05
+
+> v1.5.1 (020 T418): Principle V's illustrative default-stack list refreshed to the real
+> components after the 020 remediation (MinIO→Garage exit; BentoML retired for slim
+> FastAPI children; DVC/Ollama/Evidently were long since realized by content-addressed
+> datasets, llama.cpp, and the hand-rolled monitors). Rule text unchanged — this principle's
+> own "Replacements are allowed" clause exercised twice in one increment.
 
 <!-- v1.1.0: genericized — machine-specific values extracted to hardware-profile.md; constraints
      now expressed relative to VRAM_GB / RAM_GB / FREE_DISK_GB.
