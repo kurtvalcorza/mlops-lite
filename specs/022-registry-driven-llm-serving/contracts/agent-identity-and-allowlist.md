@@ -31,10 +31,13 @@ the delta enumerated here, so the reachable surface stays auditable (021 discipl
 | Method | Pattern | For |
 |---|---|---|
 | GET | `serving/llm` (or reuse `serving/state`) | active serving-LLM + resident-vs-promoted delta (FR-269) |
-| POST | `serving/llm/select` (or reuse `models/:name/promote`) | set the serving LLM → trigger the controlled reload (FR-255/269) |
 
-- **Prefer reusing existing allow-listed routes** where possible (e.g. the already-listed
-  `POST models/:name/promote` for the version choice; `GET serving/state` for identity) so the delta
-  is minimal or empty.
+- **Promote = go live** (Clarifications 2026-07-05): there is **no separate "select"/"set-serving"
+  action** — promoting a text-generation version through the **already-allow-listed**
+  `POST models/:name/promote` *is* the switch (it moves the alias, writes the active-serving-LLM
+  pointer, and triggers the immediate controlled reload, FR-255). So the switch adds **no new route**;
+  the only possible addition is a read for the resident-vs-promoted delta (and even that prefers
+  reusing `GET serving/state`).
+- **Prefer reusing existing allow-listed routes** so the delta is minimal or empty.
 - No wildcard, no broadening beyond the enumerated additions; a view issuing a non-listed call fails
   closed at the BFF (021 FR-251 lineage).

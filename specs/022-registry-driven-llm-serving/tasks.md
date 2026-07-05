@@ -64,10 +64,12 @@ controlled reload — no `.env` edit, no manual restart (FR-254/255).
   engine to the resolved target via `hostagent/swap.py` admission (evict → free → load), idempotent
   no-op when already resident, target-probed before any evict (FR-256/257). Reuses `preempt_for`; no
   new admission mechanism.
-- [ ] **T467** [US1] Gateway "set serving LLM" action: route the version choice through the **existing
-  gated promote** (011/015), write the ActiveServingLLM pointer (T464), and request the T466 agent
-  reload. Prefer reusing `POST models/:name/promote`; add a serving-control route only if the contract
-  requires it ([contracts/agent-identity-and-allowlist.md](./contracts/agent-identity-and-allowlist.md)).
+- [ ] **T467** [US1] Make the **gated promote itself the go-live action** (Clarifications 2026-07-05:
+  promote = go live, one action — no separate "select" gesture): promoting a text-generation version
+  through `POST models/:name/promote` (011/015) MUST also write the ActiveServingLLM pointer (T464) and
+  request the T466 immediate agent reload. Prefer extending the existing promote path over a new
+  serving-control route; add one only if the contract requires it
+  ([contracts/agent-identity-and-allowlist.md](./contracts/agent-identity-and-allowlist.md)).
 - [ ] **T468** [US1] Validate US1 end-to-end against quickstart §US1 (promote A → `/infer` is A;
   promote B → `/infer` is B; no host-level action); backend `pytest` (resolver + reload wiring) green.
 
@@ -147,10 +149,11 @@ preempt of a serving holder, job never preempted (FR-257/258/259).
   operator-confirmed swap; a **job** holder (training/HPO/batch) is refused/deferred with the existing
   409 reason (never preempted); never two-resident. Reuses `hostagent/swap.py:preempt_for`;
   `pytest`/agent-level test the refuse-if-job path.
-- [ ] **T482** [US5] Console switch surface (`ui/components/models/*`, `ui/components/serving/*`): a
-  "set serving / switch" control gated behind the 021 `ConfirmDialog` naming the holder to displace;
-  show the **resident-vs-promoted** LLM delta (FR-269) and the base/adapter nature + lineage (FR-268);
-  reflect a completed switch. Validate: `npm run build` green.
+- [ ] **T482** [US5] Console switch surface (`ui/components/models/*`, `ui/components/serving/*`): the
+  **promote action IS the switch** (Clarifications 2026-07-05 — no separate "set serving" control);
+  when promoting a text-generation version would displace a resident serving model, gate it behind the
+  021 `ConfirmDialog` naming the holder. Show the **resident-vs-promoted** LLM delta (FR-269) and the
+  base/adapter nature + lineage (FR-268); reflect a completed switch. Validate: `npm run build` green.
 - [ ] **T483** [P] [US5] `ui/lib/gw-allowlist.ts` — add any new serving-control route the switch UI
   calls (prefer reusing existing entries; keep the delta minimal and equal to
   [contracts/agent-identity-and-allowlist.md](./contracts/agent-identity-and-allowlist.md)).
@@ -162,9 +165,12 @@ preempt of a serving holder, job never preempted (FR-257/258/259).
 
 ## Phase 8: Polish & cross-cutting
 
-- [ ] **T485** [P] Full backend regression: `pytest` green across the resolver, identity reporting,
-  reload wiring, task-tag stamping, and backfill; confirm **no pre-existing test regressed** —
-  especially the Principle II admission/swap tests (SC-147/149).
+- [ ] **T485** [P] Full backend regression + boundary guards: `pytest` green across the resolver,
+  identity reporting, reload wiring, task-tag stamping, and backfill; confirm **no pre-existing test
+  regressed** — especially the Principle II admission/swap tests (SC-147/149). Add two boundary
+  checks: (a) **FR-273** — assert the feature adds **no new always-on resident process** and stays
+  within the VRAM/RAM/disk budget (Principle III); (b) **FR-275** — assert the auto-promote/retraining
+  policy path **cannot** switch the served LLM (served-LLM switching is operator-initiated only).
 - [ ] **T486** [P] Console gate: `npm run lint` + `npm run build` green; allow-list conformance grep —
   every gateway call in `ui/` resolves to a `gw-allowlist.ts` entry and the delta equals the contract
   (ideally empty — reuse preferred) (FR-272).

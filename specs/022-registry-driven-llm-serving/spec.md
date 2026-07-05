@@ -169,7 +169,7 @@ Switching the served LLM while another model is resident follows the platform's 
 
 - **Text-generation serving target**: the registry `@serving` pointer for the LLM task, resolving to a specific model + version and the artifact set required to serve it (a full model artifact, **or** a base artifact + a LoRA adapter artifact).
 - **LLM version**: a registered text-generation version; either a *full-model* kind or an *adapter* kind. Carries task and serving-engine descriptors, a base reference (for adapters), and lineage (parent, dataset, base).
-- **Base reference**: how an adapter names the base it applies to, such that the base is resolvable at serve time from a known/registered artifact without operator entry.
+- **Base reference**: how an adapter names the base it applies to — resolving at serve time to a **registered base model version** (a full-model text-generation version; see data-model.md), without operator entry.
 - **Served identity**: the model name + version currently resident and producing inference — the single source of truth reported by serving status and stamped on each recorded prediction.
 
 ## Success Criteria *(mandatory)*
@@ -179,7 +179,7 @@ Switching the served LLM while another model is resident follows the platform's 
 - **SC-143**: An operator can change which LLM serves entirely from the console (no host/shell access), and the next inference is produced by the newly-promoted model.
 - **SC-144**: After a promotion, 100% of subsequent inferences are produced by the promoted version until it is changed again (no residual serving of the prior model).
 - **SC-145**: For every served prediction, the recorded model+version equals the model+version that actually produced it — zero mislabeled predictions — so a quality check scores the correct model.
-- **SC-146**: A promoted LoRA fine-tune's distinguishing trained behavior is observable in served inference; promoting back to the base removes it.
+- **SC-146**: A promoted LoRA fine-tune's distinguishing trained behavior — a concrete marker present only in the fine-tune (e.g. a trained response signature the base does not produce) — is observable in served inference; promoting back to the base removes it.
 - **SC-147**: Switching the served LLM never results in two models resident at once — verifiable via lease/VRAM state observed through the switch (Principle II holds).
 - **SC-148**: Every registered valid text-generation version is selectable as a serving target; none is shown as an unusable "no-renderer" placeholder.
 - **SC-149**: The default base LLM continues to serve unchanged — existing single-shot and streaming inference behavior is byte-compatible for the non-adapter path.
