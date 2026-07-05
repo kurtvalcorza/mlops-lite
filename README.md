@@ -5,7 +5,7 @@ register → serve → monitor → retrain — built around a single GPU that ho
 a time under a race-free, in-process admission lock**. A spec-driven (GitHub Spec Kit) reimagining of
 a heavier reference platform, sized to a laptop.
 
-> Status: **merged through increment 019.** Five served modalities (LLM text-generation, vision
+> Status: **merged through increment 020.** Five served modalities (LLM text-generation, vision
 > image-classification, embeddings, ASR, tabular), a multimodal trainer (LLM + vision + embeddings +
 > ASR fine-tuning with lineage/adapter-chaining), a **gated promotion** path (offline eval harness +
 > champion-challenger), **Optuna hyperparameter optimization**, **model-quality monitoring** with
@@ -15,11 +15,10 @@ a heavier reference platform, sized to a laptop.
 > **declarative policy loop** (drift → retrain → gate → promote), and (**018 US4**) durable
 > **relational monitoring/job state on Postgres** — predictions·labels·capture·jobs·policies·suggestions
 > as indexed table reads, replacing the O(N) object scans (a 12k-prediction window resolves in ~40 ms).
-> Constitution
-> `v1.5.0`. Reference stack on MLflow `3.14.0`.
->
-> **In flight:** **020 stack-remediation** (object-store exit, "Bento-ectomy", agent-runtime
-> measurement) is **spec/plan/tasks complete but not yet built** — see the section below.
+> **020 stack-remediation** landed on top: the archived-upstream object store exited to **Garage**
+> (migrated + decommissioned), the serving framework left the children ("Bento-ectomy", byte-identical
+> golden gates), and the agent's HTTP runtime was measured on hardware (verdict: keep-stdlib).
+> Constitution `v1.5.1`. Reference stack on MLflow `3.14.0`.
 >
 > Per-increment detail lives under [`specs/`](specs/) (each has `spec.md` / `plan.md` / `tasks.md`);
 > [`specs/001-mlops-platform/quickstart.md`](specs/001-mlops-platform/quickstart.md) is the run guide.
@@ -38,7 +37,7 @@ flowchart LR
   subgraph Compose["Docker Compose (infra)"]
     GW["FastAPI gateway :8080<br/>infer · embed · transcribe · predict · vision · batch<br/>models(evaluate·compare·gated-promote) · datasets(validate) · runs · studies<br/>monitor(drift · quality · labels) · policies (closed loop)"]
     MLF["MLflow :5500<br/>tracking + registry + traces"]
-    MIN["MinIO :9000<br/>datasets · models · results"]
+    MIN["Garage :3900<br/>datasets · models · results"]
     PG["Postgres :55432<br/>MLflow backend + gateway DB<br/>(US4 relational store:<br/>predictions·labels·capture·jobs·policies·suggestions)"]
     PR["Prometheus :9090"]
     GR["Grafana :3001"]
@@ -88,7 +87,7 @@ thrashes.
 |------|-------|--------------|
 | 3 | **US1** serve | `POST /infer` (+`/infer/stream`) → on-demand GPU LLM inference; `POST /vision/classify` → image classification (**GPU tenant** since 008). The gateway proxies these to the agent's `/engines/llm/…` and `/engines/vision/…`. |
 | 4 | **US2** register | `POST /models` + promote via MLflow aliases; routing resolves the `@serving` version |
-| 5 | **US3** datasets | content-addressed, immutable dataset versions on MinIO |
+| 5 | **US3** datasets | content-addressed, immutable dataset versions on the object store (Garage) |
 | 6 | **US4** fine-tune | pinned dataset → LoRA on the GPU → adapter→GGUF → registered, servable |
 | 7 | **US5** monitor | PSI drift → on breach a retrain is launched; Grafana dashboard |
 
@@ -97,7 +96,7 @@ thrashes.
 | Modality | Serve route | Engine child (adapter) | GPU tenant? | Fine-tune (010) |
 |---|---|---|---|---|
 | text-generation (LLM) | `/infer` | `llm` — `llama.cpp` | yes (on-demand) | PEFT/LoRA → GGUF (US4) |
-| image-classification | `/vision/classify` | `vision` — torch/BentoML | yes (on-demand) | transfer-learning head |
+| image-classification | `/vision/classify` | `vision` — torch (slim FastAPI child) | yes (on-demand) | transfer-learning head |
 | embedding | `/embed` | `embed` — sentence-transformers | **no** (CPU) | sentence-transformers FT |
 | asr | `/transcribe` | `asr` — whisper.cpp (opt-in) | yes (on-demand) | Whisper FT → HF→ggml convert |
 | tabular | `/predict` | `tabular` — LightGBM | **no** (CPU) | doc-only AutoGluon upgrade path |
@@ -226,7 +225,7 @@ torch-free `gpu-host-agent`** — and closed the drift→retrain loop into a dec
 
 New deps are minimal: `pynvml` (in-process NVML, host-only) and `psycopg` (the relational client, in
 the gateway + agent images). **Relational monitoring store (US4, in progress).** The high-churn state
-(predictions, labels, captured-input index) is moving off O(N) MinIO object scans onto the already-resident
+(predictions, labels, captured-input index) is moving off O(N) object-store scans onto the already-resident
 `gateway` Postgres DB: T373 landed `platformlib.store`'s relational client + additive-only schema (the
 predictions⋈labels `window()` that replaces the object scan, write-once labels), with the write-path
 cutovers (quality/labels, jobs/policies/suggestions) following in T374–T376. No broker, no scheduler
@@ -327,7 +326,7 @@ The 001 monitor watches only the **input** side (pure-Python PSI over feature di
 **output/concept-drift** monitoring against ground truth:
 
 - **Prediction logging** — every served prediction is logged fire-and-forget / fail-open with a stable
-  id + resolved version, landing in the MinIO `results` store.
+  id + resolved version, landing in the `results` store.
 - **Delayed labels** — `POST /monitor/labels` attaches ground-truth labels when known; `data/submit_labels.py`
   drives it.
 - **Windowed quality** — `POST /monitor/quality/check` computes per-modality quality over a window,
@@ -353,7 +352,7 @@ champion served**. It is **advisory** — it never gates promotion. Scope = LLM 
 
 - **Offline batch inference** — `POST /batch` (+ `GET /batch/{batch_id}`) scores a registered dataset
   version against a served model as an ephemeral flow on the agent (`training/flows/batch_infer.py`),
-  writing content-addressed results to MinIO. A GPU-backed batch goes **through admission** as a job;
+  writing content-addressed results to the object store. A GPU-backed batch goes **through admission** as a job;
   CPU/tabular batches score off-lease.
 - **Data-validation gates** — lightweight hand-rolled checks (schema/columns, null rate, value ranges,
   label balance, row count) gate `finetune_flow` **before** `train_lora`, and are exposed advisory via
@@ -366,30 +365,34 @@ Every `POST /infer` and `/infer/stream` emits one **MLflow trace** (prompt, para
 experiment. Manual (not autolog — the gateway proxies over `httpx`); *fire-and-forget* + *fail-open* so
 it never slows or blocks inference. Toggles: `MLFLOW_TRACING_ENABLED=0`, `MLFLOW_TRACE_CAPTURE_IO=0`.
 
-## Stack remediation (020 — planned, not yet built)
+## Stack remediation (020 — BUILT)
 
-020 is the 2026-07 post-018 tech-stack review turned into a plan. Nine of eleven layers got keep-verdicts;
-three items are approved for action, and the design pipeline (spec/plan/tasks/analyze) is complete —
-**implementation has not landed**:
+020 turned the 2026-07 post-018 tech-stack review into action. Nine of eleven layers got keep-verdicts;
+the three approved items all landed, validated on hardware (runbook records in `docs/`):
 
-1. **Object-store exit (P1)** — MinIO's OSS edition is archived upstream (no more patches). Replace with
-   a maintained S3-compatible store — default **Garage**, fallback **SeaweedFS** — via a lossless
-   migration with the same bucket/prefix layout and a config-flip rollback.
-2. **"Bento-ectomy" (P2)** — retire the BentoML framework from the vision/embed/tabular children (the
-   agent already owns lifecycle/admission/ports/health since 018); slim single-route children, same
-   byte-compatible routes, model runtimes unchanged.
-3. **Agent HTTP runtime (P2)** — measure the stdlib server on-hardware (SSE, multipart, poll-during-swap)
-   and upgrade to an ASGI server library *inside the same host process* only if a baseline misses.
+1. **Object-store exit (P1, done)** — the archived-upstream store was replaced by **Garage** (v2.3.0,
+   digest-pinned; ~24× lighter at idle): spike-gated, migrated losslessly (540 objects, per-bucket
+   parity, idempotent re-runs), cut over by config flip with a PROVEN rollback, then decommissioned —
+   the running stack contains zero unmaintained components (SC-129: `docker compose config` and a
+   source-tree grep both return zero live references to the retired store).
+2. **"Bento-ectomy" (P2, done)** — the serving framework left the vision/embed/tabular children for
+   slim single-route FastAPI services, gated by per-child golden request/response sets replayed
+   **byte-identical** at the agent boundary; the framework + 20 exclusive transitive deps left the
+   venv (216 → 195 packages), model runtimes unchanged.
+3. **Agent HTTP runtime (P2, decided)** — the on-hardware drill measured both transports under the
+   agent's real duties (stream TTFT/stalls under polling, multipart RTT, mid-stream disconnect,
+   preempt-during-stream): **verdict `keep-stdlib`** — equivalent within noise; the dual-runtime
+   switch is deleted next increment.
 
-No new capability, no new resident service, no new data shape; every externally observable behavior is
-preserved. Until then, MinIO + BentoML + the stdlib agent server remain the running stack.
+No new capability, no new resident service, no new data shape; every externally observable behavior
+was preserved (goldens, suite, and golden flows pass unchanged).
 
 ## Default stack (each stage swappable — Principle V)
 
-MinIO (storage) · MLflow `3.14.0` (tracking + registry + traces) · `llama.cpp` (LLM serving) · BentoML /
-torch (vision) · sentence-transformers (embeddings, CPU) · LightGBM (tabular, CPU) · whisper.cpp (ASR
-serving) · PyTorch + PEFT/LoRA (training, Prefect-structured) · Optuna (hyperparameter search) ·
-pure-Python PSI (input drift) + pure-Python eval/quality metrics + hand-rolled data validation ·
+Garage (storage) · MLflow `3.14.0` (tracking + registry + traces) · `llama.cpp` (LLM serving) · slim
+FastAPI children / torch (vision) · sentence-transformers (embeddings, CPU) · LightGBM (tabular, CPU) ·
+whisper.cpp (ASR serving) · PyTorch + PEFT/LoRA (training, Prefect-structured) · Optuna (hyperparameter
+search) · pure-Python PSI (input drift) + pure-Python eval/quality metrics + hand-rolled data validation ·
 Prometheus + Grafana (observability) · a stdlib-only host agent (`pynvml` for NVML). Postgres backs
 MLflow and, since T373, hosts the relational monitoring store the high-churn state is migrating onto
 (018 US4, in progress).
@@ -399,7 +402,7 @@ Three components diverge from the plan's first-choice tools, each justified by *
 
 | Plan default | Used instead | Why |
 |---|---|---|
-| DVC | content-addressing on MinIO | DVC needs git + CLI + a commit per version; ill-fitting for an API flow |
+| DVC | content-addressing on the object store | DVC needs git + CLI + a commit per version; ill-fitting for an API flow |
 | Prefect *server* | Prefect *ephemeral* + host agent | an always-on server is weight MLflow already covers |
 | Evidently | pure-Python PSI | Evidently's pandas/scipy/plotly would bloat the gateway image on the constrained C: drive |
 
@@ -501,4 +504,4 @@ and served live at `http://localhost:8080/docs`.
 | 017 | swap-on-demand | Operator-confirmed preemptive GPU swap for serving (`preempt=true`; training never preempted; default = 008 refuse-if-held) |
 | 018 | platform-rearchitecture | GPU host agent (in-process admission, T364), one lifecycle + thin adapters, transactional swap, durable job journal, jobs fold-in (T362), shared `platformlib` contracts, closed declarative policy loop; constitution v1.5.0 |
 | 019 | review-remediation-018 | Ten verified fixes to the 018 fold-in: journal durability, admission self-recovery, swap target-probe, idempotent retrains, lifecycle race, single-flight swap, contract conformance, per-engine budgets, deterministic verdict selection |
-| 020 | stack-remediation | **Draft** — object-store exit (MinIO → Garage/SeaweedFS), "Bento-ectomy", agent HTTP-runtime measurement; no new capability |
+| 020 | stack-remediation | **Built + [HW]-validated** — object-store exit (→ Garage; decommissioned), "Bento-ectomy" (byte-identical golden gates; venv 216→195), agent-runtime verdict keep-stdlib; no new capability |

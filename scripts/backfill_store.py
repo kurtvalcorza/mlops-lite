@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""One-shot backfill of pre-US4 MinIO objects into the gateway Postgres store (018 T376, FR-187).
+"""One-shot backfill of pre-US4 Garage objects into the gateway Postgres store (018 T376, FR-187).
 
-Before US4 the monitoring/job state rode MinIO objects; T373–T375 cut the live paths over to the
+Before US4 the monitoring/job state rode Garage objects; T373–T375 cut the live paths over to the
 resident `gateway` Postgres. This migrates the EXISTING objects on a live box into their tables so
 history survives the cutover, then leaves the objects in place (the bodies are still the `payload_ref`
 / `input_ref` targets the DB rows point at — only the *index* moved).
@@ -276,7 +276,7 @@ def _print_report(report: dict) -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Backfill pre-US4 MinIO objects into the gateway Postgres store (idempotent).")
+        description="Backfill pre-US4 Garage objects into the gateway Postgres store (idempotent).")
     ap.add_argument("--dsn", default=None, help="gateway DB DSN (default: store.dsn() from env)")
     ap.add_argument("--journal", default=None,
                     help="legacy journal.jsonl path (default: STATE_DIR/journal.jsonl)")

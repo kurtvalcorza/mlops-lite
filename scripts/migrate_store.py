@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Object-store migration mirror (020 T403, US1) — contracts/store-migration.md.
 
-A boto3 source→dest mirror for the MinIO→Garage exit (FR-199/FR-200), deliberately NOT
-rclone/`mc` (research R3: zero new tools; `mc` is the dying store's own archived tooling):
+A boto3 source→dest mirror for the 020 store-exit migration (FR-199/FR-200), deliberately NOT
+rclone/`mc` (research R3: zero new tools; the retired store's own mirror tooling was archived upstream):
 
   * **Idempotent** — an object is copied only if absent at dest or its size differs; a clean
     re-run reports `copied == 0` on every bucket (SC-127).
@@ -56,7 +56,7 @@ def make_client(endpoint: str, access_key: str, secret_key: str, region: str = "
 
 def list_bucket(client, bucket: str) -> dict:
     """Full {key: size} inventory, paging past the 1,000-key ceiling. Missing bucket fails loud
-    (bootstrap owns bucket creation — garage-init / createbuckets — not this tool)."""
+    (bootstrap owns bucket creation — garage-init — not this tool)."""
     inventory = {}
     token = None
     while True:
@@ -70,7 +70,7 @@ def list_bucket(client, bucket: str) -> dict:
             if code in ("NoSuchBucket", "404"):
                 raise SystemExit(
                     f"bucket '{bucket}' missing on {client.meta.endpoint_url} — run the store "
-                    "bootstrap first (garage-init / createbuckets); this tool never creates buckets"
+                    "bootstrap first (garage-init); this tool never creates buckets"
                 ) from e
             raise
         for obj in page.get("Contents", []) or []:

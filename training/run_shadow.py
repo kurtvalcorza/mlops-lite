@@ -16,7 +16,7 @@ Contract (kept dead simple so the daemon parses it robustly even if the process 
   exit:   0 on success, 1 on a handled failure. A death WITHOUT a result file (hard CUDA/OOM crash) is
           surfaced by the daemon as a failed replay with the captured log tail.
 
-`replay_job` persists the advisory verdict itself (via the gateway's shadow orchestration → MinIO),
+`replay_job` persists the advisory verdict itself (via the gateway's shadow orchestration → Garage),
 so the result file is only for the agent's in-memory job record. This process touches no GPU
 admission itself — the agent holds the single job slot (`kind="job"`) for the whole replay and this
 process is its child, so the one-GPU-tenant invariant covers it (T364).

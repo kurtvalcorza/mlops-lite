@@ -79,7 +79,7 @@ def test_score_challenger_length_mismatch_raises():
 
 
 def test_build_challenger_predict_fn_rejects_unsupported_modality_before_any_fetch():
-    # An out-of-scope modality is refused BEFORE the registry/MinIO fetch (fail-fast, no network): if the
+    # An out-of-scope modality is refused BEFORE the registry/Garage fetch (fail-fast, no network): if the
     # ordering regressed, this would hang trying to reach MLflow instead of raising.
     m._version_source_and_tags = lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("registry must not be consulted for an unsupported modality"))

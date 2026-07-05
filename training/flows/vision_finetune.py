@@ -1,7 +1,7 @@
 """Vision transfer-learning fine-tune flow (010 US1, T183/T184 — FR-088/FR-089/FR-098).
 
 The **lowest-risk** new modality: torchvision is already a frozen dep, and 009's BentoML vision service
-already loads a `model.pt` carrying `{state_dict, categories}` from the MinIO `models` bucket — so this
+already loads a `model.pt` carrying `{state_dict, categories}` from the Garage `models` bucket — so this
 flow fine-tunes *into that exact shape*. Default approach is conservative transfer learning:
 
   load a torchvision backbone (ImageNet-pretrained) → **freeze the backbone** → **swap the classifier
@@ -159,7 +159,7 @@ def _train(images, labels, categories, *, backbone, epochs, lr, batch_size, unfr
 
 def _register(output_name, state_dict, categories, run_id, *, backbone, dataset_name,
               dataset_version, base_model, parent_version, parent_run_id, device):
-    """Write `model.pt` {state_dict, categories} (the 009 BentoML load shape), upload to MinIO, and
+    """Write `model.pt` {state_dict, categories} (the 009 BentoML load shape), upload to Garage, and
     register an MLflow version tagged for image-classification serving + lineage (FR-089)."""
     import torch
     from mlflow.exceptions import MlflowException

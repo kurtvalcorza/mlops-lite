@@ -9,7 +9,8 @@ namespace (so the unpublished admin port is 127.0.0.1:3903). The contract is unc
 (contracts/store-migration.md section "bootstrap"): idempotent layout assign/apply -> four
 buckets -> one key -> per-bucket read+write grants, and the store-minted S3 key pair is
 EMITTED on stdout for `scripts/gen_secrets --record-garage` to record into .env
-(credential direction REVERSED vs MinIO: the store mints the key, the operator records it).
+(credential direction REVERSED vs the retired store, which took an operator-minted pair:
+here the store mints the key and the operator records it).
 
 Re-running on an initialized node changes nothing and exits 0.
 """

@@ -1,6 +1,6 @@
 """Per-model policy store + promotion suggestions (018 US3 → US4 T375 — FR-179/182/183).
 
-US4 (T375): the policy state moves off MinIO objects onto the resident Postgres `gateway` DB via
+US4 (T375): the policy state moves off Garage objects onto the resident Postgres `gateway` DB via
 `platformlib.store`. `list_policies`/`list_suggestions` were the O(N) object scans SC-111 kills — they
 are now indexed table reads. Per-model layout:
 
@@ -11,7 +11,7 @@ are now indexed table reads. Per-model layout:
 
 Failure posture (contract): policy reads AND writes fail LOUD (`PolicyStoreError` → 502) — these are
 operator/scheduler operations that must never silently succeed or vanish. `resolve_dataset_version`
-still reads dataset manifests from MinIO (dataset artifacts are object-store, not US4 state).
+still reads dataset manifests from Garage (dataset artifacts are object-store, not US4 state).
 
 House pattern: pure logic + an injectable `_store`/`_conn()` seam (tests swap a FakeStore in, like
 quality.py); a store blip self-heals via identity-scoped `_invalidate_conn`.

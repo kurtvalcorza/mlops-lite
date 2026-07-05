@@ -3,7 +3,7 @@
 `finetune_flow` runs `validate_dataset_or_raise` BEFORE the MLflow run / `train_lora`, so a failing
 dataset is rejected fast (no GPU acquisition, no wasted MLflow run). This pins the gate function: a
 broken dataset raises `DatasetValidationError` (carrying the report); a clean one returns a passing
-report. The gate runs against an injected fake store, so no live MinIO/GPU is needed.
+report. The gate runs against an injected fake store, so no live Garage/GPU is needed.
 """
 import importlib.util
 import io

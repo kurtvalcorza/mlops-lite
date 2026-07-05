@@ -162,7 +162,7 @@ def _s3_bucket_key(source: str):
 
 
 def _download_source(source: str) -> bytes:
-    """Fetch a registry `s3://bucket/key` artifact from MinIO → bytes (mirrors vision `_warm_start`).
+    """Fetch a registry `s3://bucket/key` artifact from Garage → bytes (mirrors vision `_warm_start`).
     Used for the small in-memory vision `model.pt`; disk-backed GGUF/ggml stream via `_fetch_to_tmp`."""
     from _common import s3_client
 

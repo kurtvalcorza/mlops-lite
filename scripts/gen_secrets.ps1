@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-  Generate local secrets into .env (T046, FR-017): random MinIO/Postgres/Grafana credentials and
-  a gateway API key. No secret is ever committed — .env is git-ignored; .env.example only documents.
+  Generate local secrets into .env (T046, FR-017): random Postgres/Grafana credentials, the
+  Garage node secrets, and a gateway API key. No secret is ever committed — .env is git-ignored; .env.example only documents.
 
 .DESCRIPTION
   Writes a fresh .env (non-secret defaults + generated secrets). Refuses to overwrite an existing
   .env unless -Force, so re-runs don't silently rotate live credentials. Prints the API key once.
 
-  020 (T401) modes for the Garage store, whose credential flow is REVERSED vs MinIO
-  (contracts/store-migration.md §bootstrap — the store MINTS the S3 key pair, the operator
-  records it; MinIO's pair was generated here and fed INTO the store):
+  020 (T401) modes for the Garage store, whose credential flow is REVERSED vs the retired
+  store (contracts/store-migration.md §bootstrap — Garage MINTS the S3 key pair and the operator
+  records it; the old store took a pair generated here and fed INTO it):
     -EnsureGarageSecrets  append GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN to an existing .env
                           if missing (needed BEFORE garage first boots; idempotent)
     -RecordGarage         run the idempotent garage-init one-shot and record the emitted
@@ -103,8 +103,6 @@ if ((Test-Path $envPath) -and -not $Force) {
     exit 0
 }
 
-$minioUser  = "mlops-" + (New-Secret 6)
-$minioPass  = New-Secret 24
 $pgPass     = New-Secret 24
 $grafPass   = New-Secret 18
 $apiKey     = "mll_" + (New-Secret 24)
@@ -121,15 +119,9 @@ POSTGRES_PASSWORD=$pgPass
 POSTGRES_DB=mlflow
 POSTGRES_PORT=55432
 
-# MinIO (S3-compatible artifact + dataset storage) — generated credentials (no minioadmin).
-MINIO_ROOT_USER=$minioUser
-MINIO_ROOT_PASSWORD=$minioPass
-MINIO_API_PORT=9000
-MINIO_CONSOLE_PORT=9001
-
-# Garage (020 US1) — replacement S3 store. RPC secret + admin token are generated here;
-# the S3 key pair is store-minted AFTER bootstrap: run scripts/gen_secrets -RecordGarage
-# once `docker compose up -d garage garage-init` has run.
+# Garage (S3 artifact + dataset storage) — RPC secret + admin token are generated here; the
+# S3 key pair is store-minted AFTER bootstrap: run scripts/gen_secrets -RecordGarage once
+# `docker compose up -d garage garage-init` has run.
 GARAGE_S3_PORT=3900
 GARAGE_RPC_SECRET=$garageRpc
 GARAGE_ADMIN_TOKEN=$garageTok

@@ -1,6 +1,6 @@
 """BentoML vision service integration test (T022, US1 — vision half of FR-002).
 
-Classifies an image through the gateway → BentoML service (model packaged from the MinIO models
+Classifies an image through the gateway → BentoML service (model packaged from the Garage models
 bucket). Asserts a well-formed top-5 result. SKIPs cleanly if the bento isn't running.
 
 Requires: stack up + the agent's vision child (serving/children/run.sh — spawned on demand;

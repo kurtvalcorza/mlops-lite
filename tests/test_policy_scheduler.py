@@ -458,7 +458,7 @@ def test_transient_store_error_on_retry_keeps_the_park_and_reservation():
         working_launch = sched.launch_fn
 
         def store_down(policy, dataset_name, dataset_version):
-            raise policies.PolicyStoreError("minio down")
+            raise policies.PolicyStoreError("garage down")
 
         sched.launch_fn = store_down
         acts = sched.tick(now=1061.0)

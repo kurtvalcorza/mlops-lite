@@ -2,9 +2,9 @@
 # Re-seed the MLflow registry after a fresh-backend reset (007 FR-055). The fresh-volume reset drops the
 # MLflow Postgres store, so the registry pointers must be recreated for the platform to resolve again:
 #   - serving LLM: register + promote `@serving` so `/infer`'s registry_version resolves,
-#   - vision model: re-register the version (the model.pt object survives on MinIO, but its registry
+#   - vision model: re-register the version (the model.pt object survives on Garage, but its registry
 #     entry lived in pgdata) — seed_vision_model.py always creates a fresh version, so this re-registers.
-# Datasets need NO re-seed (content-addressed on MinIO). Re-runnable: each run registers a fresh version
+# Datasets need NO re-seed (content-addressed on Garage). Re-runnable: each run registers a fresh version
 # and promotes THAT version to @serving (older versions remain as registry history, none orphaned).
 #
 # Run in WSL after the stack is up:  bash scripts/reseed_registry.sh
@@ -22,11 +22,11 @@ GW="http://localhost:${GATEWAY_PORT:-8080}"
 KEY="$(printf %s "${GATEWAY_API_KEYS:-}" | cut -d, -f1)"
 [ -n "$KEY" ] || { echo "[FAIL] GATEWAY_API_KEYS not set in .env" >&2; exit 1; }
 
-# 1. Vision model -> MinIO + a fresh MLflow registry version.
-echo "[1/2] re-seeding vision model (MinIO object reused; registry version recreated) ..."
-export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-$MINIO_ROOT_USER}"
-export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-$MINIO_ROOT_PASSWORD}"
-export MLFLOW_S3_ENDPOINT_URL="http://localhost:${MINIO_API_PORT:-9000}"
+# 1. Vision model -> Garage + a fresh MLflow registry version.
+echo "[1/2] re-seeding vision model (Garage object reused; registry version recreated) ..."
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-$GARAGE_ACCESS_KEY_ID}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-$GARAGE_SECRET_ACCESS_KEY}"
+export MLFLOW_S3_ENDPOINT_URL="http://localhost:${GARAGE_S3_PORT:-3900}"
 export MLFLOW_TRACKING_URI="http://localhost:${MLFLOW_PORT:-5500}"
 "$PY" "$REPO/scripts/seed_vision_model.py" || echo "  [warn] vision seed failed (non-fatal)"
 
@@ -52,4 +52,4 @@ prom_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GW/models/$NAME/pr
   -H "X-API-Key: $KEY" -H "Content-Type: application/json" -d "{\"version\":\"$ver\"}")"
 [ "$prom_code" = "200" ] && echo "  promoted $NAME v$ver -> @serving" || { echo "  [FAIL] promote -> HTTP $prom_code" >&2; exit 1; }
 
-echo "Re-seed complete — serving LLM @serving + vision registered; datasets intact on MinIO."
+echo "Re-seed complete — serving LLM @serving + vision registered; datasets intact on Garage."

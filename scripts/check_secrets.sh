@@ -8,9 +8,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # High-signal patterns for a real, committed credential (not prose mentioning one):
-#   - "minioadmin"/:-minioadmin/=minioadmin : the shipped MinIO default used as a VALUE (FR-017)
-#   - mll_<24+ alnum>                        : a generated gateway API key
-PATTERNS='("minioadmin"|'"'"'minioadmin'"'"'|:-minioadmin|=minioadmin|mll_[A-Za-z0-9]{24,})'
+#   - mll_<24+ alnum>  : a generated gateway API key
+#   - GK<26 hex>=      : a Garage access-key id used as a VALUE (store-minted at bootstrap and
+#                        recorded only into the git-ignored .env — never legitimately committed)
+# (The retired store's shipped-default-credential pattern left with it at 020 T406: Garage has
+# no shipped default — keys exist only after the store mints them.)
+PATTERNS='(mll_[A-Za-z0-9]{24,}|=GK[0-9a-f]{26})'
 
 # Never scan these: the git-ignored secret files (they legitimately hold secrets), the documented
 # template (placeholders), this guard, and the secret generators (which produce keys at runtime).

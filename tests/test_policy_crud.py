@@ -2,7 +2,7 @@
 
 Offline, GPU-free: the contract validation (structural, write-time, structured errors — the spec
 edge case "policy misconfiguration is rejected at declaration time, never discovered at breach
-time") plus the MinIO-backed store with a fake S3.
+time") plus the Garage-backed store with a fake S3.
 """
 import json
 import os

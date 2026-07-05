@@ -2,7 +2,7 @@
 """Seed a tabular model into the platform (009 US4, T171 — FR-080/086).
 
 Trains a small **LightGBM** binary classifier on synthetic numeric data (native Booster API — no
-scikit-learn dep), dumps it as a single joblib artifact {"booster", "features"} to the MinIO `models`
+scikit-learn dep), dumps it as a single joblib artifact {"booster", "features"} to the Garage `models`
 bucket, and registers + promotes the version with `task=tabular`, `serving_engine=bentoml` tags so the
 gateway routes off registry metadata and the Infer tab renders the predict panel from it.
 
@@ -22,7 +22,7 @@ from botocore.client import Config
 from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
-S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:3900")
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("TABULAR_MODEL", "tabular-lgbm")

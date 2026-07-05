@@ -1,6 +1,6 @@
 name: mlops-lite
 
-# Phase 1–2 foundational stack: Postgres + MinIO + MLflow (registry) + gateway + observability.
+# Phase 1–2 foundational stack: Postgres + Garage + MLflow (registry) + gateway + observability.
 # GPU services (serving/training) are added later via docker-compose.gpu.yml.
 
 services:
@@ -23,48 +23,10 @@ services:
       timeout: 5s
       retries: 12
 
-  minio:
-    # 007 US2: pinned (was :latest). MinIO CVE-2025-62506 (session-policy bypass) is unpatched on Docker
-    # Hub's frozen 2025-09-07 tag; the fix ships as the quay.io hotfix of that release
-    # (RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 — go1.26.1, Apr-2026, console retained). Pinned BY
-    # DIGEST (not the hotfix tag) for immutability + guaranteed resolution on a fresh host — `docker
-    # manifest inspect` confirms this digest (the hotfix's amd64 manifest list) is published on quay.
-    # Codex P1/P2, PR#3. Same behavior as the validated 2025-09-07, just patched.
-    image: quay.io/minio/minio@sha256:cf3dadcfa1fb0324f43958bad1abba986d53c4ecc04d4d50b46c7dcda28bd3cd
-    command: server /data --console-address ":9001"
-    environment:
-      # Secrets — no shipped minioadmin/minioadmin defaults (FR-017). Run scripts/gen_secrets.
-      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
-      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
-    volumes:
-      - miniodata:/data
-    ports:
-      # 005 US1 (FR-041): loopback-only by default (BIND_ADDR override for LAN).
-      - "${BIND_ADDR:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
-      - "${BIND_ADDR:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
-
-  # One-shot: create the platform buckets, then exit (T008).
-  createbuckets:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z  # 007 US2: pin (was :latest, captured T118)
-    depends_on:
-      minio:
-        condition: service_started
-    environment:
-      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
-      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
-        echo 'waiting for minio...'; sleep 2;
-      done;
-      mc mb -p local/datasets local/models local/results local/mlflow;
-      echo 'buckets ready';
-      "
-
-  # 020 US1 (T401): Garage — the maintained S3-compatible replacement store, up BESIDE MinIO
-  # for the migration window (no cutover here: the env seam still points at MinIO until T405;
-  # exactly one store is authoritative at any instant). Single node, replication_factor=1,
-  # data+metadata on the named volume. Pinned by digest (house rule) — v2.3.0.
+  # 020 US1: Garage — THE platform object store (T401 beside the incumbent; authoritative
+  # since the T405 cutover; the retired store decommissioned at T406). Single node,
+  # replication_factor=1, data+metadata on the named volume. Pinned by digest (house rule) —
+  # v2.3.0.
   garage:
     image: dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
     environment:
@@ -80,12 +42,12 @@ services:
       # unpublished — garage-init reaches the admin API by sharing this network namespace.
       - "${BIND_ADDR:-127.0.0.1}:${GARAGE_S3_PORT:-3900}:3900"
 
-  # One-shot bootstrap (the createbuckets analog for Garage): layout → 4 buckets → key →
+  # One-shot bootstrap: layout → 4 buckets → key →
   # per-bucket read+write grants, all idempotent, via the token-authed Admin API. The garage
   # image is scratch-based (no shell to script the CLI in — research R2's sketch adjusted), so
   # this runs infra/garage/init.sh from a pinned python:3.12-alpine sharing garage's netns.
   # It EMITS the store-minted S3 key pair; scripts/gen_secrets --record-garage records it into
-  # .env (credential direction REVERSED vs MinIO — contracts/store-migration.md §bootstrap).
+  # .env (credential direction: the STORE mints the pair — contracts/store-migration.md §bootstrap).
   garage-init:
     image: python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df
     depends_on:
@@ -104,12 +66,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      createbuckets:
+      garage-init:
         condition: service_completed_successfully
     environment:
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
-      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
+      MLFLOW_S3_ENDPOINT_URL: http://garage:3900
+      # The store-minted Garage pair (scripts/gen_secrets --record-garage) — FR-017 fail-fast.
+      AWS_ACCESS_KEY_ID: "${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env (scripts/gen_secrets --record-garage)}"
+      AWS_SECRET_ACCESS_KEY: "${GARAGE_SECRET_ACCESS_KEY:?set GARAGE_SECRET_ACCESS_KEY in .env (scripts/gen_secrets --record-garage)}"
       AWS_DEFAULT_REGION: us-east-1
     command: >
       mlflow server
@@ -138,7 +101,7 @@ services:
     depends_on:
       mlflow:
         condition: service_started
-      createbuckets:
+      garage-init:
         condition: service_completed_successfully
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -166,10 +129,10 @@ services:
       # since host.docker.internal can't cross WSL distros.
       AGENT_URL: ${AGENT_URL:-http://host.docker.internal:8100}
       SERVING_MODEL: ${SERVING_MODEL:-qwen2.5-7b-instruct-q4_k_m}
-      # MinIO/S3 for the dataset registry (US3).
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (run scripts/gen_secrets)}"
-      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (run scripts/gen_secrets)}"
+      # Garage/S3 for the dataset registry (US3) — the store-minted pair (T406 cutover).
+      MLFLOW_S3_ENDPOINT_URL: http://garage:3900
+      AWS_ACCESS_KEY_ID: "${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env (scripts/gen_secrets --record-garage)}"
+      AWS_SECRET_ACCESS_KEY: "${GARAGE_SECRET_ACCESS_KEY:?set GARAGE_SECRET_ACCESS_KEY in .env (scripts/gen_secrets --record-garage)}"
       AWS_DEFAULT_REGION: us-east-1
       # 011 eval harness — the held-out benchmark fixtures are bind-mounted read-only (not baked
       # into the image) because they're operator-extendable by design: drop a new fixture in and
@@ -206,7 +169,7 @@ services:
   grafana:
     # 007 US2: pinned (was :latest). `grafana/grafana:13.1.0` IS a published Docker Hub tag (verified by a
     # clean untag+re-pull), but pinned BY DIGEST for immutability + to make the "is this tag published"
-    # question moot (mirrors the MinIO digest pin). Digest = the 13.1.0 manifest list. Codex P1, PR#3.
+    # question moot (digest-pin house rule). Digest = the 13.1.0 manifest list. Codex P1, PR#3.
     image: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
@@ -232,6 +195,5 @@ services:
 
 volumes:
   pgdata:
-  miniodata:
   garagedata:
   grafanadata:

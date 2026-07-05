@@ -24,7 +24,7 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.models import mobilenet_v2
 
-S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:3900")
 BUCKET = os.getenv("MODELS_BUCKET", "models")
 NAME = os.getenv("VISION_MODEL", "vision-mobilenet")
 KEY = os.getenv("VISION_MODEL_KEY", f"{NAME}/v1/model.pt")

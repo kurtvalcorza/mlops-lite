@@ -9,7 +9,7 @@ signal — distribution drift between a reference and a current dataset — with
 PSI per feature: bin the reference into deciles, compare the current distribution's bin shares.
   PSI < 0.1  no shift · 0.1–0.25 moderate · > 0.25 significant.
 Dataset drift is declared when any numeric feature's PSI crosses the threshold (default 0.25).
-Reports are written to the MinIO `results` bucket and the max score is exported as a metric.
+Reports are written to the Garage `results` bucket and the max score is exported as a metric.
 """
 import csv
 import io
@@ -20,7 +20,7 @@ import time
 
 from prometheus_client import Gauge
 
-from .datasets import _s3  # reuse the MinIO/S3 client
+from .datasets import _s3  # reuse the Garage/S3 client
 
 DATASETS_BUCKET = os.getenv("DATASETS_BUCKET", "datasets")
 RESULTS_BUCKET = os.getenv("RESULTS_BUCKET", "results")
@@ -35,7 +35,7 @@ class MonitorError(Exception):
 
 
 def _load_numeric(name: str, version: str) -> dict:
-    """Pull a CSV dataset version from MinIO → {column: [floats]} (numeric columns only)."""
+    """Pull a CSV dataset version from Garage → {column: [floats]} (numeric columns only)."""
     try:
         raw = _s3().get_object(Bucket=DATASETS_BUCKET, Key=f"{name}/{version}/data")["Body"].read()
     except Exception as e:

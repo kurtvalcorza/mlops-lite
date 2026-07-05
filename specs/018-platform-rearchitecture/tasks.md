@@ -147,7 +147,7 @@ SC-106..110 at completion.
 - [x] **T365** [US2] **[HW]** On-hardware sweep SC-106..110 per quickstart (process count,
   latency parity vs runbook baselines, swap-contention stress incl. `scripts/swap_stress.py`,
   restart-journal drill, gateway-down scrape + zero-fork watch); record results in
-  `docs/on-hardware-validation-018.md`.
+  `docs/on-hardware-validation.md`.
 
 **Checkpoint**: 2 resident native processes; all five modalities via the agent; suite green.
 
@@ -192,7 +192,7 @@ runs against trainer *or* agent jobs surface.
   retrain within one interval (with the FR-163 failed-launch/cooldown-release retry seen live) →
   registered + gate-scored → **OPEN promotion suggestion** (green candidate 0.25 > incumbent 0.20),
   zero manual steps between detection and suggestion; a not-green candidate was correctly withheld
-  (FR-183). Recorded in `docs/on-hardware-validation-018.md`; artifacts cleaned up.
+  (FR-183). Recorded in `docs/on-hardware-validation.md`; artifacts cleaned up.
 
 **Checkpoint**: Principle IV loop closed; `manual` default verified byte-for-byte.
 
@@ -229,7 +229,7 @@ runs against trainer *or* agent jobs surface.
   intact relational history (agent hydrates + `mark_interrupted` flips the crash-orphan). **Found +
   fixed** a real crash-loop: the native agent couldn't resolve the in-container `postgres` host for
   its T375-B DB dependency (660 restarts) — `hostagent/run.sh` now sets `GATEWAY_DB_HOST/PORT` to the
-  host-published port. Recorded in `docs/on-hardware-validation-018.md`.
+  host-published port. Recorded in `docs/on-hardware-validation.md`.
 
 **Checkpoint**: no O(N) object scans on any monitoring path; restarts lose nothing.
 

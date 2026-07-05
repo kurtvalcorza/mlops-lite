@@ -6,8 +6,8 @@ III, Lightweight Footprint); the decorators give run structure + retries and mak
 for the US5 drift->retrain trigger. If Prefect isn't importable, the decorators degrade to no-ops
 so the flow still runs.
 
-Pipeline: pull a pinned dataset version from MinIO -> PEFT/LoRA fine-tune a small base model ->
-log params/metrics to MLflow -> convert the adapter to GGUF (llama.cpp) -> upload to MinIO ->
+Pipeline: pull a pinned dataset version from Garage -> PEFT/LoRA fine-tune a small base model ->
+log params/metrics to MLflow -> convert the adapter to GGUF (llama.cpp) -> upload to Garage ->
 register a new MLflow model version tagged with the run + dataset version (feeds US2).
 
 A small base (default Qwen2.5-0.5B-Instruct) keeps the demo fast and within the VRAM budget
@@ -48,7 +48,7 @@ except Exception:  # Prefect absent → no-op decorators, plain prints
 
 # --- Config (env-overridable) -----------------------------------------------------------------
 MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500")
-S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+S3_ENDPOINT = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:3900")
 DATASETS_BUCKET = os.getenv("DATASETS_BUCKET", "datasets")
 MODELS_BUCKET = os.getenv("MODELS_BUCKET", "models")
 LLAMA_DIR = os.getenv("LLAMA_DIR", os.path.expanduser("~/llama.cpp"))
@@ -105,7 +105,7 @@ def validate_dataset_or_raise(dataset_name: str, dataset_version: str) -> dict:
 
 @task
 def fetch_dataset(name: str, version: str) -> list:
-    """Pull the pinned dataset version from MinIO and parse JSONL instruction/response pairs."""
+    """Pull the pinned dataset version from Garage and parse JSONL instruction/response pairs."""
     raw = _s3().get_object(Bucket=DATASETS_BUCKET, Key=f"{name}/{version}/data")["Body"].read()
     rows = []
     for line in raw.decode("utf-8").splitlines():
@@ -212,7 +212,7 @@ def convert_to_gguf(adapter_dir: str, base_model: str, out_path: str) -> str:
 @task
 def register_version(output_name: str, gguf_path: str, run_id: str,
                      base_model: str, dataset_name: str, dataset_version: str) -> dict:
-    """Upload the GGUF adapter to MinIO and register a new MLflow model version (feeds US2)."""
+    """Upload the GGUF adapter to Garage and register a new MLflow model version (feeds US2)."""
     from mlflow.exceptions import MlflowException
     from mlflow.tracking import MlflowClient
 

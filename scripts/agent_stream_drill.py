@@ -32,7 +32,7 @@ import time
 from urllib.parse import urlparse
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RUNBOOK = os.path.join(REPO, "docs", "on-hardware-validation-018.md")
+RUNBOOK = os.path.join(REPO, "docs", "on-hardware-validation.md")
 
 
 def _conn(agent_url: str, timeout: float):

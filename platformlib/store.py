@@ -6,7 +6,7 @@ Two sides, one module:
     `gateway/app/quality.py` and `gateway/app/datasets.py`, promoted to one shared home (review
     §4.5) — a cached client and **paginated** listings (no silent truncation past 1000 objects).
   - **Relational store** (US4, T373 — contracts/store-schema.md): the high-churn monitoring state
-    (predictions, labels, capture index, jobs, policies, suggestions) moves off O(N) MinIO object
+    (predictions, labels, capture index, jobs, policies, suggestions) moves off O(N) Garage object
     scans onto the resident Postgres `gateway` DB. One indexed predictions⋈labels window join
     replaces the per-request object listing (FR-186, SC-111): a window over 10k+ predictions
     resolves in well under the 5 s the object scan took.
@@ -53,7 +53,7 @@ def s3_client():
                 _client = boto3.client(
                     "s3",
                     endpoint_url=os.getenv("S3_ENDPOINT_URL")
-                    or os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000"),
+                    or os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://garage:3900"),
                     aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                     aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
                     region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
@@ -357,7 +357,7 @@ def has_captures(conn, modality: str) -> bool:
 # US3 policy state (US4 T375) — policies + queue-of-one pending retrain + check status + suggestions
 # ==================================================================================================
 #
-# The pre-US4 policy state rode MinIO objects (policies/*.json + policies/_pending/ + policies/_status/
+# The pre-US4 policy state rode Garage objects (policies/*.json + policies/_pending/ + policies/_status/
 # + suggestions/*.json); `list_policies`/`list_suggestions` LISTED + read every object (the O(N) scan
 # SC-111 kills). Here they become indexed table reads. Timestamps in the records stay epoch FLOATS (the
 # UI + the pre-US4 shape) — the timestamptz columns exist for ordering; the helpers convert at the seam.

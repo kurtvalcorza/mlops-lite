@@ -1,4 +1,4 @@
-"""020 T403 — scripts/migrate_store.py (the MinIO→Garage mirror, contracts/store-migration.md).
+"""020 T403 — scripts/migrate_store.py (the 020 store-exit mirror, contracts/store-migration.md).
 
 Two-FakeS3 seams (house style — the fakes model the boto3 client surface the tool actually
 touches, including >1,000-key pagination and 404-shaped ClientErrors), so every guarantee is
