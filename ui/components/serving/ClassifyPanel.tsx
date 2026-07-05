@@ -12,8 +12,15 @@ type VisionResp = { predictions: Pred[]; device?: string; model?: string };
 // image-classification renderer (009 US1): drop an image → top-5. Lease-governed (008 — one model in
 // VRAM). 017/A2: when another *serving* model (LLM/ASR) holds the lease, classify is no longer a dead
 // end — it offers a cost-stating "Swap & classify" that, on confirm, sends preempt=true so the gateway
-// evicts the resident model and loads vision (sequential, one model in VRAM). A **training** holder is
-// never preemptable, so that case keeps the 008/A1 disabled-with-hint. Vision holding the lease is fine.
+// evicts the resident model and loads vision (sequential, one model in VRAM). Vision holding the
+// lease is fine. 021 review: eligibility is an ALLOWLIST of swappable *serving* tenants, not a
+// denylist of `'training'` — a `kind="job"` holder (batch/retrain) surfaces as its own job label,
+// NOT the literal string `'training'`, so a denylist would wrongly mark it swappable and let
+// preempt=true evict an active job (FR-250/Principle II forbid it; mirrors StreamPanel's SWAPPABLE).
+
+// Serving tenants the agent may evict on preempt=true; training + kind="job" holders never swap.
+const SWAPPABLE = new Set(['llm', 'asr']);
+
 export function ClassifyPanel({ serving }: PanelProps) {
   const [preds, setPreds] = useState<Pred[] | null>(null);
   const [device, setDevice] = useState('');
@@ -25,10 +32,10 @@ export function ClassifyPanel({ serving }: PanelProps) {
 
   const holder = serving?.holder;
   const heldByOther = !!holder && holder !== 'vision';
-  const heldByTraining = holder === 'training';
-  // A serving holder (LLM/ASR) is swappable; a training run is not (017 FR-155) → stay disabled.
-  const swappable = heldByOther && !heldByTraining;
-  const blocked = heldByOther && !swappable; // training holder → no swap offered
+  // Allowlist: only a resident *serving* tenant (llm/asr) is swappable; training runs and
+  // kind="job" holders (batch/retrain, which surface as their own job label) stay blocked.
+  const swappable = heldByOther && !!holder && SWAPPABLE.has(holder);
+  const blocked = heldByOther && !swappable; // training / job holder → no swap offered
   const holderLabel = holder === 'llm' ? 'LLM' : holder === 'asr' ? 'ASR' : String(holder);
 
   const handleFile = useCallback(
