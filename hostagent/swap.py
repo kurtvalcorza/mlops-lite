@@ -127,6 +127,9 @@ def reload_serving_llm(manager, *, preempt: bool = False, batch_active_fn=None,
     if rt is None:
         raise PreemptRefused("no llm engine registered")
     adapter = rt.adapter
+    # Snapshot the CURRENT binding before rebind() overwrites it — the same-tenant rollback target
+    # (the model actually serving now). rebind(force=True) then binds the newly resolved target.
+    prior_binding = adapter.snapshot_binding()
     adapter.rebind(force=True)
     ok, reason = adapter.available()
     if not ok:  # probe BEFORE any unload/evict — the working holder stays put (FR-265)
@@ -163,7 +166,21 @@ def reload_serving_llm(manager, *, preempt: bool = False, batch_active_fn=None,
     if result.get("status") not in ("unloaded", "idle"):
         raise SwapError(f"llm did not unload for the model switch: "
                         f"{result.get('detail') or result}")
-    return {"status": "reloaded", "load_ms": rt.ensure_loaded(), **_identity(adapter)}
+    try:
+        load_ms = rt.ensure_loaded()
+    except BaseException:
+        # available() only file-checks; the target can still fail at llama-server spawn/readiness
+        # (corrupt GGUF, OOM, port). The old working model is already evicted, so RESTORE the prior
+        # binding and best-effort reload it — serving is never left empty (data-model.md edge case),
+        # mirroring preempt_for's cross-tenant rollback. ensure_loaded() already freed the slot on
+        # its failure. Propagate the original error so the promote surfaces the switch as failed.
+        adapter.restore_binding(prior_binding)
+        try:
+            rt.ensure_loaded()
+        except Exception:
+            pass  # GPU stays free; the next request cold-loads on demand
+        raise
+    return {"status": "reloaded", "load_ms": load_ms, **_identity(adapter)}
 
 
 def _identity(adapter) -> dict:

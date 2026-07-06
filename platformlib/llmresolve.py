@@ -48,12 +48,16 @@ def _escape(value: str) -> str:
 
 
 def _is_not_found(exc: Exception) -> bool:
-    """True when an MLflow error means 'does not exist' (vs. unreachable). Duck-typed on the REST
-    error code so this module needs no mlflow import."""
+    """True ONLY when an MLflow error means 'this model/alias does not exist' — an INVALID target
+    the caller refuses (FR-265). NOT when the registry is merely unreachable: that propagates for
+    the caller to classify as ResolutionUnavailable (env-default fallback). Keyed on mlflow's
+    specific `RESOURCE_DOES_NOT_EXIST` code (the `error_code` attribute, or its verbatim string for
+    a wrapped exception) — never a generic `"not found"` substring, which a transport 404 from a
+    misconfigured `MLFLOW_TRACKING_URI`/reverse proxy could also carry and thereby mis-refuse a
+    connectivity problem as an invalid target. Duck-typed so this module needs no mlflow import."""
     if getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST":
         return True
-    text = str(exc)
-    return "RESOURCE_DOES_NOT_EXIST" in text or "not found" in text.lower()
+    return "RESOURCE_DOES_NOT_EXIST" in str(exc)
 
 
 def _by_alias(client, name: str):

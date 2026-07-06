@@ -128,6 +128,26 @@ class LlamaAdapter:
         this to loaded_identity() for the idempotent no-op (FR-256)."""
         return (self.alias, self.registry_version)
 
+    def snapshot_binding(self) -> dict:
+        """Capture the current binding so a failed same-tenant reload can restore the PRIOR working
+        model (022 T466 rollback — data-model.md edge case: 'serving is never left empty'). Taken
+        BEFORE `rebind(force=True)` overwrites the fields, so it holds the model that was serving."""
+        return {"model": self.model, "lora": self.lora, "alias": self.alias,
+                "registry_version": self.registry_version,
+                "bind_error": self._bind_error, "bind_note": self._bind_note,
+                "loaded": self._loaded}
+
+    def restore_binding(self, snap: dict) -> None:
+        """Restore a `snapshot_binding()` and FREEZE it (fresh `_bound_at`) so the immediate
+        recovery reload re-spawns the restored model rather than re-resolving the still-bad target
+        that just failed. The TTL then lets a later request re-resolve normally once the operator
+        has acted on the surfaced failure."""
+        self.model, self.lora = snap["model"], snap["lora"]
+        self.alias, self.registry_version = snap["alias"], snap["registry_version"]
+        self._bind_error, self._bind_note = snap["bind_error"], snap["bind_note"]
+        self._loaded = snap["loaded"]
+        self._bound_at = time.monotonic()
+
     def loaded_identity(self):
         """(model_name, registry_version) of the resident child, or None when never spawned."""
         return (self._loaded["model_name"], self._loaded["registry_version"]) \

@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import background, platform_health, quality, registry, serving, tracing
+from .. import platform_health, quality, registry, serving, tracing
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -47,14 +47,31 @@ async def infer_stream(req: StreamRequest):
     if not await serving.health():
         # 006/FR-050: trace the pre-generation failure too — parity with REST /infer's 503 branch, so a
         # failed stream during a serving outage is still observable (gen() never runs in this case).
+        # 022 (FR-262): the agent is unreachable here, so the served identity is genuinely `unknown` —
+        # never the fixed SERVING_MODEL config guess (the divergence 022 removes).
         tracing.emit(
             name="infer_stream",
             inputs={"prompt": req.prompt},
             attributes={"max_tokens": req.max_tokens, "temperature": req.temperature,
-                        "model": serving.SERVING_MODEL, "status": "unavailable", "token_frames": 0},
+                        "model": "unknown", "status": "unavailable", "token_frames": 0},
             start_ns=route_start_ns, end_ns=time.time_ns(), status="ERROR",
         )
         raise HTTPException(status_code=503, detail="serving backend (supervisor) not reachable")
+
+    # 022 US2 (FR-261/262): resolve the AGENT-reported served identity ONCE, up front — the agent is
+    # reachable (health just passed), and a request holds the GPU lease for its WHOLE generation, so
+    # this identity cannot drift mid-stream. Both the trace and the prediction log below attribute to
+    # it, never the static SERVING_MODEL. Resolved OUTSIDE the generator so no await runs on the
+    # teardown/cancel path (the reason the prior version deferred it to a detached task). Version
+    # falls back to the served name's own @serving alias when the agent reports none (legacy agent).
+    _ident = await serving.llm_identity()
+    served_model, served_version = _ident["serving_model"], _ident["serving_version"]
+    if served_model != "unknown" and served_version is None:
+        try:
+            _s = await run_in_threadpool(registry.get_serving, served_model)
+            served_version = _s["version"] if _s else None
+        except Exception:
+            served_version = None
 
     # T363: preempt is forwarded to the AGENT (as `?preempt=true` below), which orchestrates it
     # under its single admission lock — the gateway no longer brokers it. A refusal (a `kind="job"`
@@ -123,7 +140,7 @@ async def infer_stream(req: StreamRequest):
             attrs = {
                 "max_tokens": req.max_tokens,
                 "temperature": req.temperature,
-                "model": serving.SERVING_MODEL,
+                "model": served_model,  # 022: the agent-reported served identity, not the config
                 "status": outcome,
                 "token_frames": frames,
             }
@@ -141,32 +158,19 @@ async def infer_stream(req: StreamRequest):
             # 013/FR-119: log the served prediction off the request path (fire-and-forget, fail-open).
             # The streamed tokens aren't buffered (the SSE bytes stay byte-identical), so the output is
             # left uncaptured — the prediction id + prompt + version are still logged for later labeling.
+            # 022 US2 (FR-261): attributed to the AGENT-REPORTED identity resolved up front (above),
+            # not the fixed SERVING_MODEL — the divergence that corrupted a served fine-tune's quality
+            # window. quality.log_prediction is itself fire-and-forget (spawns its own daemon thread +
+            # returns synchronously), so with the resolve already done it never delays teardown — the
+            # detached-task wrapper the pre-resolve version needed is no longer required.
             if outcome == "completed":
-                # Fully off the response path: schedule the identity-resolve + store write as a detached
-                # task so the generator's teardown (the chunked-encoding terminator) isn't delayed by a
-                # registry call (Codex P2). The streamed bytes are already delivered + unaffected.
-                async def _log():
-                    # 022 US2 (FR-261): attribute the streamed prediction to the AGENT-REPORTED
-                    # served identity — not the fixed SERVING_MODEL config (the divergence that
-                    # corrupted a served fine-tune's quality window). Version falls back to the
-                    # served NAME's own @serving alias when the agent reports none (legacy agent).
-                    ident = await serving.llm_identity()
-                    model, version = ident["serving_model"], ident["serving_version"]
-                    if model != "unknown" and version is None:
-                        try:
-                            served = await run_in_threadpool(registry.get_serving, model)
-                            version = served["version"] if served else None
-                        except Exception:
-                            version = None
-                    quality.log_prediction(model, version, "text-generation", req.prompt, None)
-                    # 016 (FR-146): do NOT capture streamed prompts. The streamed output isn't logged
-                    # (prediction=None), so join_window excludes these as champion-unscorable — but a
-                    # capture would still consume the per-modality ring-buffer cap, evicting replayable
-                    # REST inputs before their labels arrive and starving shadow-replay. Capture only
-                    # where the prediction is logged (the /infer path).
-
-                # 018/FR-164: retained (not detached) — a GC'd task would silently drop the log.
-                background.spawn(_log(), kind="stream-log")
+                quality.log_prediction(served_model, served_version, "text-generation",
+                                       req.prompt, None)
+                # 016 (FR-146): do NOT capture streamed prompts. The streamed output isn't logged
+                # (prediction=None), so join_window excludes these as champion-unscorable — but a
+                # capture would still consume the per-modality ring-buffer cap, evicting replayable
+                # REST inputs before their labels arrive and starving shadow-replay. Capture only
+                # where the prediction is logged (the /infer path).
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 

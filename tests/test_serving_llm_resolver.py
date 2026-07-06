@@ -97,6 +97,31 @@ def test_registry_outage_is_unavailable_not_an_error():
         serving_llm.resolve(store=_pointed_store("x"), client=DownClient())
 
 
+def test_transport_not_found_message_is_unavailable_not_a_refusal():
+    # A misconfigured MLFLOW_TRACKING_URI / reverse proxy can raise a transport error whose message
+    # merely CONTAINS "not found" but carries no RESOURCE_DOES_NOT_EXIST error code — that is a
+    # connectivity problem (degrade to the env default), NOT an invalid target (refuse). It must
+    # propagate as ResolutionUnavailable, never ResolutionError.
+    class ProxyClient:
+        def get_model_version_by_alias(self, *a):
+            raise RuntimeError("502 Bad Gateway: upstream not found")
+
+    with pytest.raises(serving_llm.ResolutionUnavailable):
+        serving_llm.resolve(store=_pointed_store("x"), client=ProxyClient())
+
+
+def test_is_not_found_keys_only_on_the_mlflow_code():
+    # unit-level guard on the narrowed classifier
+    assert llmresolve._is_not_found(_llmregistry_notfound()) is True
+    assert llmresolve._is_not_found(RuntimeError("upstream not found")) is False
+    assert llmresolve._is_not_found(ConnectionError("registry down")) is False
+
+
+def _llmregistry_notfound():
+    from _llmregistry import NotFoundError
+    return NotFoundError("RESOURCE_DOES_NOT_EXIST: gone")
+
+
 # -- T473: the adapter (base + LoRA) path -----------------------------------------------------------
 
 def test_adapter_resolves_base_by_registered_name(tmp_path):

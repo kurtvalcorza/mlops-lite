@@ -32,6 +32,7 @@ class FakeLlm(FakeEngine):
         self.bound = ("model-a", "1")   # what the resolver currently points at
         self.loaded = None              # captured at spawn (the resident identity)
         self.rebinds = []
+        self.bad_targets = set()        # bound identities that pass available() but FAIL to spawn
 
     def rebind(self, force=False):
         self.rebinds.append(force)
@@ -42,7 +43,20 @@ class FakeLlm(FakeEngine):
     def loaded_identity(self):
         return self.loaded
 
+    def snapshot_binding(self):
+        # The real adapter snapshots pre-rebind, when bound == the resident model; here rebind is a
+        # no-op and the test pre-sets `bound` to the target, so the resident model to roll back to is
+        # `loaded` (set at the last successful spawn).
+        return {"bound": self.bound, "loaded": self.loaded}
+
+    def restore_binding(self, snap):
+        self.bound = snap["loaded"] or snap["bound"]
+
     def spawn(self):
+        # a bad target passes the file-existence probe (available_state stays OK) but fails at the
+        # actual spawn — the post-probe failure the rollback must recover from.
+        if self.bound in self.bad_targets:
+            raise RuntimeError(f"spawn failed for {self.bound}")
         self.loaded = self.bound
         return super().spawn()
 
@@ -131,6 +145,21 @@ def test_unloadable_target_refuses_before_any_eviction():
     with pytest.raises(swap.PreemptRefused, match="not loadable"):
         swap.reload_serving_llm(mgr, preempt=True)
     assert llm.spawned[0].alive and llm.loaded == ("model-a", "1")  # holder untouched (FR-257)
+
+
+def test_same_tenant_reload_rolls_back_on_post_probe_spawn_failure():
+    # available() only file-checks; a target can pass it and still fail to spawn (corrupt GGUF, OOM).
+    # The old working model was already evicted — the rollback must restore it so serving is never
+    # left empty (Principle II / FR-257; data-model.md edge case).
+    mgr, a, llm = _manager()
+    mgr.runtimes["llm"].ensure_loaded()          # model-a resident + working
+    llm.bound = ("model-b", "2")
+    llm.bad_targets = {("model-b", "2")}          # passes available(), fails at spawn
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        swap.reload_serving_llm(mgr, preempt=True)
+    # rolled back: model-a is resident and serving again — NOT left cold/empty
+    assert llm.loaded_identity() == ("model-a", "1")
+    assert a.holder()["tenant"] == "llm"
 
 
 def test_never_two_children_alive_across_the_switch():
