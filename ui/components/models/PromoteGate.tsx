@@ -121,12 +121,14 @@ export function PromoteGate({
 
   const hasLLM = versions.some((v) => isLLMVersion(v.tags));
   useEffect(() => {
-    // resident-vs-promoted delta (FR-269) — only fetched for models with LLM versions
+    // resident-vs-promoted delta (FR-269) — only fetched for models with LLM versions. `name` is a
+    // dep so an instance reused for a different model refetches rather than comparing against stale
+    // live state (defensive — the models list keys each card by name, but don't rely on it).
     if (!hasLLM) return;
     gwGet<ServingState>('serving/state')
       .then(setLiveState)
       .catch(() => setLiveState(null));
-  }, [hasLLM, verdict]);
+  }, [hasLLM, verdict, name]);
 
   const doPreview = async (version: string) => {
     setBusy(version);
@@ -166,11 +168,15 @@ export function PromoteGate({
     }
   };
 
-  // this model+version is the LLM actually serving right now (agent-reported) — a re-promote of it
-  // is a no-op. Distinct from `v.serving` (this version merely holds its OWN model's @serving alias;
-  // a differently-named LLM can be the active served model — Codex F7).
-  const isActiveLive = (v: Version) =>
-    isLLMVersion(v.tags) && v.serving && liveState?.serving_model === name;
+  // this exact model+version is the LLM the agent reports as serving RIGHT NOW — a re-promote is a
+  // true no-op. Requires liveState (agent-reported) and matches BOTH name and version, so a
+  // reload-deferred divergence (@serving moved to v2 but v1 is still resident) doesn't mislabel v2
+  // as live. Null liveState ⇒ unconfirmable, and callers fall back to the plain @serving disable.
+  const isLiveVersion = (v: Version) =>
+    isLLMVersion(v.tags) &&
+    !!liveState &&
+    liveState.serving_model === name &&
+    String(liveState.serving_version ?? '') === String(v.version);
 
   // 022 (FR-258): promoting an LLM version that would displace a RESIDENT serving model goes through
   // the ConfirmDialog naming the displaced model; an idle GPU promotes straight through. Gated on the
@@ -267,6 +273,23 @@ export function PromoteGate({
         {versions.map((v) => {
           const metric = evalOf(v.tags);
           const isOverrideTarget = overrideVersion === v.version && !v.serving;
+          const llm = isLLMVersion(v.tags);
+          const liveVer = isLiveVersion(v);
+          // an @serving LLM version we can CONFIRM is not the one live now → offer the switch-back
+          // (also covers a reload-deferred divergence). Needs liveState; without it we can't tell.
+          const canSwitchBack = llm && v.serving && !!liveState && !liveVer;
+          // disable a true no-op only: the confirmed-live LLM version, or a non-LLM @serving version.
+          // When liveState is unknown for an LLM, fall back to the plain @serving disable (no mislabel).
+          const promoteDisabled =
+            busy === v.version || (llm ? (liveState ? liveVer : v.serving) : v.serving);
+          const promoteLabel =
+            busy === v.version
+              ? '[~]…'
+              : canSwitchBack
+                ? '[+] set live'
+                : v.serving
+                  ? 'serving'
+                  : '[+] promote';
           return (
             <li
               key={v.version}
@@ -302,27 +325,18 @@ export function PromoteGate({
                   </button>
                   <button
                     onClick={() => promoteLLMAware(v)}
-                    // For an LLM version, disable only when it's the ACTIVE live model (a true
-                    // no-op) — a version that holds its model's @serving alias but is NOT the active
-                    // served LLM stays clickable so the operator can switch back to it (Codex F7).
-                    // Non-LLM versions keep the plain @serving disable.
-                    disabled={
-                      (isLLMVersion(v.tags) ? isActiveLive(v) : v.serving) || busy === v.version
-                    }
+                    // Disable a true no-op only: the confirmed active-live LLM version (or a non-LLM
+                    // @serving version). An @serving LLM version that ISN'T the one live now stays
+                    // clickable so the operator can switch back to it (Codex F7). See promoteDisabled.
+                    disabled={promoteDisabled}
                     title={
-                      isLLMVersion(v.tags)
+                      llm
                         ? 'promote = go live: moves @serving AND switches the served LLM (022)'
                         : undefined
                     }
                     className="hairline rounded-sm px-3 py-1 text-button-md text-ink disabled:opacity-40"
                   >
-                    {busy === v.version
-                      ? '[~]…'
-                      : isActiveLive(v) || (!isLLMVersion(v.tags) && v.serving)
-                        ? 'serving'
-                        : isLLMVersion(v.tags) && v.serving
-                          ? '[+] set live' // @serving for its model but not the active LLM
-                          : '[+] promote'}
+                    {promoteLabel}
                   </button>
                   {isOverrideTarget && (
                     <button
@@ -380,7 +394,7 @@ export function PromoteGate({
           </>
         }
         confirmLabel="override + promote"
-        onConfirm={() => {
+        onConfirm={async () => {
           const v = askOverride;
           setAskOverride(null);
           if (!v) return;
@@ -389,8 +403,17 @@ export function PromoteGate({
           // which for the LLM IS the switch; without it the agent refuses the reload and the
           // override moves the alias/pointer but never goes live. Non-LLM overrides pass false.
           const ov = versions.find((x) => x.version === v);
-          const preempt = !!ov && isLLMVersion(ov.tags) && wouldDisplace(liveState);
-          promote(v, true, preempt);
+          if (!ov || !isLLMVersion(ov.tags)) return promote(v, true, false);
+          // Fresh serving/state fetch (not the polled copy) so a holder that appeared since the last
+          // poll — or a poll that returned null — doesn't drop preempt and defer the switch.
+          let state: ServingState | null = null;
+          try {
+            state = await gwGet<ServingState>('serving/state');
+          } catch {
+            state = null;
+          }
+          setLiveState(state);
+          promote(v, true, wouldDisplace(state));
         }}
         onCancel={() => setAskOverride(null)}
       />
