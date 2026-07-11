@@ -101,9 +101,10 @@ class FakeLLMStore:
     StoreError = _store.StoreError
 
     def __init__(self):
-        self.row = None      # the singleton pointer row, or None (unset ⇒ default base)
-        self.fail = False    # flip on to simulate a store outage
+        self.row = None         # the singleton pointer row, or None (unset ⇒ default base)
+        self.fail = False       # flip on to simulate a store outage
         self.writes = 0
+        self.bootstrapped = 0   # how many times bootstrap() ran (asserts the write bootstraps DDL)
 
     def connect(self, dsn=None, *, autocommit=True):
         if self.fail:
@@ -114,7 +115,9 @@ class FakeLLMStore:
         pass
 
     def bootstrap(self, conn=None):
-        pass
+        if self.fail:
+            raise self.StoreError("gateway DB unreachable (fake)")
+        self.bootstrapped += 1
 
     def get_serving_llm(self, conn):
         if self.fail:

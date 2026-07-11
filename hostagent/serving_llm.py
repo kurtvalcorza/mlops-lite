@@ -66,32 +66,54 @@ def active_model_name(store=None):
     return rec["model_name"] if rec else None
 
 
+def _default_client():
+    try:
+        from mlflow.tracking import MlflowClient
+        return MlflowClient(tracking_uri=os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500"))
+    except Exception as e:  # noqa: BLE001 — no mlflow in this interpreter
+        raise ResolutionUnavailable(f"mlflow client unavailable: {e}") from e
+
+
 def resolve(*, store=None, client=None, materialize=None):
-    """The full cold-load resolution. Returns None when the pointer is unset; raises
-    ResolutionError / ResolutionUnavailable per the module contract."""
+    """The full cold-load resolution → {model_name, version, kind, base_gguf, adapter_gguf, base},
+    or None when the configured env default should serve. Raises ResolutionError (invalid EXPLICIT
+    selection, refuse — FR-265) / ResolutionUnavailable (infra down, env fallback).
+
+    Selection mirrors gateway `registry.active_serving_llm_name` (F4): an explicit pointer wins and
+    resolves FAIL-LOUD; when the pointer is unset the single promoted `@serving` text-generation
+    model is ADOPTED so the agent serves what the console shows and a pre-022 promotion keeps
+    serving. Adoption is BEST-EFFORT — an adopted model that won't resolve (missing base/artifact)
+    falls back to the env default (return None), never bricking serving into an outage."""
     name = active_model_name(store)
-    if name is None:
-        return None
+    adopted = name is None  # unset pointer → adopt-best-effort; a set pointer is fail-loud
     if client is None:
         try:
-            from mlflow.tracking import MlflowClient
-            client = MlflowClient(
-                tracking_uri=os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5500"))
-        except Exception as e:  # noqa: BLE001 — no mlflow in this interpreter
-            raise ResolutionUnavailable(f"mlflow client unavailable: {e}") from e
+            client = _default_client()
+        except ResolutionUnavailable:
+            if adopted:
+                return None  # can't reach the registry to find a model to adopt → env default
+            raise
+    if adopted:
+        name = llmresolve.adopt_active_llm(client)
+        if name is None:
+            return None  # nothing promoted to adopt → the configured env default serves
     try:
         rec = llmresolve.resolve_serving_record(client, name)
-    except llmresolve.LLMResolutionError as e:
+        mat = materialize or _materialize
+        if rec["kind"] == llmresolve.KIND_ADAPTER:
+            base_gguf = mat(rec["base"]["source"])
+            adapter_gguf = mat(rec["source"])
+        else:
+            base_gguf = mat(rec["source"])
+            adapter_gguf = None
+    except (llmresolve.LLMResolutionError, ResolutionError) as e:
+        if adopted:
+            return None  # an adopted model that won't resolve → env default, never an outage
         raise ResolutionError(str(e)) from e
+    except ResolutionUnavailable:
+        raise  # store/registry unreachable mid-resolve — propagate (env fallback at the adapter)
     except Exception as e:  # noqa: BLE001 — registry down/unreachable, not an invalid target
         raise ResolutionUnavailable(f"registry unreachable resolving {name!r}: {e}") from e
-    mat = materialize or _materialize
-    if rec["kind"] == llmresolve.KIND_ADAPTER:
-        base_gguf = mat(rec["base"]["source"])
-        adapter_gguf = mat(rec["source"])
-    else:
-        base_gguf = mat(rec["source"])
-        adapter_gguf = None
     return {"model_name": rec["model_name"], "version": rec["version"], "kind": rec["kind"],
             "base_gguf": base_gguf, "adapter_gguf": adapter_gguf, "base": rec["base"]}
 

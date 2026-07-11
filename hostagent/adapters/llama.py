@@ -267,9 +267,19 @@ class LlamaAdapter:
         fields (contracts/agent-identity-and-allowlist.md): `model_name` + `registry_version` name
         what is ACTUALLY resident when resident, else what the next load would serve; `base` /
         `adapter` carry the resolved artifact identities for a served fine-tune (FR-274)."""
-        ok, reason = self.available()
+        resident_child = resident and self._loaded
+        if resident_child:
+            # A live resident child is serving NOW (Codex F1). Do NOT probe/rebind a PENDING pointer
+            # target here: a promote that wrote a bad/missing target whose reload was REFUSED leaves
+            # this child intentionally resident, and letting `available()` flip ok=False would 503
+            # the gateway (serving.health() gates /infer on this) into an OUTAGE while a healthy
+            # child keeps serving. Report the resident child — it's alive, hence ok; identity +
+            # artifacts from `_loaded`.
+            ok, reason = True, None
+        else:
+            ok, reason = self.available()  # cold: resolve + probe the next target (picks up a promote)
         est = self.estimate_vram() if os.path.isfile(self.model) else None
-        ident = self._loaded if (resident and self._loaded) else {
+        ident = self._loaded if resident_child else {
             "model_name": self.alias, "registry_version": self.registry_version,
             "base": os.path.basename(self.model),
             "adapter": os.path.basename(self.lora) if self.lora else None}

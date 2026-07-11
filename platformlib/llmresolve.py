@@ -94,6 +94,38 @@ def task_from_kind(tags: dict):
     return None
 
 
+def promoted_llm_names(client) -> list:
+    """Model names whose `@serving` version is a text-generation target (task tag OR inferred kind).
+    One entry per registered model. Used to ADOPT a legacy `@serving` LLM as the active selection
+    when the ActiveServingLLM pointer is unset (022 F4) — so the console and the agent agree on which
+    LLM serves and a pre-022 promotion keeps serving. Best-effort: registry errors yield []."""
+    names = []
+    try:
+        models = client.search_registered_models()
+    except Exception:  # noqa: BLE001 — best-effort discovery; a registry blip ⇒ no adoption
+        return names
+    for m in models:
+        sv = (dict(getattr(m, "aliases", None) or {})).get(SERVING_ALIAS)
+        if not sv:
+            continue
+        try:
+            mv = client.get_model_version(m.name, str(sv))
+        except Exception:  # noqa: BLE001
+            continue
+        tags = dict(mv.tags or {})
+        if (tags.get(TASK_TAG) or task_from_kind(tags)) == TEXT_GENERATION:
+            names.append(m.name)
+    return names
+
+
+def adopt_active_llm(client):
+    """The single promoted `@serving` text-generation model to adopt when the pointer is unset (F4),
+    else None — zero promoted ⇒ the caller's configured default serves; several promoted ⇒ ambiguous,
+    also the default (the operator promotes to disambiguate, which sets the pointer)."""
+    names = promoted_llm_names(client)
+    return names[0] if len(names) == 1 else None
+
+
 def resolve_base_version(client, base_ref: str):
     """Map an adapter's `base_model` reference to a registered full-model version — SINGLE hop
     (contracts/serving-resolution.md). `base_ref` is either a registered model name or the raw

@@ -47,12 +47,50 @@ def fake_store(monkeypatch):
 
 # -- T464: pointer accessors -------------------------------------------------------------------------
 
-def test_pointer_round_trip_and_default(fake_store):
+def test_pointer_round_trip_and_default(fake_reg, fake_store):
     assert registry.get_serving_llm() is None
-    assert registry.active_serving_llm_name() == registry.DEFAULT_LLM  # unset ⇒ default base
+    assert registry.active_serving_llm_name() == registry.DEFAULT_LLM  # unset + nothing promoted
     registry.set_serving_llm("ops-bot", actor="operator")
     assert registry.get_serving_llm()["model_name"] == "ops-bot"
     assert registry.active_serving_llm_name() == "ops-bot"
+
+
+# -- F4: adopt the sole promoted @serving LLM when the pointer is unset -------------------------------
+
+def test_active_name_adopts_single_promoted_llm_when_unset(fake_reg, fake_store):
+    fake_reg.add("ops-bot", 2, "s3://models/a.gguf",
+                 {"kind": "lora-adapter", "base_model": "qwen", "task": "text-generation"},
+                 serving=True)
+    assert registry.get_serving_llm() is None
+    assert registry.active_serving_llm_name() == "ops-bot"  # adopted, not the stale default
+
+
+def test_active_name_defaults_when_several_promoted_and_unset(fake_reg, fake_store):
+    fake_reg.add("qwen", 5, "/zoo/b.gguf",
+                 {"kind": "full-model", "task": "text-generation"}, serving=True)
+    fake_reg.add("ops-bot", 2, "s3://models/a.gguf",
+                 {"kind": "lora-adapter", "base_model": "qwen", "task": "text-generation"},
+                 serving=True)
+    assert registry.active_serving_llm_name() == registry.DEFAULT_LLM  # ambiguous ⇒ default
+
+
+def test_active_name_prefers_explicit_pointer_over_adoption(fake_reg, fake_store):
+    fake_reg.add("ops-bot", 2, "s3://models/a.gguf",
+                 {"kind": "lora-adapter", "base_model": "qwen", "task": "text-generation"},
+                 serving=True)
+    fake_store.set_serving_llm(None, "qwen", 1000.0, "operator")
+    assert registry.active_serving_llm_name() == "qwen"  # the pointer wins over the promoted alias
+
+
+def test_list_tasks_single_stale_alias_is_kept_only_when_active(fake_reg, fake_store):
+    # F4: one promoted LLM, unset pointer → adoption makes it the active model → it IS shown (not
+    # dropped). Then point elsewhere → it's no longer the live target and is filtered out.
+    fake_reg.add("qwen", 5, "/zoo/b.gguf", {"kind": "full-model"})  # registered, NOT promoted
+    fake_reg.add("ops-bot", 2, "s3://models/a.gguf",
+                 {"kind": "lora-adapter", "base_model": "qwen", "task": "text-generation"},
+                 serving=True)
+    live = [t["model"] for t in registry.list_tasks() if t["task"] == "text-generation"]
+    assert live == ["ops-bot"]  # adopted → shown as the single live LLM
 
 
 def test_pointer_write_fails_loud_read_fails_soft(fake_store):
@@ -60,6 +98,14 @@ def test_pointer_write_fails_loud_read_fails_soft(fake_store):
     assert registry.get_serving_llm() is None  # read degrades to 'unset' (default base)
     with pytest.raises(registry.RegistryError, match="pointer write failed"):
         registry.set_serving_llm("ops-bot")
+
+
+def test_pointer_write_bootstraps_the_table_first(fake_store):
+    # Codex F2: an upgraded PG volume never re-ran init.sql, so the write must apply the additive
+    # DDL (idempotent) before inserting — else the first promote fails with
+    # `relation "serving_llm" does not exist` after already moving the alias.
+    registry.set_serving_llm("ops-bot")
+    assert fake_store.bootstrapped >= 1 and fake_store.row["model_name"] == "ops-bot"
 
 
 # -- T474: pre-promotion resolution check ------------------------------------------------------------

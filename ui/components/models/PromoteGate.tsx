@@ -63,6 +63,17 @@ function isLLMVersion(tags: Record<string, string>): boolean {
     tags?.task === 'text-generation' || tags?.kind === 'lora-adapter' || tags?.format === 'gguf'
   );
 }
+
+// 022 FR-258: the GPU holders a served-LLM switch would DISPLACE — any resident *serving* engine
+// (the llm engine itself with a different model, OR a cross-tenant vision/asr). A training/HPO/batch
+// job holder is NOT here: the backend never preempts a job, so the switch is refused/deferred rather
+// than confirmed. Note `resident` in serving/state is LLM-specific (whether the llm child is loaded),
+// so a vision holder reports `resident:false` — gating the confirm on `holder` (not `resident`) is
+// what catches the cross-tenant case (Codex F5).
+const SERVING_HOLDERS = new Set<string>(['llm', 'vision', 'asr']);
+function wouldDisplace(state: ServingState | null): boolean {
+  return !!state && state.holder != null && SERVING_HOLDERS.has(state.holder);
+}
 type CompareLeg = { version?: string; metric?: string; value?: number } | null;
 type CompareRes = {
   champion?: CompareLeg;
@@ -155,8 +166,16 @@ export function PromoteGate({
     }
   };
 
-  // 022 (FR-258): promoting an LLM version that would displace a RESIDENT serving model goes
-  // through the ConfirmDialog naming the displaced model; an idle GPU promotes straight through.
+  // this model+version is the LLM actually serving right now (agent-reported) — a re-promote of it
+  // is a no-op. Distinct from `v.serving` (this version merely holds its OWN model's @serving alias;
+  // a differently-named LLM can be the active served model — Codex F7).
+  const isActiveLive = (v: Version) =>
+    isLLMVersion(v.tags) && v.serving && liveState?.serving_model === name;
+
+  // 022 (FR-258): promoting an LLM version that would displace a RESIDENT serving model goes through
+  // the ConfirmDialog naming the displaced model; an idle GPU promotes straight through. Gated on the
+  // GPU HOLDER, not the LLM-specific `resident` flag, so a cross-tenant vision/asr holder is caught
+  // too (Codex F5).
   const promoteLLMAware = async (v: Version) => {
     if (!isLLMVersion(v.tags)) return promote(v.version);
     let state: ServingState | null = null;
@@ -166,15 +185,15 @@ export function PromoteGate({
       state = null;
     }
     setLiveState(state);
-    if (state?.resident) {
+    if (wouldDisplace(state)) {
       const displaced =
-        state.holder === 'llm'
-          ? `${state.serving_model}${state.serving_version ? ` v${state.serving_version}` : ''}`
-          : `the resident ${state.holder} engine`;
+        state!.holder === 'llm'
+          ? `${state!.serving_model}${state!.serving_version ? ` v${state!.serving_version}` : ''}`
+          : `the resident ${state!.holder} engine`;
       setAskSwitch({ version: v.version, displaced });
       return;
     }
-    return promote(v.version); // idle GPU — the switch displaces nothing
+    return promote(v.version); // idle GPU (or a job holder the backend refuses) — nothing to confirm
   };
 
   return (
@@ -283,7 +302,13 @@ export function PromoteGate({
                   </button>
                   <button
                     onClick={() => promoteLLMAware(v)}
-                    disabled={v.serving || busy === v.version}
+                    // For an LLM version, disable only when it's the ACTIVE live model (a true
+                    // no-op) — a version that holds its model's @serving alias but is NOT the active
+                    // served LLM stays clickable so the operator can switch back to it (Codex F7).
+                    // Non-LLM versions keep the plain @serving disable.
+                    disabled={
+                      (isLLMVersion(v.tags) ? isActiveLive(v) : v.serving) || busy === v.version
+                    }
                     title={
                       isLLMVersion(v.tags)
                         ? 'promote = go live: moves @serving AND switches the served LLM (022)'
@@ -291,7 +316,13 @@ export function PromoteGate({
                     }
                     className="hairline rounded-sm px-3 py-1 text-button-md text-ink disabled:opacity-40"
                   >
-                    {v.serving ? 'serving' : busy === v.version ? '[~]…' : '[+] promote'}
+                    {busy === v.version
+                      ? '[~]…'
+                      : isActiveLive(v) || (!isLLMVersion(v.tags) && v.serving)
+                        ? 'serving'
+                        : isLLMVersion(v.tags) && v.serving
+                          ? '[+] set live' // @serving for its model but not the active LLM
+                          : '[+] promote'}
                   </button>
                   {isOverrideTarget && (
                     <button
@@ -352,7 +383,14 @@ export function PromoteGate({
         onConfirm={() => {
           const v = askOverride;
           setAskOverride(null);
-          if (v) promote(v, true);
+          if (!v) return;
+          // 022 (Codex F6): an override of an LLM version that would displace a resident serving
+          // model must carry preempt=true — the operator already confirmed shipping past the gate,
+          // which for the LLM IS the switch; without it the agent refuses the reload and the
+          // override moves the alias/pointer but never goes live. Non-LLM overrides pass false.
+          const ov = versions.find((x) => x.version === v);
+          const preempt = !!ov && isLLMVersion(ov.tags) && wouldDisplace(liveState);
+          promote(v, true, preempt);
         }}
         onCancel={() => setAskOverride(null)}
       />

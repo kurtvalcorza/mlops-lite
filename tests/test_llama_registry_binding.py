@@ -150,6 +150,28 @@ def test_health_reports_loaded_identity_when_resident(tmp_path, monkeypatch):
     assert h["base"] == os.path.basename(base) and h["adapter"] == os.path.basename(adapter)
 
 
+def test_resident_health_survives_a_bad_pending_target(tmp_path, monkeypatch):
+    # Codex F1: a promote moved the pointer to a target whose GGUF is missing and the reload was
+    # REFUSED, so the old child is intentionally still resident. A health poll must NOT flip
+    # ok=False (serving.health() gates /infer on it → a refused switch would become an outage).
+    a, base, adapter = _adapter(tmp_path, monkeypatch, resolver=None)
+    a._resolver = lambda: _target(base, adapter)
+    import hostagent.adapters.llama as llama_mod
+    monkeypatch.setattr(llama_mod.subprocess, "Popen", lambda cmd, **kw: FakePopen(cmd))
+    a.rebind(force=True)
+    a.spawn()  # ops-bot resident, _loaded captured
+    # the pointer now names a target whose base GGUF is missing; simulate a poll rebinding to it
+    bad = str(tmp_path / "gone.gguf")
+    a._resolver = lambda: {"model_name": "bad", "version": "9", "kind": "full-model",
+                           "base_gguf": bad, "adapter_gguf": None, "base": None}
+    a.rebind(force=True)
+    assert a.available()[0] is False  # the pending target is genuinely unloadable
+    h = a.health(resident=True)       # …but a live child is serving
+    assert h["ok"] is True and h["model_name"] == "ops-bot"  # honest: the RESIDENT model, not "bad"
+    # when NOT resident, health honestly reports the bad target as unavailable (cold-load probe)
+    assert a.health(resident=False)["ok"] is False
+
+
 def test_forward_and_stream_echo_the_registry_identity(tmp_path, monkeypatch):
     a, base, adapter = _adapter(tmp_path, monkeypatch, resolver=None)
     a._resolver = lambda: _target(base, adapter)

@@ -74,6 +74,34 @@ def test_unset_pointer_resolves_to_none():
     assert serving_llm.resolve(store=FakeLLMStore(), client=FakeRegistry()) is None
 
 
+def test_unset_pointer_adopts_single_promoted_llm(tmp_path):
+    # F4: unset pointer + exactly one promoted @serving text-gen model → adopt it (the agent serves
+    # what the console shows; a pre-022 promotion keeps serving), not the env default.
+    base = _gguf(tmp_path, "base.gguf")
+    reg = FakeRegistry()
+    reg.add("qwen-base", 1, base, {"kind": "full-model", "task": "text-generation"}, serving=True)
+    out = serving_llm.resolve(store=FakeLLMStore(), client=reg)
+    assert out is not None and out["model_name"] == "qwen-base" and out["base_gguf"] == base
+
+
+def test_unset_pointer_several_promoted_uses_env_default(tmp_path):
+    b1, b2 = _gguf(tmp_path, "b1.gguf"), _gguf(tmp_path, "b2.gguf")
+    reg = FakeRegistry()
+    reg.add("m1", 1, b1, {"kind": "full-model", "task": "text-generation"}, serving=True)
+    reg.add("m2", 1, b2, {"kind": "full-model", "task": "text-generation"}, serving=True)
+    assert serving_llm.resolve(store=FakeLLMStore(), client=reg) is None  # ambiguous ⇒ env default
+
+
+def test_adopted_model_that_wont_resolve_falls_back_not_outage(tmp_path):
+    # An ADOPTED (unset-pointer) model whose base GGUF is missing must fall back to the env default
+    # (None), NEVER raise — adoption can't brick serving into an outage. Contrast the explicit-pointer
+    # path (test_missing_artifact_file_is_a_resolution_error), which fails loud per FR-265.
+    reg = FakeRegistry()
+    reg.add("qwen-base", 1, str(tmp_path / "gone.gguf"),
+            {"kind": "full-model", "task": "text-generation"}, serving=True)
+    assert serving_llm.resolve(store=FakeLLMStore(), client=reg) is None
+
+
 def test_no_serving_alias_is_a_resolution_error():
     reg = FakeRegistry()
     reg.add("ops-bot", 1, "s3://models/a.gguf", {"kind": "lora-adapter"})  # nothing promoted

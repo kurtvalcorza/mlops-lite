@@ -170,6 +170,12 @@ def set_serving_llm(model_name: str, actor: str = "operator") -> dict:
         s = _store()
         conn = s.connect()
         try:
+            # Apply the additive DDL first (Codex F2): on a Postgres volume created BEFORE this
+            # migration `infra/postgres/init.sql` never re-runs, so `serving_llm` may not exist yet;
+            # bootstrap() is idempotent (IF NOT EXISTS) — the same guard the quality/policy/job
+            # clients use. Without it a first LLM promote moves the MLflow alias and then fails here
+            # with `relation "serving_llm" does not exist`, leaving the switch half-applied.
+            s.bootstrap(conn)
             s.set_serving_llm(conn, model_name, time.time(), actor)
         finally:
             conn.close()
@@ -179,10 +185,18 @@ def set_serving_llm(model_name: str, actor: str = "operator") -> dict:
 
 
 def active_serving_llm_name() -> str:
-    """The model name that SHOULD be serving text-generation: the pointer, else the configured
-    default base (FR-276 — the disambiguator when several LLM models hold a promoted alias)."""
+    """The model name that SHOULD be serving text-generation (FR-276 — the disambiguator when
+    several LLM models hold a promoted alias): the explicit pointer, else the single promoted
+    `@serving` text-generation model ADOPTED (F4 — so an upgraded install with a pre-022 promoted
+    fine-tune and no pointer shows/serves THAT model, matching the agent, not a stale default), else
+    the configured default base. The agent's `serving_llm.resolve` mirrors this exactly."""
     rec = get_serving_llm()
-    return rec["model_name"] if rec else DEFAULT_LLM
+    if rec:
+        return rec["model_name"]
+    try:
+        return llmresolve.adopt_active_llm(_client()) or DEFAULT_LLM
+    except Exception:  # noqa: BLE001 — best-effort adoption; registry blip ⇒ the default base
+        return DEFAULT_LLM
 
 
 def llm_target_info(name: str, version: str) -> Optional[dict]:
@@ -382,7 +396,13 @@ def list_tasks() -> list:
             entry["lineage"] = lineage or None
         out.append(entry)
     text_gen = [e for e in out if e["task"] == llmresolve.TEXT_GENERATION]
-    if len(text_gen) > 1:
+    if text_gen:
+        # Filter to the ACTIVE serving LLM even for a SINGLE promoted alias (Codex F4): a lone
+        # pre-022 alias that isn't the active model must not advertise itself as the live LLM. With
+        # active_serving_llm_name() now ADOPTING the sole promoted model when the pointer is unset,
+        # that lone alias normally IS the active one and is kept; the filter only drops it when the
+        # pointer explicitly names a different model. `text_gen[0]` is the fallback when nothing
+        # matches (preserves a panel rather than blanking the Infer tab in that rare edge).
         active = active_serving_llm_name()
         keep = next((e for e in text_gen if e["model"] == active), text_gen[0])
         out = [e for e in out if e["task"] != llmresolve.TEXT_GENERATION or e is keep]
