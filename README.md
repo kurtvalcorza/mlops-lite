@@ -18,6 +18,9 @@ a heavier reference platform, sized to a laptop.
 > **020 stack-remediation** landed on top: the archived-upstream object store exited to **Garage**
 > (migrated + decommissioned), the serving framework left the children ("Bento-ectomy", byte-identical
 > golden gates), and the agent's HTTP runtime was measured on hardware (verdict: keep-stdlib).
+> **021** added the loop-native operator console; **022** makes the LLM **registry-driven** like the
+> other engines (promote → serve, base + LoRA-adapter resolution, honest served identity — offline
+> slice; the on-hardware switch drills are the [HW] tail).
 > Constitution `v1.5.1`. Reference stack on MLflow `3.14.0`.
 >
 > Per-increment detail lives under [`specs/`](specs/) (each has `spec.md` / `plan.md` / `tasks.md`);
@@ -117,6 +120,26 @@ proxy the **byte-compatible** per-engine paths on the agent (`${AGENT_URL}/engin
 with the same serving tags **plus lineage** (`base_model`, parent run) so adapters can be chained.
 Promotion to `@serving` is **operator-driven** (alias-based) and, since **011**, runs through an
 **evaluation gate** (below).
+
+**The LLM is registry-driven too (022).** Pre-022 the `llama.cpp` engine was the sole outlier — it
+loaded a fixed GGUF from the `MODEL` env and ignored the registry, so promoting an LLM did nothing.
+Now **promote = go live**: promoting a text-generation version from the console moves its
+`@serving` alias, records it as the **active serving LLM** (a one-row platform pointer in the
+relational store — it spans model *names*, base vs fine-tune), and triggers an **immediate
+controlled reload** on the agent (evict → load under admission; displacing a resident serving
+model is operator-confirmed; a running job is never preempted — the switch defers instead). At
+each cold load the adapter resolves the active model's `@serving` version from the registry:
+a `kind=full-model` version serves `-m <gguf>`; a `kind=lora-adapter` fine-tune serves
+`-m <base> --lora <adapter>`, with the **base resolved automatically from `base_model` lineage**
+to a registered base GGUF (`scripts/register_base_gguf.py` registers the local zoo bases;
+an unresolvable/absent base **refuses the promotion** and leaves the served LLM unchanged —
+nothing is auto-downloaded). Served identity is **honest end-to-end**: the agent reports the
+actually-loaded model + registry version in its health, and `/serving/state`, the `/infer`
+response, and every logged prediction consume that agent-reported identity (monitoring windows key
+on the model that really produced each output). The `MODEL`/`LORA`/`MODEL_ALIAS` env knobs remain
+only as the **fallback default** for when no serving LLM has been selected. Legacy pre-022 LLM
+versions are recognized by artifact kind and can be batch-tagged with
+`scripts/backfill_llm_task_tags.py` (idempotent, never clobbers an existing tag).
 
 ## Run it
 

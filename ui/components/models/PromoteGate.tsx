@@ -7,11 +7,19 @@
 // typed reason. Accepts the ?override=<name>@<version> deep-link from the retraining inbox: the
 // candidate row is highlighted and framed for override review (the gate still runs — nothing
 // auto-fires).
+//
+// 022 T482 (FR-255/258/269): for a TEXT-GENERATION version the promote action IS the served-LLM
+// switch (Clarifications 2026-07-05 — no separate "set serving" control). When the switch would
+// displace a RESIDENT serving model, it is gated behind the shared ConfirmDialog NAMING the model
+// to be displaced, and the promote is sent with `preempt: true` (the agent refuses displacement
+// without it). The card shows the resident-vs-promoted delta, and the promote response's
+// `serving_llm.reload` outcome (live / deferred with the agent's reason) is surfaced.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Badge } from '@/components/Badge';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { gwPost } from '@/lib/gw';
+import type { ServingState } from '@/components/serving/types';
+import { gwGet, gwPost } from '@/lib/gw';
 import { LineageLinks } from './LineageLinks';
 
 export type Version = {
@@ -34,7 +42,43 @@ export type Verdict = {
   incumbent: MetricBrief;
   delta: number | null;
 };
-type PromoteResult = { promoted: boolean; serving_version: string | null; verdict: Verdict };
+// 022: the go-live half of an LLM promote (pointer + agent reload) riding the promote response.
+type ServingLLMResult = {
+  active: string | null;
+  kind?: string;
+  base?: { name: string; version: string; source: string } | null;
+  reload?: { status: string; reason?: string; evicted?: string | null };
+  // 022 FR-265: the agent couldn't load the promoted artifact → the pointer was rolled back so the
+  // served LLM stays unchanged (the alias still moved: promoted-but-not-live).
+  rolled_back?: boolean;
+  // the rollback WRITE itself failed (rare double-fault) → the pointer may still name the bad target.
+  pointer_error?: string;
+  error?: string;
+};
+type PromoteResult = {
+  promoted: boolean;
+  serving_version: string | null;
+  verdict: Verdict;
+  serving_llm?: ServingLLMResult;
+};
+
+// A text-generation version (task tag, or the artifact-kind inference for legacy versions).
+function isLLMVersion(tags: Record<string, string>): boolean {
+  return (
+    tags?.task === 'text-generation' || tags?.kind === 'lora-adapter' || tags?.format === 'gguf'
+  );
+}
+
+// 022 FR-258: the GPU holders a served-LLM switch would DISPLACE — any resident *serving* engine
+// (the llm engine itself with a different model, OR a cross-tenant vision/asr). A training/HPO/batch
+// job holder is NOT here: the backend never preempts a job, so the switch is refused/deferred rather
+// than confirmed. Note `resident` in serving/state is LLM-specific (whether the llm child is loaded),
+// so a vision holder reports `resident:false` — gating the confirm on `holder` (not `resident`) is
+// what catches the cross-tenant case (Codex F5).
+const SERVING_HOLDERS = new Set<string>(['llm', 'vision', 'asr']);
+function wouldDisplace(state: ServingState | null): boolean {
+  return !!state && state.holder != null && SERVING_HOLDERS.has(state.holder);
+}
 type CompareLeg = { version?: string; metric?: string; value?: number } | null;
 type CompareRes = {
   champion?: CompareLeg;
@@ -75,6 +119,21 @@ export function PromoteGate({
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [preview, setPreview] = useState<{ version: string; res: CompareRes } | null>(null);
   const [askOverride, setAskOverride] = useState<string | null>(null); // version pending override
+  // 022: the served-LLM switch — the version pending the displacement confirm + who it displaces.
+  const [askSwitch, setAskSwitch] = useState<{ version: string; displaced: string } | null>(null);
+  const [servingLLM, setServingLLM] = useState<ServingLLMResult | null>(null);
+  const [liveState, setLiveState] = useState<ServingState | null>(null);
+
+  const hasLLM = versions.some((v) => isLLMVersion(v.tags));
+  useEffect(() => {
+    // resident-vs-promoted delta (FR-269) — only fetched for models with LLM versions. `name` is a
+    // dep so an instance reused for a different model refetches rather than comparing against stale
+    // live state (defensive — the models list keys each card by name, but don't rely on it).
+    if (!hasLLM) return;
+    gwGet<ServingState>('serving/state')
+      .then(setLiveState)
+      .catch(() => setLiveState(null));
+  }, [hasLLM, verdict, name]);
 
   const doPreview = async (version: string) => {
     setBusy(version);
@@ -93,16 +152,19 @@ export function PromoteGate({
     }
   };
 
-  const promote = async (version: string, override = false) => {
+  const promote = async (version: string, override = false, preempt = false) => {
     setBusy(version);
     setErr('');
     setPreview(null);
+    setServingLLM(null);
     try {
       const res = await gwPost<PromoteResult>(`models/${encodeURIComponent(name)}/promote`, {
         version,
         override,
+        preempt,
       });
       setVerdict(res.verdict);
+      if (res.serving_llm) setServingLLM(res.serving_llm);
       onChanged();
     } catch (e) {
       setErr(String(e));
@@ -111,9 +173,94 @@ export function PromoteGate({
     }
   };
 
+  // this exact model+version is the LLM the agent reports as serving RIGHT NOW — a re-promote is a
+  // true no-op. Requires liveState (agent-reported) and matches BOTH name and version, so a
+  // reload-deferred divergence (@serving moved to v2 but v1 is still resident) doesn't mislabel v2
+  // as live. Null liveState ⇒ unconfirmable, and callers fall back to the plain @serving disable.
+  const isLiveVersion = (v: Version) =>
+    isLLMVersion(v.tags) &&
+    !!liveState &&
+    liveState.serving_model === name &&
+    String(liveState.serving_version ?? '') === String(v.version);
+
+  // 022 (FR-258): promoting an LLM version that would displace a RESIDENT serving model goes through
+  // the ConfirmDialog naming the displaced model; an idle GPU promotes straight through. Gated on the
+  // GPU HOLDER, not the LLM-specific `resident` flag, so a cross-tenant vision/asr holder is caught
+  // too (Codex F5).
+  const promoteLLMAware = async (v: Version) => {
+    if (!isLLMVersion(v.tags)) return promote(v.version);
+    let state: ServingState | null = null;
+    try {
+      state = await gwGet<ServingState>('serving/state'); // fresh — not the polled copy
+    } catch {
+      state = null;
+    }
+    setLiveState(state);
+    if (wouldDisplace(state)) {
+      const displaced =
+        state!.holder === 'llm'
+          ? `${state!.serving_model}${state!.serving_version ? ` v${state!.serving_version}` : ''}`
+          : `the resident ${state!.holder} engine`;
+      setAskSwitch({ version: v.version, displaced });
+      return;
+    }
+    return promote(v.version); // idle GPU (or a job holder the backend refuses) — nothing to confirm
+  };
+
   return (
     <>
       {err && <p className="mt-2 text-caption-md st-danger">[x] {err}</p>}
+
+      {/* 022 FR-269: the resident-vs-promoted delta for an LLM model — what actually runs vs
+          what @serving names. Agent-reported ("unknown" when the agent is unreachable). */}
+      {hasLLM && liveState && (
+        <p className="mt-2 text-caption-md text-ash">
+          <span className="st-mute">[≡]</span> live LLM:{' '}
+          <span className="text-ink">
+            {liveState.serving_model}
+            {liveState.serving_version ? ` v${liveState.serving_version}` : ''}
+          </span>{' '}
+          ({liveState.resident ? 'resident' : 'idle'})
+          {championVersion && (
+            <>
+              {' '}
+              · promoted here: <span className="text-ink">v{championVersion}</span>
+            </>
+          )}
+          {liveState.adapter && <> · adapter {liveState.adapter} on {liveState.base}</>}
+        </p>
+      )}
+
+      {/* 022: the go-live outcome of the last LLM promote — live at once, or deferred with the
+          agent's reason (job holder, missing confirm), or a pointer error. Never silent. */}
+      {servingLLM && (
+        <p className="mt-2 text-caption-md">
+          {servingLLM.pointer_error ? (
+            <span className="st-danger">
+              [x] switch reverted, but the pointer may still name the bad target — re-promote once
+              the artifact is present: {servingLLM.pointer_error}
+            </span>
+          ) : servingLLM.error ? (
+            <span className="st-danger">[x] switch: {servingLLM.error}</span>
+          ) : servingLLM.reload &&
+            ['loaded', 'reloaded', 'swapped', 'noop'].includes(servingLLM.reload.status) ? (
+            <span className="st-accent">
+              [⇄] switch: {servingLLM.reload.status === 'noop' ? 'already live' : 'live'}
+              {servingLLM.reload.evicted ? ` (displaced ${servingLLM.reload.evicted})` : ''}
+            </span>
+          ) : servingLLM.rolled_back ? (
+            <span className="st-warning">
+              [~] switch reverted — served LLM unchanged
+              {servingLLM.reload?.reason ? `: ${servingLLM.reload.reason}` : ''}
+            </span>
+          ) : (
+            <span className="st-warning">
+              [~] switch {servingLLM.reload?.status ?? 'pending'}
+              {servingLLM.reload?.reason ? `: ${servingLLM.reload.reason}` : ''}
+            </span>
+          )}
+        </p>
+      )}
 
       {preview && (
         <div className="mt-3 hairline rounded-sm p-3 text-caption-md">
@@ -141,6 +288,23 @@ export function PromoteGate({
         {versions.map((v) => {
           const metric = evalOf(v.tags);
           const isOverrideTarget = overrideVersion === v.version && !v.serving;
+          const llm = isLLMVersion(v.tags);
+          const liveVer = isLiveVersion(v);
+          // an @serving LLM version we can CONFIRM is not the one live now → offer the switch-back
+          // (also covers a reload-deferred divergence). Needs liveState; without it we can't tell.
+          const canSwitchBack = llm && v.serving && !!liveState && !liveVer;
+          // disable a true no-op only: the confirmed-live LLM version, or a non-LLM @serving version.
+          // When liveState is unknown for an LLM, fall back to the plain @serving disable (no mislabel).
+          const promoteDisabled =
+            busy === v.version || (llm ? (liveState ? liveVer : v.serving) : v.serving);
+          const promoteLabel =
+            busy === v.version
+              ? '[~]…'
+              : canSwitchBack
+                ? '[+] set live'
+                : v.serving
+                  ? 'serving'
+                  : '[+] promote';
           return (
             <li
               key={v.version}
@@ -175,11 +339,19 @@ export function PromoteGate({
                     [⇄] preview
                   </button>
                   <button
-                    onClick={() => promote(v.version)}
-                    disabled={v.serving || busy === v.version}
+                    onClick={() => promoteLLMAware(v)}
+                    // Disable a true no-op only: the confirmed active-live LLM version (or a non-LLM
+                    // @serving version). An @serving LLM version that ISN'T the one live now stays
+                    // clickable so the operator can switch back to it (Codex F7). See promoteDisabled.
+                    disabled={promoteDisabled}
+                    title={
+                      llm
+                        ? 'promote = go live: moves @serving AND switches the served LLM (022)'
+                        : undefined
+                    }
                     className="hairline rounded-sm px-3 py-1 text-button-md text-ink disabled:opacity-40"
                   >
-                    {v.serving ? 'serving' : busy === v.version ? '[~]…' : '[+] promote'}
+                    {promoteLabel}
                   </button>
                   {isOverrideTarget && (
                     <button
@@ -200,6 +372,29 @@ export function PromoteGate({
         })}
       </ul>
 
+      {/* 022 FR-258: the served-LLM switch confirm — names the model being displaced; on confirm
+          the promote carries preempt=true (the agent refuses displacement without it). */}
+      <ConfirmDialog
+        open={askSwitch !== null}
+        title="switch the served LLM"
+        tone="warning"
+        body={
+          <>
+            Promoting <span className="text-ink">{name} v{askSwitch?.version}</span> makes it the
+            live LLM <em>now</em>: a controlled sequential reload (evict → load, one model in VRAM)
+            that displaces <span className="text-ink">{askSwitch?.displaced}</span>. A running
+            training/HPO/batch job would refuse the switch instead — jobs are never preempted.
+          </>
+        }
+        confirmLabel="switch + promote"
+        onConfirm={() => {
+          const v = askSwitch?.version;
+          setAskSwitch(null);
+          if (v) promote(v, false, true);
+        }}
+        onCancel={() => setAskSwitch(null)}
+      />
+
       <ConfirmDialog
         open={askOverride !== null}
         title="override the promote gate"
@@ -214,10 +409,26 @@ export function PromoteGate({
           </>
         }
         confirmLabel="override + promote"
-        onConfirm={() => {
+        onConfirm={async () => {
           const v = askOverride;
           setAskOverride(null);
-          if (v) promote(v, true);
+          if (!v) return;
+          // 022 (Codex F6): an override of an LLM version that would displace a resident serving
+          // model must carry preempt=true — the operator already confirmed shipping past the gate,
+          // which for the LLM IS the switch; without it the agent refuses the reload and the
+          // override moves the alias/pointer but never goes live. Non-LLM overrides pass false.
+          const ov = versions.find((x) => x.version === v);
+          if (!ov || !isLLMVersion(ov.tags)) return promote(v, true, false);
+          // Fresh serving/state fetch (not the polled copy) so a holder that appeared since the last
+          // poll — or a poll that returned null — doesn't drop preempt and defer the switch.
+          let state: ServingState | null = null;
+          try {
+            state = await gwGet<ServingState>('serving/state');
+          } catch {
+            state = null;
+          }
+          setLiveState(state);
+          promote(v, true, wouldDisplace(state));
         }}
         onCancel={() => setAskOverride(null)}
       />

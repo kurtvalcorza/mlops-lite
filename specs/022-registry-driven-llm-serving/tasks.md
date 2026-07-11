@@ -20,12 +20,12 @@ test may regress — especially the Principle II admission tests.
 
 ## Phase 1: Setup (shared, mechanical — unblocks everything)
 
-- [ ] **T461** Add the **ActiveServingLLM** pointer + served-identity persistence to the relational
+- [X] **T461** Add the **ActiveServingLLM** pointer + served-identity persistence to the relational
   store: schema + accessors in `platformlib/store` (get/set the active text-generation `model_name`,
   with `selected_at`/`selected_by`; unset ⇒ resolve to the configured default base). Per
   [data-model.md](./data-model.md). Validate: get/set round-trips; a fresh store resolves to the
   default base; `pytest` covers the accessor.
-- [ ] **T462** [P] `scripts/register_base_gguf.py` — register the local base GGUFs (Qwen 0.5B / 7B in
+- [X] **T462** [P] `scripts/register_base_gguf.py` — register the local base GGUFs (Qwen 0.5B / 7B in
   `~/models/gguf/`) as `kind=full-model` text-generation registry versions (`task=text-generation`,
   `serving_engine=llama.cpp`, `source` → the local GGUF), so a fine-tune's `base_model` lineage
   resolves to a first-class registry record (research R2/R7). Idempotent (re-run registers nothing
@@ -34,14 +34,14 @@ test may regress — especially the Principle II admission tests.
 
 ## Phase 2: Foundational (blocking prerequisite for resolution + the live switch)
 
-- [ ] **T463** `hostagent/serving_llm.py` — the cold-load resolver (research R1/R2/R3): given the
+- [X] **T463** `hostagent/serving_llm.py` — the cold-load resolver (research R1/R2/R3): given the
   ActiveServingLLM pointer, resolve its `@serving` version → `{model_name, version, base_gguf,
   adapter_gguf|null}` per [contracts/serving-resolution.md](./contracts/serving-resolution.md):
   `full-model` → `base_gguf=source`; `lora-adapter` → `adapter_gguf=source` + `base_gguf=resolve(base_model
   → registered base version.source)`. Raise a clear resolution error on missing `@serving`/artifact/
   base. Pure read of {store pointer, MLflow}; no network fetch. Unit-test against a fake registry/store
   (full-model, adapter, missing-base, unset-pointer→default). Blocks US1/US3.
-- [ ] **T464** Gateway `registry.py` — active-serving-LLM pointer get/set (store-backed, via T461);
+- [X] **T464** Gateway `registry.py` — active-serving-LLM pointer get/set (store-backed, via T461);
   `resolve_serving_target` stamps/reads `task` for LLM versions and resolves an adapter's base; expose
   a version's base-vs-adapter `kind` + lineage in the models/tasks surfaces. Unit-test the resolution +
   pointer round-trip. Blocks US1/US4.
@@ -54,7 +54,7 @@ test may regress — especially the Principle II admission tests.
 controlled reload — no `.env` edit, no manual restart (FR-254/255).
 **Independent test**: [quickstart.md](./quickstart.md) §US1.
 
-- [ ] **T465** [US1] `hostagent/adapters/llama.py` — call the T463 resolver in `spawn()` /
+- [X] **T465** [US1] `hostagent/adapters/llama.py` — call the T463 resolver in `spawn()` /
   `ensure_loaded()` to bind `self.model` (base) + `self.lora` (adapter, or None) from the registry
   before launching `llama-server` (spawn already appends `--lora` when set — commit `c28ca97`). This
   **supersedes** the static `MODEL`/`LORA` env knob (env becomes a fallback/default only). Also set
@@ -63,7 +63,7 @@ controlled reload — no `.env` edit, no manual restart (FR-254/255).
   — so the `/infer` response's `model` matches the registry record (FR-262; spec review PR #64 §2).
   `available()` verifies the resolved artifacts. Validate: with a promoted version, a cold load serves
   it and the response `model` names it; `pytest` covers resolve→spawn arg construction + the alias.
-- [ ] **T466** [US1] Reload-on-select under admission — TWO cases (admission tenancy is per-engine,
+- [X] **T466** [US1] Reload-on-select under admission — TWO cases (admission tenancy is per-engine,
   not per-model; spec review PR #64 §1): **cross-tenant** (non-LLM/job holder) reuses
   `hostagent/swap.py:preempt_for` (evict → free → load); **same-tenant model switch** (the `llm`
   engine already resident with a *different* model — where `preempt_for` is a no-op) performs an
@@ -71,7 +71,7 @@ controlled reload — no `.env` edit, no manual restart (FR-254/255).
   resolved artifact (FR-255 immediate / SC-144). Idempotent no-op only when the resolved
   model+version is already resident; target-probed before any unload/evict (FR-256/257). `pytest`
   covers the same-tenant force-reload path (promote B while A resident → B actually loads).
-- [ ] **T467** [US1] Make the **gated promote itself the go-live action** (Clarifications 2026-07-05:
+- [X] **T467** [US1] Make the **gated promote itself the go-live action** (Clarifications 2026-07-05:
   promote = go live, one action — no separate "select" gesture): promoting a text-generation version
   through `POST models/:name/promote` (011/015) MUST also write the ActiveServingLLM pointer (T464) and
   request the T466 immediate agent reload. Prefer extending the existing promote path over a new
@@ -79,6 +79,7 @@ controlled reload — no `.env` edit, no manual restart (FR-254/255).
   ([contracts/agent-identity-and-allowlist.md](./contracts/agent-identity-and-allowlist.md)).
 - [ ] **T468** [US1] Validate US1 end-to-end against quickstart §US1 (promote A → `/infer` is A;
   promote B → `/infer` is B; no host-level action); backend `pytest` (resolver + reload wiring) green.
+  *(offline half done: resolver + reload wiring `pytest` green; the live quickstart §US1 browser drill runs with the stack up.)*
 
 **Checkpoint**: US1 alone makes the LLM console-operable — the core value.
 
@@ -90,18 +91,19 @@ controlled reload — no `.env` edit, no manual restart (FR-254/255).
 actually resident, so monitoring scores the right model (FR-260/261/262).
 **Independent test**: quickstart §US2.
 
-- [ ] **T469** [US2] Agent reports the actually-loaded `model_name` + `registry_version` (from T463
+- [X] **T469** [US2] Agent reports the actually-loaded `model_name` + `registry_version` (from T463
   resolution) in `/engines/llm/health` and the aggregate health
   ([contracts/agent-identity-and-allowlist.md](./contracts/agent-identity-and-allowlist.md)).
-- [ ] **T470** [US2] Gateway `serving.py gpu_state` (`GET /serving/state`) consumes the agent-reported
+- [X] **T470** [US2] Gateway `serving.py gpu_state` (`GET /serving/state`) consumes the agent-reported
   `model_name` + `registry_version` instead of the fixed `SERVING_MODEL`; degrades to `unknown` when
   the agent is unreachable (never a stale config guess).
-- [ ] **T471** [US2] Prediction logging in `gateway/app/routers/infer.py` + `stream.py` attributes each
+- [X] **T471** [US2] Prediction logging in `gateway/app/routers/infer.py` + `stream.py` attributes each
   served prediction to the agent-reported identity (not `SERVING_MODEL`), so the 013 quality window
   keys on the correct model+version. No prediction logged under a model the agent is not serving.
 - [ ] **T472** [US2] Validate US2 against quickstart §US2 (serving-state + `/infer` `model` + logged
   prediction all agree; a quality check scores the right model+version — the live divergence bug is
   gone); `pytest` identity tests green.
+  *(offline half done: identity `pytest` green; the live quickstart §US2 drill runs with the stack up.)*
 
 ---
 
@@ -111,14 +113,15 @@ actually resident, so monitoring scores the right model (FR-260/261/262).
 back to a base restores base behavior (FR-263/264/265).
 **Independent test**: quickstart §US3.
 
-- [ ] **T473** [US3] Adapter path in the T463 resolver: `lora-adapter` version → `base_model` lineage
+- [X] **T473** [US3] Adapter path in the T463 resolver: `lora-adapter` version → `base_model` lineage
   → registered base version `source` → spawn `-m <base> --lora <adapter>`. Unit-test the base
   resolution + arg construction (adapter, chained-parent, base-is-another-registered-version).
-- [ ] **T474** [US3] Refuse-on-unresolvable-base (FR-265): a resolution error (missing/absent base or
+- [X] **T474** [US3] Refuse-on-unresolvable-base (FR-265): a resolution error (missing/absent base or
   artifact) refuses the promote/select with a clear reason and leaves the currently-served LLM
   unchanged — never a wedged/empty serving state. `pytest` covers the refusal.
 - [ ] **T475** [US3] Validate US3 against quickstart §US3 (promote fine-tune → trained behavior serves;
   promote base → gone; unresolvable base → refused, unchanged); `pytest` green.
+  *(offline half done: adapter-path + refusal `pytest` green; the live quickstart §US3 drill runs with the stack up.)*
 
 ---
 
@@ -128,17 +131,17 @@ back to a base restores base behavior (FR-263/264/265).
 selectable LLM panels; legacy untagged versions are backfilled (FR-266/267/268/270).
 **Independent test**: quickstart §US4.
 
-- [ ] **T476** [US4] `training/flows/finetune.py` — stamp `task=text-generation`,
+- [X] **T476** [US4] `training/flows/finetune.py` — stamp `task=text-generation`,
   `serving_engine=llama.cpp`, and base/parent lineage at registration (mirrors vision/embed tagging),
   so a new fine-tune registers with a non-null task. `pytest` covers the registration tags.
-- [ ] **T477** [P] [US4] `scripts/backfill_llm_task_tags.py` — backfill legacy untagged
+- [X] **T477** [P] [US4] `scripts/backfill_llm_task_tags.py` — backfill legacy untagged
   text-generation versions (identified by `kind=lora-adapter`/`format=gguf`) with `task`/`serving_engine`;
   idempotent + non-clobber (never overwrites an existing tag). Validate on `ops-bot-v1/v2`: they become
   `task=text-generation`; re-run is a no-op.
-- [ ] **T478** [P] [US4] Gateway resolve fallback: infer `task` from `kind` (lora-adapter/gguf →
+- [X] **T478** [P] [US4] Gateway resolve fallback: infer `task` from `kind` (lora-adapter/gguf →
   text-generation) as defense-in-depth in `resolve_serving_target`/`serving/tasks`, so no valid LLM
   version is stranded as `task:null` even before the backfill runs.
-- [ ] **T479** [US4] Surface a version's base-vs-adapter `kind` + lineage in `GET /serving/tasks` and
+- [X] **T479** [US4] Surface a version's base-vs-adapter `kind` + lineage in `GET /serving/tasks` and
   the models detail so the console renders a working LLM panel (not "no renderer") and shows what would
   be promoted (FR-268/270). **Also make `serving/tasks` authoritative to the active-serving-LLM
   pointer (FR-276; spec review PR #64 §3):** `registry.list_tasks()` emits one row per model with ANY
@@ -149,6 +152,7 @@ selectable LLM panels; legacy untagged versions are backfilled (FR-266/267/268/2
   live LLM, no stale duplicate. `pytest` covers the two-promoted-LLMs dedup.
 - [ ] **T480** [US4] Validate US4 against quickstart §US4 (new fine-tune task-tagged; backfill
   idempotent + selectable; promoted fine-tune renders a working panel); `pytest` green.
+  *(offline half done: tagging/backfill/dedup `pytest` green; the live quickstart §US4 drill runs with the stack up.)*
 
 ---
 
@@ -158,16 +162,16 @@ selectable LLM panels; legacy untagged versions are backfilled (FR-266/267/268/2
 preempt of a serving holder, job never preempted (FR-257/258/259).
 **Independent test**: quickstart §US5.
 
-- [ ] **T481** [US5] Switch under admission: displacing a resident **serving** holder goes through the
+- [X] **T481** [US5] Switch under admission: displacing a resident **serving** holder goes through the
   operator-confirmed swap; a **job** holder (training/HPO/batch) is refused/deferred with the existing
   409 reason (never preempted); never two-resident. Reuses `hostagent/swap.py:preempt_for`;
   `pytest`/agent-level test the refuse-if-job path.
-- [ ] **T482** [US5] Console switch surface (`ui/components/models/*`, `ui/components/serving/*`): the
+- [X] **T482** [US5] Console switch surface (`ui/components/models/*`, `ui/components/serving/*`): the
   **promote action IS the switch** (Clarifications 2026-07-05 — no separate "set serving" control);
   when promoting a text-generation version would displace a resident serving model, gate it behind the
   021 `ConfirmDialog` naming the holder. Show the **resident-vs-promoted** LLM delta (FR-269) and the
   base/adapter nature + lineage (FR-268); reflect a completed switch. Validate: `npm run build` green.
-- [ ] **T483** [P] [US5] `ui/lib/gw-allowlist.ts` — add any new serving-control route the switch UI
+- [X] **T483** [P] [US5] `ui/lib/gw-allowlist.ts` — add any new serving-control route the switch UI
   calls (prefer reusing existing entries; keep the delta minimal and equal to
   [contracts/agent-identity-and-allowlist.md](./contracts/agent-identity-and-allowlist.md)).
 - [ ] **T484** [US5] [HW] Validate US5 on the RTX 5070 Ti (quickstart §US5): the never-two-resident
@@ -178,20 +182,23 @@ preempt of a serving holder, job never preempted (FR-257/258/259).
 
 ## Phase 8: Polish & cross-cutting
 
-- [ ] **T485** [P] Full backend regression + boundary guards: `pytest` green across the resolver,
+- [X] **T485** [P] Full backend regression + boundary guards: `pytest` green across the resolver,
   identity reporting, reload wiring, task-tag stamping, and backfill; confirm **no pre-existing test
   regressed** — especially the Principle II admission/swap tests (SC-147/149). Add two boundary
   checks: (a) **FR-273** — assert the feature adds **no new always-on resident process** and stays
   within the VRAM/RAM/disk budget (Principle III); (b) **FR-275** — assert the auto-promote/retraining
   policy path **cannot** switch the served LLM (served-LLM switching is operator-initiated only).
-- [ ] **T486** [P] Console gate: `npm run lint` + `npm run build` green; allow-list conformance grep —
+- [X] **T486** [P] Console gate: `npm run lint` + `npm run build` green; allow-list conformance grep —
   every gateway call in `ui/` resolves to a `gw-allowlist.ts` entry and the delta equals the contract
   (ideally empty — reuse preferred) (FR-272).
-- [ ] **T487** [P] Docs: update the README serving section — the LLM is now registry-driven like the
+  *(build/type-check green; conformance grep clean with an EMPTY allow-list delta — the switch rides
+  the existing promote + serving/state routes. `next lint` remains unconfigured in-repo (no ESLint
+  config or dependency exists in `ui/` — pre-existing, unchanged by 022).)*
+- [X] **T487** [P] Docs: update the README serving section — the LLM is now registry-driven like the
   other engines (promote → serve), base+adapter serving, and how to select the serving LLM; note the
   `LORA`/`MODEL` env knob (commit `c28ca97`) is now a fallback default, superseded by registry
   resolution.
-- [ ] **T488** Constitution/agent-context: confirm **no amendment required** — Principle II's RULE is
+- [X] **T488** Constitution/agent-context: confirm **no amendment required** — Principle II's RULE is
   unchanged (the switch reuses the existing one-tenant swap; this feature only chooses *which* model
   serves). Keep the managed `CLAUDE.md` marker on the 022 plan.
 - [ ] **T489** [HW] Full-loop drill on the RTX 5070 Ti: data → train → promote → **serve live** →

@@ -155,6 +155,13 @@ export function StreamPanel({ entry, serving }: PanelProps) {
       <div className="mb-3 flex flex-wrap items-center gap-2 text-caption-md">
         <span className="text-mute">serving:</span>
         <span className="hairline rounded-sm bg-soft px-2 py-1 text-ink">{modelLabel}</span>
+        {/* 022 FR-268/274: base-vs-adapter nature + resolved base of the served LLM */}
+        {entry.kind === 'lora-adapter' && (
+          <span className="text-ash">
+            · LoRA adapter{entry.lineage?.base_model ? ` on ${entry.lineage.base_model}` : ''}
+          </span>
+        )}
+        {entry.kind === 'full-model' && <span className="text-ash">· full model</span>}
         {serving &&
           (heldByOther ? (
             <span className={swappable ? 'st-warning' : 'st-danger'}>

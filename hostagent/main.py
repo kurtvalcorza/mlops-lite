@@ -308,6 +308,30 @@ def handle_post(path: str, query: str, content_type: str, control_header: str, r
         result = rt.unload(drain_timeout_s=float(body.get("drain_timeout_s", 10)))
         code = 200 if result.get("status") in ("unloaded", "idle") else 409
         return "json", code, result
+    if path == "/control/reload":
+        # 022 T466/T467 (FR-255): the gateway's gated promote requests this so the newly selected
+        # serving-LLM goes live via a controlled reload — cross-tenant swap or same-tenant
+        # force-reload, job holders never preempted (the preserved 409 vocabulary). Secret-gated
+        # like /control/unload (state-changing).
+        if CONTROL_SECRET and control_header != CONTROL_SECRET:
+            return "json", 403, {"error": "bad or missing X-Agent-Control"}
+        body = _parse_json(raw_body)
+        if body is None:
+            return "json", 400, {"error": "invalid JSON"}
+        try:
+            result = swap_mod.reload_serving_llm(
+                manager, preempt=bool(body.get("preempt")),
+                batch_active_fn=lambda: jobs.health_fields()["gpu_batch_active"],
+                drain_timeout_s=float(body.get("drain_timeout_s", 10)))
+        except swap_mod.TargetUnresolvable as e:
+            # FR-265: an unloadable target is distinct from a retryable job-holder/confirm deferral —
+            # tag it so the gateway rolls the active-serving-LLM pointer back (a persisted pointer to
+            # this target would 503 the next cold load). Still 409 (the preserved vocabulary).
+            return "json", 409, {"error": str(e), "unresolvable": True}
+        except Exception as e:  # noqa: BLE001 — mapped to the preserved status vocabulary
+            code, payload = error_response(e)
+            return "json", code, payload
+        return "json", 200, result
     # Jobs surface (018 T362, contracts/agent-api.md) + the legacy trainer aliases the
     # gateway still calls (byte-compat, FR-177 — retired from the gateway at US4/cleanup).
     if path == "/jobs":

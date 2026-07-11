@@ -69,3 +69,11 @@ CREATE TABLE IF NOT EXISTS suggestions (
   resolved_at       timestamptz,
   actor             text
 );
+
+-- 022 T461: the single active serving-LLM pointer (one row; absent => the default base serves).
+CREATE TABLE IF NOT EXISTS serving_llm (
+  singleton   boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  model_name  text NOT NULL,
+  selected_at timestamptz NOT NULL,
+  selected_by text NOT NULL
+);

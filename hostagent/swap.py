@@ -26,6 +26,15 @@ class PreemptRefused(Exception):
     """The holder is a job tenant (never preempted) or the target can't take the slot → 409."""
 
 
+class TargetUnresolvable(PreemptRefused):
+    """The serving-LLM reload target failed its pre-evict load probe — a missing/corrupt artifact or
+    an otherwise unresolvable active pointer (FR-265). A `PreemptRefused` subclass so the existing
+    409 mapping is unchanged, but distinct so the reload route can TAG it: unlike a retryable
+    job-holder/confirm deferral, an unresolvable target means the alias moved to something the next
+    cold load would 503 on, so the gateway rolls the active-serving-LLM pointer back — keeping the
+    served LLM unchanged (FR-265) not just for the immediate reload but for good."""
+
+
 class SwapError(Exception):
     """The holder could not be evicted (wedged / drain refused) → 409 with detail."""
 
@@ -100,3 +109,93 @@ def preempt_for(manager, target_engine_id: str, drain_timeout_s: float = 10.0, *
         return {"swapped": True, "evicted": holder["tenant"], "load_ms": load_ms}
     finally:
         admission.end_swap(target_engine_id)  # no-op after a rollback retarget
+
+
+def reload_serving_llm(manager, *, preempt: bool = False, batch_active_fn=None,
+                       drain_timeout_s: float = 10.0) -> dict:
+    """Make the ACTIVE serving-LLM live now (022 T466, FR-255 — contracts/serving-resolution.md).
+
+    Admission tenancy is per-ENGINE, so a served-LLM switch has two cases:
+
+      - **cross-tenant** (a non-LLM engine holds the GPU): `preempt_for` — evict → free → load,
+        with the job-holder refusal and the target-probe it already carries;
+      - **same-tenant model switch** (the `llm` engine is resident with a DIFFERENT model — the
+        common US1 case, where `preempt_for` is a satisfied no-op): an explicit force-reload,
+        unload the llm child → `ensure_loaded()`, so `llama-server` re-spawns with the newly
+        resolved base+adapter. Reusing preempt_for alone here silently keeps serving the old
+        GGUF (spec review PR #64 §1).
+
+    Sequencing guards, in order: fresh resolve (rebind(force=True) busts the adapter's TTL) →
+    target-probe (`available()`, so a bad artifact never evicts a working holder, FR-256/257) →
+    idempotent no-op when the resolved model+version is already resident → job/batch holders are
+    NEVER displaced (FR-259) → any displacement of a resident serving model requires the
+    operator's confirm (`preempt=true`, set by the console's ConfirmDialog — FR-258). Both paths
+    are strictly sequential evict→load under admission: never two models resident (SC-147).
+    """
+    rt = manager.runtimes.get("llm")
+    if rt is None:
+        raise PreemptRefused("no llm engine registered")
+    adapter = rt.adapter
+    # Snapshot the CURRENT binding before rebind() overwrites it — the same-tenant rollback target
+    # (the model actually serving now). rebind(force=True) then binds the newly resolved target.
+    prior_binding = adapter.snapshot_binding()
+    adapter.rebind(force=True)
+    ok, reason = adapter.available()
+    if not ok:  # probe BEFORE any unload/evict — the working holder stays put (FR-265)
+        raise TargetUnresolvable(f"serving-LLM target not loadable: {reason}")
+    holder = manager.admission.holder()
+    if holder is None:
+        return {"status": "loaded", "load_ms": rt.ensure_loaded(),
+                **_identity(adapter)}
+    if holder["tenant"] != "llm":
+        if holder["kind"] in NON_PREEMPTABLE_KINDS:
+            raise PreemptRefused(
+                f"{holder['tenant']} is running a job (training/HPO/batch) — never preempted; "
+                f"the switch is deferred to the next load (FR-259)")
+        if not preempt:
+            raise PreemptRefused(
+                f"would displace resident {holder['tenant']} — operator confirmation required "
+                f"(re-issue with preempt=true)")
+        res = preempt_for(manager, "llm", drain_timeout_s, batch_active_fn=batch_active_fn)
+        return {"status": "swapped", "evicted": res["evicted"], "load_ms": res["load_ms"],
+                **_identity(adapter)}
+    # same-tenant: the llm engine itself holds the slot
+    if adapter.loaded_identity() == adapter.bound_identity():
+        # Idempotent no-op FIRST (FR-256): the resolved model+version is already resident, so there
+        # is nothing to unload/reload — return noop even under a job/batch holder rather than a
+        # spurious refusal for a re-promote of the version that is already live.
+        return {"status": "noop", "load_ms": 0.0, **_identity(adapter)}
+    if holder["kind"] in NON_PREEMPTABLE_KINDS:
+        raise PreemptRefused("the llm slot is held by a job — never preempted (FR-259)")
+    if batch_active_fn is not None and batch_active_fn():
+        raise PreemptRefused("a GPU batch is driving the llm engine — not reloaded (FR-155)")
+    if not preempt:
+        loaded = adapter.loaded_identity()
+        raise PreemptRefused(
+            f"would displace the resident LLM {loaded[0] if loaded else '?'} — operator "
+            f"confirmation required (re-issue with preempt=true)")
+    result = rt.unload(drain_timeout_s=drain_timeout_s)
+    if result.get("status") not in ("unloaded", "idle"):
+        raise SwapError(f"llm did not unload for the model switch: "
+                        f"{result.get('detail') or result}")
+    try:
+        load_ms = rt.ensure_loaded()
+    except BaseException:
+        # available() only file-checks; the target can still fail at llama-server spawn/readiness
+        # (corrupt GGUF, OOM, port). The old working model is already evicted, so RESTORE the prior
+        # binding and best-effort reload it — serving is never left empty (data-model.md edge case),
+        # mirroring preempt_for's cross-tenant rollback. ensure_loaded() already freed the slot on
+        # its failure. Propagate the original error so the promote surfaces the switch as failed.
+        adapter.restore_binding(prior_binding)
+        try:
+            rt.ensure_loaded()
+        except Exception:
+            pass  # GPU stays free; the next request cold-loads on demand
+        raise
+    return {"status": "reloaded", "load_ms": load_ms, **_identity(adapter)}
+
+
+def _identity(adapter) -> dict:
+    """The bound (now loading/loaded) serving identity for the reload response."""
+    name, version = adapter.bound_identity()
+    return {"model_name": name, "registry_version": version}

@@ -3,21 +3,28 @@
 // modality = register a model with a `task` tag + drop a renderer into the map (components/serving).
 
 // 008 US3 (FR-068) + 009 US3: the gateway's lease/GPU state. `holder` ∈ {llm, vision, training, asr,
-// null} — ASR (whisper.cpp) joined the single lease as a tenant in 009.
+// null} — ASR (whisper.cpp) joined the single lease as a tenant in 009. 022 (FR-260/274): the
+// model+version are the AGENT-reported served identity ("unknown" when the agent is unreachable),
+// and a served fine-tune exposes its resolved base + adapter provenance.
 export type ServingState = {
   holder: 'llm' | 'vision' | 'training' | 'asr' | null;
   resident: boolean;
   serving_model: string;
   serving_version: string | null;
+  base?: string | null;
+  adapter?: string | null;
 };
 
 // 009 US1 (FR-077): one registry @serving version → one panel. `task`/`serving_engine` are null for
-// a legacy version registered before 009 (→ the "no renderer" placeholder).
+// a legacy version registered before 009 (→ the "no renderer" placeholder). 022 (FR-268): a
+// text-generation entry carries its base-vs-adapter kind + lineage (base/dataset/parent).
 export type TaskEntry = {
   model: string;
   version: string;
   task: string | null;
   serving_engine: string | null;
+  kind?: 'full-model' | 'lora-adapter' | null;
+  lineage?: Record<string, string> | null;
 };
 
 // Every per-task renderer receives the discovered registry entry + the shared lease state. The

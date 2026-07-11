@@ -230,9 +230,14 @@ def register_version(output_name: str, gguf_path: str, run_id: str,
     # LLM flow) records genealogy identically (FR-095). `lineage=base` — LLM chaining from a *registered*
     # version isn't supported (the stored artifact is the serving GGUF, not a trainable PEFT adapter), so
     # there is no `parent_version` here; the resumable modalities are vision + embeddings.
+    # 022 T476 (FR-266): stamp task + serving_engine at registration — mirroring what vision/embed
+    # already tag — so a new fine-tune is a first-class, selectable text-generation serving target
+    # (never a task:null "no renderer" placeholder). The base_model lineage is what the serving
+    # resolver maps to a registered base GGUF (contracts/serving-resolution.md).
     mv = c.create_model_version(
         name=output_name, source=source, run_id=run_id,
         tags={"kind": "lora-adapter", "format": "gguf",
+              "task": "text-generation", "serving_engine": "llama.cpp",
               **lineage_tags(base_model, dataset_name, dataset_version)},
     )
     _log(f"registered {output_name} v{mv.version} <- run {run_id} on {dataset_name}@{dataset_version}")
