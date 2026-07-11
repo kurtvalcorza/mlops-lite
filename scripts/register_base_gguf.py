@@ -44,8 +44,13 @@ BASE_PREFIX = os.getenv("BASE_ZOO_PREFIX", "base-zoo")
 
 def _garage_upload(path: str, bucket: str, key: str, log=print) -> None:
     """Upload a local GGUF to the platform object store (Garage) once — idempotent by (bucket, key)
-    + size, so a re-run re-uploads nothing. Uses the shared `platformlib.store` client (env creds +
-    `MLFLOW_S3_ENDPOINT_URL`), the same access path the agent uses to materialize the artifact."""
+    + SIZE (not a content hash), so a re-run re-uploads nothing. Uses the shared `platformlib.store`
+    client (env creds + `MLFLOW_S3_ENDPOINT_URL`), the same access path the agent uses to materialize
+    the artifact. NOTE: the size-only check leans on a WRITE-ONCE invariant — a base is never
+    re-uploaded under the same key with DIFFERENT bytes at the same length — the same assumption the
+    agent's local cache makes (it keys on the source string with no staleness check, serving_llm.py).
+    The curated, operator-only zoo (Principle I/III — nothing auto-downloaded) makes that safe; if a
+    stronger guarantee is ever needed, switch this to a content-hash compare."""
     from platformlib.store import s3_client
 
     s3 = s3_client()

@@ -58,6 +58,46 @@ def test_absent_gguf_is_skipped_and_never_uploaded(tmp_path):
     assert uploads == []  # nothing downloaded/uploaded for a base that isn't in the local zoo
 
 
+class _FakeS3:
+    """The tiny boto3-client surface `_garage_upload` touches — head_object + upload_file."""
+
+    def __init__(self, present_size=None):
+        self.present_size = present_size   # None ⇒ object absent (head_object raises)
+        self.uploaded = []
+
+    def head_object(self, Bucket, Key):
+        if self.present_size is None:
+            raise RuntimeError("404 NoSuchKey")
+        return {"ContentLength": self.present_size}
+
+    def upload_file(self, path, bucket, key):
+        self.uploaded.append((bucket, key))
+
+
+def test_garage_upload_skips_present_uploads_absent_reuploads_on_size_mismatch(tmp_path, monkeypatch):
+    # Exercise the REAL _garage_upload head/size branch (@claude review) — not just the injected
+    # stand-in the register_bases tests use. platformlib.store.s3_client is imported inside the fn,
+    # so monkeypatching it swaps in the fake without needing boto3/a live store.
+    f = tmp_path / "b.gguf"
+    f.write_bytes(b"x" * 200)
+    quiet = lambda *a, **k: None  # noqa: E731
+
+    present = _FakeS3(present_size=200)                       # same size → skip
+    monkeypatch.setattr("platformlib.store.s3_client", lambda: present)
+    rbg._garage_upload(str(f), "models", "base-zoo/b.gguf", log=quiet)
+    assert present.uploaded == []
+
+    absent = _FakeS3(present_size=None)                       # not present → upload
+    monkeypatch.setattr("platformlib.store.s3_client", lambda: absent)
+    rbg._garage_upload(str(f), "models", "base-zoo/b.gguf", log=quiet)
+    assert absent.uploaded == [("models", "base-zoo/b.gguf")]
+
+    mismatch = _FakeS3(present_size=999)                      # present but wrong size → re-upload
+    monkeypatch.setattr("platformlib.store.s3_client", lambda: mismatch)
+    rbg._garage_upload(str(f), "models", "base-zoo/b.gguf", log=quiet)
+    assert mismatch.uploaded == [("models", "base-zoo/b.gguf")]
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
