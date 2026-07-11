@@ -151,12 +151,15 @@ def reload_serving_llm(manager, *, preempt: bool = False, batch_active_fn=None,
         return {"status": "swapped", "evicted": res["evicted"], "load_ms": res["load_ms"],
                 **_identity(adapter)}
     # same-tenant: the llm engine itself holds the slot
+    if adapter.loaded_identity() == adapter.bound_identity():
+        # Idempotent no-op FIRST (FR-256): the resolved model+version is already resident, so there
+        # is nothing to unload/reload — return noop even under a job/batch holder rather than a
+        # spurious refusal for a re-promote of the version that is already live.
+        return {"status": "noop", "load_ms": 0.0, **_identity(adapter)}
     if holder["kind"] in NON_PREEMPTABLE_KINDS:
         raise PreemptRefused("the llm slot is held by a job — never preempted (FR-259)")
     if batch_active_fn is not None and batch_active_fn():
         raise PreemptRefused("a GPU batch is driving the llm engine — not reloaded (FR-155)")
-    if adapter.loaded_identity() == adapter.bound_identity():
-        return {"status": "noop", "load_ms": 0.0, **_identity(adapter)}  # idempotent (FR-256)
     if not preempt:
         loaded = adapter.loaded_identity()
         raise PreemptRefused(
