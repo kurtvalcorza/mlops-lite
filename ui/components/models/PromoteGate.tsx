@@ -48,6 +48,9 @@ type ServingLLMResult = {
   kind?: string;
   base?: { name: string; version: string; source: string } | null;
   reload?: { status: string; reason?: string; evicted?: string | null };
+  // 022 FR-265: the agent couldn't load the promoted artifact → the pointer was rolled back so the
+  // served LLM stays unchanged (the alias still moved: promoted-but-not-live).
+  rolled_back?: boolean;
   error?: string;
 };
 type PromoteResult = {
@@ -237,6 +240,11 @@ export function PromoteGate({
             <span className="st-accent">
               [⇄] switch: {servingLLM.reload.status === 'noop' ? 'already live' : 'live'}
               {servingLLM.reload.evicted ? ` (displaced ${servingLLM.reload.evicted})` : ''}
+            </span>
+          ) : servingLLM.rolled_back ? (
+            <span className="st-warning">
+              [~] switch reverted — served LLM unchanged
+              {servingLLM.reload?.reason ? `: ${servingLLM.reload.reason}` : ''}
             </span>
           ) : (
             <span className="st-warning">

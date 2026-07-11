@@ -164,8 +164,8 @@ def test_target_info_recognizes_legacy_untagged_adapter(fake_reg):
 
 # -- T467: promote = go live -------------------------------------------------------------------------
 
-def _promote_env(monkeypatch, *, target, promoted=True):
-    calls = {"promote": [], "pointer": [], "reload": []}
+def _promote_env(monkeypatch, *, target, promoted=True, reload_result=None, prior=None):
+    calls = {"promote": [], "pointer": [], "reload": [], "restore": []}
     monkeypatch.setattr(registry, "list_versions",
                         lambda name: [{"version": "2"}])
     monkeypatch.setattr(registry, "llm_target_info", lambda n, v: target)
@@ -174,12 +174,15 @@ def _promote_env(monkeypatch, *, target, promoted=True):
                         calls["promote"].append((n, v)) or
                         {"name": n, "serving_version": v, "promoted": promoted,
                          "verdict": {"verdict": "pass"}})
+    monkeypatch.setattr(registry, "get_serving_llm", lambda: prior)  # the pre-promote pointer
     monkeypatch.setattr(registry, "set_serving_llm",
                         lambda n, actor="operator": calls["pointer"].append(n) or
                         {"model_name": n})
+    monkeypatch.setattr(registry, "restore_serving_llm",
+                        lambda p: calls["restore"].append(p))
     monkeypatch.setattr(serving, "request_llm_reload",
                         lambda preempt=False: calls["reload"].append(preempt) or
-                        {"status": "reloaded"})
+                        (reload_result or {"status": "reloaded"}))
     return calls
 
 
@@ -193,6 +196,37 @@ def test_promote_llm_writes_pointer_and_requests_reload(monkeypatch):
     assert calls["pointer"] == ["ops-bot"]          # promote IS the go-live action
     assert calls["reload"] == [True]                # operator confirm passed through (FR-258)
     assert res["serving_llm"]["reload"]["status"] == "reloaded"
+
+
+def test_promote_llm_rolls_back_pointer_when_target_unloadable(monkeypatch):
+    # FR-265: the registry-level pre-check passed (a full-model base resolves) but the AGENT can't
+    # load the artifact (GGUF absent on the host) → the reload returns `unresolvable`. The alias
+    # moved, but the pointer MUST be rolled back to its prior value: left pointed at the unloadable
+    # model it would 503 the next cold load (after the current model idle-reaps). The served LLM
+    # stays unchanged, as FR-265 promises — beyond just the immediate reload.
+    target = {"task": "text-generation", "kind": "full-model", "base": None, "error": None}
+    calls = _promote_env(
+        monkeypatch, target=target, prior={"model_name": "qwen", "selected_by": "operator"},
+        reload_result={"status": "deferred", "unresolvable": True,
+                       "reason": "serving-LLM target not loadable: model GGUF not found"})
+    res = models_router.promote("ops-bot", models_router.PromoteRequest(version="2", preempt=True))
+    assert calls["pointer"] == ["ops-bot"]                                    # promote wrote it …
+    assert calls["restore"] == [{"model_name": "qwen", "selected_by": "operator"}]  # … then reverted
+    assert res["serving_llm"]["rolled_back"] is True
+    assert res["serving_llm"]["active"] == "qwen"                             # served LLM unchanged
+
+
+def test_promote_llm_keeps_pointer_on_retryable_deferral(monkeypatch):
+    # A job-holder / missing-confirm deferral is RETRYABLE (not `unresolvable`) — the pointer stays,
+    # so a later reload or a re-promote with preempt goes live. Only an unloadable target rolls back.
+    target = {"task": "text-generation", "kind": "full-model", "base": None, "error": None}
+    calls = _promote_env(
+        monkeypatch, target=target,
+        reload_result={"status": "deferred",
+                       "reason": "would displace resident vision — confirmation required"})
+    res = models_router.promote("ops-bot", models_router.PromoteRequest(version="2"))
+    assert calls["pointer"] == ["ops-bot"] and calls["restore"] == []        # kept — retryable
+    assert res["serving_llm"]["active"] == "ops-bot"
 
 
 def test_promote_refuses_unresolvable_llm_before_the_gate(monkeypatch):

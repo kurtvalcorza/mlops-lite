@@ -184,6 +184,29 @@ def set_serving_llm(model_name: str, actor: str = "operator") -> dict:
     return {"model_name": model_name, "selected_by": actor}
 
 
+def restore_serving_llm(prior: Optional[dict]) -> None:
+    """Roll the active serving-LLM pointer back to a previously-captured value (022 FR-265). Called
+    when a promote's reload comes back `unresolvable`: the alias moved but the agent can't load the
+    artifact, so the pointer must NOT stay pointed at it — a persisted EXPLICIT pointer to an
+    unloadable model 503s the next cold load. `prior` is a `get_serving_llm()` snapshot taken BEFORE
+    the promote overwrote it: a concrete model ⇒ restore it; None (was unset) ⇒ clear it, back to
+    best-effort adoption / the configured default, which never bricks serving. Fail-loud."""
+    try:
+        s = _store()
+        conn = s.connect()
+        try:
+            if prior and prior.get("model_name"):
+                s.set_serving_llm(conn, prior["model_name"],
+                                  prior.get("selected_at") or time.time(),
+                                  prior.get("selected_by") or "operator")
+            else:
+                s.clear_serving_llm(conn)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — normalize driver/connection errors
+        raise RegistryError(f"active serving-LLM pointer rollback failed: {e}") from e
+
+
 def active_serving_llm_name() -> str:
     """The model name that SHOULD be serving text-generation (FR-276 — the disambiguator when
     several LLM models hold a promoted alias): the explicit pointer, else the single promoted

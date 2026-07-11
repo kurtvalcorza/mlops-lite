@@ -147,6 +147,18 @@ def test_unloadable_target_refuses_before_any_eviction():
     assert llm.spawned[0].alive and llm.loaded == ("model-a", "1")  # holder untouched (FR-257)
 
 
+def test_unloadable_target_raises_the_distinct_TargetUnresolvable():
+    # FR-265: an unloadable target is a DISTINCT PreemptRefused subclass so the reload route can tag
+    # it and the gateway rolls the active-serving-LLM pointer back (rather than leaving it pointed at
+    # a model the next cold load would 503 on). Holds for an idle GPU too — no holder to evict.
+    mgr, a, llm = _manager()
+    llm.available_state = (False, "base GGUF not found")
+    with pytest.raises(swap.TargetUnresolvable, match="not loadable"):
+        swap.reload_serving_llm(mgr)
+    assert issubclass(swap.TargetUnresolvable, swap.PreemptRefused)  # 409 mapping unchanged
+    assert a.holder() is None and not llm.spawned  # nothing loaded — served LLM unchanged
+
+
 def test_same_tenant_reload_rolls_back_on_post_probe_spawn_failure():
     # available() only file-checks; a target can pass it and still fail to spawn (corrupt GGUF, OOM).
     # The old working model was already evicted — the rollback must restore it so serving is never

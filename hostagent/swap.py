@@ -26,6 +26,15 @@ class PreemptRefused(Exception):
     """The holder is a job tenant (never preempted) or the target can't take the slot → 409."""
 
 
+class TargetUnresolvable(PreemptRefused):
+    """The serving-LLM reload target failed its pre-evict load probe — a missing/corrupt artifact or
+    an otherwise unresolvable active pointer (FR-265). A `PreemptRefused` subclass so the existing
+    409 mapping is unchanged, but distinct so the reload route can TAG it: unlike a retryable
+    job-holder/confirm deferral, an unresolvable target means the alias moved to something the next
+    cold load would 503 on, so the gateway rolls the active-serving-LLM pointer back — keeping the
+    served LLM unchanged (FR-265) not just for the immediate reload but for good."""
+
+
 class SwapError(Exception):
     """The holder could not be evicted (wedged / drain refused) → 409 with detail."""
 
@@ -133,7 +142,7 @@ def reload_serving_llm(manager, *, preempt: bool = False, batch_active_fn=None,
     adapter.rebind(force=True)
     ok, reason = adapter.available()
     if not ok:  # probe BEFORE any unload/evict — the working holder stays put (FR-265)
-        raise PreemptRefused(f"serving-LLM target not loadable: {reason}")
+        raise TargetUnresolvable(f"serving-LLM target not loadable: {reason}")
     holder = manager.admission.holder()
     if holder is None:
         return {"status": "loaded", "load_ms": rt.ensure_loaded(),

@@ -118,11 +118,24 @@ def promote(name: str, req: PromoteRequest):
         raise HTTPException(status_code=502, detail=f"registry error: {e}")
     REGISTRY_OPS.labels(op="promote", status="blocked" if not res.get("promoted", True) else "ok").inc()
     if llm_target and res.get("promoted"):
+        prior = registry.get_serving_llm()  # capture BEFORE the pointer moves (FR-265 rollback)
         try:
             registry.set_serving_llm(name, actor="operator")
-            res["serving_llm"] = {"active": name, "kind": llm_target["kind"],
-                                  "base": llm_target["base"],
-                                  "reload": serving.request_llm_reload(preempt=req.preempt)}
+            reload = serving.request_llm_reload(preempt=req.preempt)
+            if reload.get("unresolvable"):
+                # FR-265: the agent can't load this artifact, so the served LLM must stay UNCHANGED —
+                # not just for this reload. Roll the pointer back: left set to an unloadable model it
+                # would 503 the next cold load (after the current model is idle-reaped). The alias
+                # stays moved (the console shows it promoted-but-not-live); the operator re-promotes
+                # once the GGUF is present on the host.
+                registry.restore_serving_llm(prior)
+                REGISTRY_OPS.labels(op="promote", status="unresolvable").inc()
+                res["serving_llm"] = {"active": (prior or {}).get("model_name"),
+                                      "kind": llm_target["kind"], "base": llm_target["base"],
+                                      "reload": reload, "rolled_back": True}
+            else:
+                res["serving_llm"] = {"active": name, "kind": llm_target["kind"],
+                                      "base": llm_target["base"], "reload": reload}
         except registry.RegistryError as e:
             # The alias moved but the go-live pointer didn't stick — surface it; a re-promote of
             # the same version retries both halves idempotently.

@@ -323,6 +323,11 @@ def handle_post(path: str, query: str, content_type: str, control_header: str, r
                 manager, preempt=bool(body.get("preempt")),
                 batch_active_fn=lambda: jobs.health_fields()["gpu_batch_active"],
                 drain_timeout_s=float(body.get("drain_timeout_s", 10)))
+        except swap_mod.TargetUnresolvable as e:
+            # FR-265: an unloadable target is distinct from a retryable job-holder/confirm deferral —
+            # tag it so the gateway rolls the active-serving-LLM pointer back (a persisted pointer to
+            # this target would 503 the next cold load). Still 409 (the preserved vocabulary).
+            return "json", 409, {"error": str(e), "unresolvable": True}
         except Exception as e:  # noqa: BLE001 — mapped to the preserved status vocabulary
             code, payload = error_response(e)
             return "json", code, payload

@@ -133,7 +133,10 @@ def request_llm_reload(preempt: bool = False) -> dict:
     if r.status_code == 200:
         return body  # loaded | reloaded | swapped | noop (+ the served identity)
     return {"status": "deferred",
-            "reason": body.get("error") or f"agent refused the reload ({r.status_code})"}
+            "reason": body.get("error") or f"agent refused the reload ({r.status_code})",
+            # FR-265: the agent distinguishes an UNLOADABLE target (roll the pointer back) from a
+            # retryable job-holder/confirm deferral — the promote route reads this to decide.
+            "unresolvable": bool(body.get("unresolvable"))}
 
 
 async def run_inference(prompt: str, max_tokens: int = 256, temperature: float = 0.7, *,
