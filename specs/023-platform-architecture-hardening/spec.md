@@ -316,8 +316,11 @@ against executable configuration and a documentation checklist.
   submission/status/cancellation, engine-control, reload, and other state-changing route.
 - **FR-282**: Authentication MUST occur before admission, child lifecycle, journal, database, or
   object-store side effects.
-- **FR-283**: Health, readiness, and metrics routes MAY remain unauthenticated only through an
-  explicit public-route allow-list with documented response shapes.
+- **FR-283**: Only the explicitly public probe routes (`/healthz`, `/readyz`, `/metrics`) MAY remain
+  unauthenticated, with documented response shapes. The richer `/health`, `/engines`, and `/jobs`
+  routes — which expose holder/lease/engine/job state — are protected and require the internal
+  credential (mirroring the `contracts/agent-security.md` allow-list, so the FR cannot be read as
+  licensing a public `/health`).
 - **FR-284**: Missing agent credentials MUST prevent normal startup unless an explicit
   `AGENT_ALLOW_OPEN` development override is enabled.
 - **FR-285**: Open-development mode MUST emit a prominent warning and MUST never be the shipped or
