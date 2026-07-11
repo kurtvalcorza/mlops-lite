@@ -88,6 +88,19 @@ def test_cold_load_acquires_admission_then_spawns_and_readies():
     assert rt.ensure_loaded() == 0.0 and len(eng.spawned) == 1  # warm path: no respawn
 
 
+def test_resident_ready_engine_short_circuits_before_the_availability_probe():
+    # 022 on-HW finding: a failed *unresolvable* serving-LLM reload leaves the LLM adapter's
+    # available() reporting False (a stale `_bind_error` from resolving the bad target), but the
+    # resident+ready child is still serving and the gateway already rolled the pointer back.
+    # ensure_loaded must return the resident engine WITHOUT probing availability — else inference
+    # 502s a HEALTHY model for the rebind TTL. Mirrors the resident-child short-circuit in health().
+    rt, eng, a = _rt()
+    rt.ensure_loaded()                                    # resident + ready
+    eng.available_state = (False, "serving-LLM target not loadable")  # poison the probe
+    assert rt.ensure_loaded() == 0.0                      # resident+ready → skip probe, no raise
+    assert len(eng.spawned) == 1                          # no gratuitous respawn
+
+
 def test_unavailable_engine_surfaces_reason_and_never_admits():
     rt, eng, a = _rt()
     eng.available_state = (False, "whisper CUDA build missing — run build.sh")

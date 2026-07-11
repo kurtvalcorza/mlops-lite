@@ -87,12 +87,19 @@ class EngineRuntime:
                     raise EngineError(f"{self.adapter.engine_id} is disabled")
                 if self.wedged_reason:
                     raise EngineError(f"{self.adapter.engine_id} is wedged: {self.wedged_reason}")
-                ok, reason = self.adapter.available()
-                if not ok:
-                    raise EngineError(f"{self.adapter.engine_id} unavailable: {reason}")
+                # Already serving? Return immediately WITHOUT an availability probe (022 on-HW
+                # finding): a resident+ready child is live now, so its prereqs are moot — and probing
+                # would, for the LLM, re-read `available()`'s cached bind-state and spuriously refuse
+                # a HEALTHY resident model on a stale `_bind_error` left by a just-failed unresolvable
+                # reload (whose pointer the gateway already rolled back). Mirrors the resident-child
+                # short-circuit in the adapter's health() (Codex F1). The probe below still guards a
+                # genuine COLD load.
                 if self._resident() and self.adapter.ready():
                     self.last_used = self.clock()
                     return 0.0
+                ok, reason = self.adapter.available()
+                if not ok:
+                    raise EngineError(f"{self.adapter.engine_id} unavailable: {reason}")
                 # Resident but NOT ready → reap before relaunch, uniformly (FR-167/T351, shared).
                 if self._resident():
                     self.unload(drain_timeout_s=0)

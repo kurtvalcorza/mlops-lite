@@ -140,11 +140,17 @@ def resolve_base_version(client, base_ref: str):
     HF/local id the trainer stamps (matched via the base's `base_id` tag). Raises
     LLMResolutionError when nothing full-model matches (including the adapter-chain case)."""
     candidates = []
-    aliased = _by_alias(client, base_ref)
-    if aliased is not None:
-        candidates.append(aliased)
-    named = client.search_model_versions(f"name='{_escape(base_ref)}'")
-    candidates += sorted(named, key=lambda m: int(m.version), reverse=True)
+    # A raw HF/local base id (the trainer's ACTUAL stamp, e.g. "Qwen/Qwen2.5-0.5B-Instruct") can never
+    # be a REGISTERED MODEL NAME: MLflow rejects names containing '/' or ':' with INVALID_PARAMETER_VALUE
+    # (NOT the RESOURCE_DOES_NOT_EXIST that `_by_alias` normalizes), so the name/alias lookups below would
+    # raise and 502 the promote (on-HW finding — offline tests used slash-free base names). Only try the
+    # name paths for a value that could be a model name; a slashed/coloned id goes straight to base_id.
+    if "/" not in base_ref and ":" not in base_ref:
+        aliased = _by_alias(client, base_ref)
+        if aliased is not None:
+            candidates.append(aliased)
+        named = client.search_model_versions(f"name='{_escape(base_ref)}'")
+        candidates += sorted(named, key=lambda m: int(m.version), reverse=True)
     if not candidates:  # not a registered name → the trainer's raw id, matched by base_id tag
         tagged = client.search_model_versions(f"tags.{BASE_ID_TAG}='{_escape(base_ref)}'")
         candidates = sorted(tagged, key=lambda m: int(m.version), reverse=True)

@@ -23,6 +23,21 @@ class NotFoundError(_NotFoundBase):
         self.error_code = "RESOURCE_DOES_NOT_EXIST"
 
 
+class BadNameError(_NotFoundBase):
+    """MLflow rejects a model NAME containing '/' or ':' with INVALID_PARAMETER_VALUE — a DIFFERENT
+    code from RESOURCE_DOES_NOT_EXIST, so `llmresolve._is_not_found` does NOT swallow it. The raw HF
+    base id an adapter stamps (`Qwen/Qwen2.5-0.5B-Instruct`) hits exactly this on real MLflow; the
+    fake now models it so resolve_base_version's slash-guard is regression-covered (on-HW finding)."""
+    def __init__(self, name):
+        Exception.__init__(self, f"Invalid model name '{name}'. Names cannot contain '/' or ':'.")
+        self.error_code = "INVALID_PARAMETER_VALUE"
+
+
+def _check_name(name):
+    if "/" in str(name) or ":" in str(name):
+        raise BadNameError(name)
+
+
 class FakeMV:
     """A model-version row (the attribute surface mlflow's ModelVersion exposes to our code)."""
 
@@ -54,12 +69,14 @@ class FakeRegistry:
 
     # -- the duck-typed client surface ------------------------------------------------------------
     def get_model_version_by_alias(self, name, alias):
+        _check_name(name)  # MLflow validates the model name first (rejects '/' and ':')
         v = self.aliases.get(name)
         if alias != "serving" or v is None:
             raise NotFoundError(f"RESOURCE_DOES_NOT_EXIST: no @{alias} for {name}")
         return self.get_model_version(name, v)
 
     def get_model_version(self, name, version):
+        _check_name(name)
         for mv in self.versions:
             if mv.name == name and mv.version == str(version):
                 return mv
