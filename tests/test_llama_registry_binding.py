@@ -168,6 +168,8 @@ def test_resident_health_survives_a_bad_pending_target(tmp_path, monkeypatch):
     assert a.available()[0] is False  # the pending target is genuinely unloadable
     h = a.health(resident=True)       # …but a live child is serving
     assert h["ok"] is True and h["model_name"] == "ops-bot"  # honest: the RESIDENT model, not "bad"
+    # the VRAM estimate tracks the RESIDENT artifacts (present), not the missing pending target
+    assert h["est_vram_gb"] is not None and h["fits"] is True
     # when NOT resident, health honestly reports the bad target as unavailable (cold-load probe)
     assert a.health(resident=False)["ok"] is False
 

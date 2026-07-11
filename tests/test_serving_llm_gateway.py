@@ -82,6 +82,28 @@ def test_active_name_prefers_explicit_pointer_over_adoption(fake_reg, fake_store
     assert registry.active_serving_llm_name() == "qwen"  # the pointer wins over the promoted alias
 
 
+def test_active_name_on_store_outage_is_default_not_adopted(fake_reg, fake_store):
+    # A store OUTAGE must return the default (matching the agent's env fallback on the same outage),
+    # NOT be mistaken for an unset pointer and adopt a promoted model the agent isn't serving.
+    fake_reg.add("ops-bot", 2, "s3://models/a.gguf",
+                 {"kind": "lora-adapter", "base_model": "qwen", "task": "text-generation"},
+                 serving=True)
+    fake_store.fail = True
+    assert registry.active_serving_llm_name() == registry.DEFAULT_LLM
+
+
+def test_list_tasks_ambiguous_unset_advertises_no_live_llm(fake_reg, fake_store):
+    # Several promoted LLMs + unset pointer ⇒ active resolves to the default (not among them); rather
+    # than show an arbitrary/nondeterministic one, list_tasks advertises NO live LLM (operator
+    # promotes to disambiguate). The agent serves the env default with nothing pointer-selected.
+    fake_reg.add("m1", 1, "/zoo/b1.gguf", {"kind": "full-model", "task": "text-generation"},
+                 serving=True)
+    fake_reg.add("m2", 1, "/zoo/b2.gguf", {"kind": "full-model", "task": "text-generation"},
+                 serving=True)
+    live = [t["model"] for t in registry.list_tasks() if t["task"] == "text-generation"]
+    assert live == []
+
+
 def test_list_tasks_single_stale_alias_is_kept_only_when_active(fake_reg, fake_store):
     # F4: one promoted LLM, unset pointer → adoption makes it the active model → it IS shown (not
     # dropped). Then point elsewhere → it's no longer the live target and is filtered out.

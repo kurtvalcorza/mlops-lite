@@ -189,12 +189,26 @@ def active_serving_llm_name() -> str:
     several LLM models hold a promoted alias): the explicit pointer, else the single promoted
     `@serving` text-generation model ADOPTED (F4 — so an upgraded install with a pre-022 promoted
     fine-tune and no pointer shows/serves THAT model, matching the agent, not a stale default), else
-    the configured default base. The agent's `serving_llm.resolve` mirrors this exactly."""
-    rec = get_serving_llm()
+    the configured default base. The agent's `serving_llm.resolve` mirrors this exactly.
+
+    The store is read DIRECTLY here (not via the exception-swallowing `get_serving_llm`) so a store
+    OUTAGE returns the default — matching the agent, whose `active_model_name` raises
+    ResolutionUnavailable on the same outage and falls back to the env default — rather than being
+    mistaken for an unset pointer and ADOPTING a promoted model the agent isn't serving (that
+    mismatch would recreate the console↔agent divergence F4 removes)."""
+    s = _store()
+    try:
+        conn = s.connect()
+        try:
+            rec = s.get_serving_llm(conn)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — store unreachable ⇒ the configured default (agent does the same)
+        return DEFAULT_LLM
     if rec:
         return rec["model_name"]
     try:
-        return llmresolve.adopt_active_llm(_client()) or DEFAULT_LLM
+        return llmresolve.adopt_active_llm(_client()) or DEFAULT_LLM  # unset ⇒ adopt the sole LLM
     except Exception:  # noqa: BLE001 — best-effort adoption; registry blip ⇒ the default base
         return DEFAULT_LLM
 
@@ -397,13 +411,18 @@ def list_tasks() -> list:
         out.append(entry)
     text_gen = [e for e in out if e["task"] == llmresolve.TEXT_GENERATION]
     if text_gen:
-        # Filter to the ACTIVE serving LLM even for a SINGLE promoted alias (Codex F4): a lone
-        # pre-022 alias that isn't the active model must not advertise itself as the live LLM. With
-        # active_serving_llm_name() now ADOPTING the sole promoted model when the pointer is unset,
-        # that lone alias normally IS the active one and is kept; the filter only drops it when the
-        # pointer explicitly names a different model. `text_gen[0]` is the fallback when nothing
-        # matches (preserves a panel rather than blanking the Infer tab in that rare edge).
-        active = active_serving_llm_name()
-        keep = next((e for e in text_gen if e["model"] == active), text_gen[0])
+        if len(text_gen) == 1:
+            # The lone promoted LLM IS the live text-generation target (adoption makes it the active
+            # model when the pointer is unset; an explicit pointer elsewhere is a rare misconfig for
+            # which showing the sole LLM beats blanking the Infer tab). Keep it WITHOUT a second
+            # registry scan — active_serving_llm_name() would re-walk the registry for a no-op here.
+            keep = text_gen[0]
+        else:
+            # Several promoted LLMs → keep only the ACTIVE one (FR-276). If none is active (an
+            # ambiguous unset pointer ⇒ the default, or a pointer to a model with no @serving row),
+            # advertise NO live LLM rather than an arbitrary/nondeterministic `text_gen[0]` that
+            # contradicts what the agent serves — the operator promotes one to disambiguate.
+            active = active_serving_llm_name()
+            keep = next((e for e in text_gen if e["model"] == active), None)
         out = [e for e in out if e["task"] != llmresolve.TEXT_GENERATION or e is keep]
     return out

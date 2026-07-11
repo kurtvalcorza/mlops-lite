@@ -121,7 +121,15 @@ def promoted_llm_names(client) -> list:
 def adopt_active_llm(client):
     """The single promoted `@serving` text-generation model to adopt when the pointer is unset (F4),
     else None — zero promoted ⇒ the caller's configured default serves; several promoted ⇒ ambiguous,
-    also the default (the operator promotes to disambiguate, which sets the pointer)."""
+    also the default (the operator promotes to disambiguate, which sets the pointer).
+
+    Selection is by TASK/kind tag, not full resolvability: the gateway can't see the agent's local
+    GGUF zoo, so it can't verify a promoted model's artifacts are present. If an adopted model is
+    unservable (missing base/artifact), the agent's `serving_llm.resolve` falls back to the env
+    default (best-effort) while the console still lists the adopted model — a divergence bounded to
+    the discovery surface. The live-truth backstop is honest identity: `GET /serving/state` reports
+    the AGENT'S actually-resident model+version (FR-260), so the operator always sees what is really
+    serving even when the adopted registry target can't load."""
     names = promoted_llm_names(client)
     return names[0] if len(names) == 1 else None
 

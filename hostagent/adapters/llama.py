@@ -39,6 +39,10 @@ DEFAULT_ALIAS = "qwen2.5-7b-instruct-q4_k_m"
 #: resolve regardless (rebind(force=True)), so a switch is never TTL-delayed.
 REBIND_TTL_S = float(os.getenv("LLM_REBIND_TTL_S", "5"))
 
+#: Sentinel distinguishing "argument omitted" from an explicit `lora_path=None` (no adapter) in
+#: estimate_vram — None is a valid value, so it can't double as "use the current binding".
+_UNSET = object()
+
 
 class LlamaAdapter:
     """Adapter for the text-generation (llm) engine. Implements the duck-typed
@@ -171,17 +175,21 @@ class LlamaAdapter:
             return (False, f"LoRA adapter GGUF not found (or not a file) at {self.lora}")
         return (True, None)
 
-    def estimate_vram(self) -> float:
+    def estimate_vram(self, base_path=None, lora_path=_UNSET) -> float:
         """Quantized weights + KV/context/overhead headroom (the supervisor's `_estimate_vram_gb`),
         plus the adapter's weights when one is bound. A missing file → assume near-budget rather
-        than 0, so admission never fails open."""
+        than 0, so admission never fails open. Defaults to the CURRENT binding; `base_path`/
+        `lora_path` override it to estimate the RESIDENT artifacts for a resident health report
+        (so the reported VRAM tracks the loaded child, not a pending rebind target)."""
+        base_path = base_path or self.model
+        lora_path = self.lora if lora_path is _UNSET else lora_path
         try:
-            size_gb = os.path.getsize(self.model) / (1024 ** 3)
+            size_gb = os.path.getsize(base_path) / (1024 ** 3)
         except OSError:
             return self.vram_budget_gb * 0.95
-        if self.lora:
+        if lora_path:
             try:
-                size_gb += os.path.getsize(self.lora) / (1024 ** 3)
+                size_gb += os.path.getsize(lora_path) / (1024 ** 3)
             except OSError:
                 return self.vram_budget_gb * 0.95
         return size_gb * 1.2 + 1.0
@@ -199,7 +207,10 @@ class LlamaAdapter:
             cmd += ["--lora", self.lora]
         self._loaded = {"model_name": self.alias, "registry_version": self.registry_version,
                         "base": os.path.basename(self.model),
-                        "adapter": os.path.basename(self.lora) if self.lora else None}
+                        "adapter": os.path.basename(self.lora) if self.lora else None,
+                        # full paths so a resident health report estimates the RESIDENT artifacts,
+                        # not `self.model` (which a later poll's rebind may move to a pending target)
+                        "base_path": self.model, "adapter_path": self.lora}
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def ready(self) -> bool:
@@ -274,11 +285,15 @@ class LlamaAdapter:
             # this child intentionally resident, and letting `available()` flip ok=False would 503
             # the gateway (serving.health() gates /infer on this) into an OUTAGE while a healthy
             # child keeps serving. Report the resident child — it's alive, hence ok; identity +
-            # artifacts from `_loaded`.
+            # artifacts + VRAM estimate all from `_loaded` (self.model may already be a pending
+            # target after a poll's state() rebind).
             ok, reason = True, None
+            bp = self._loaded.get("base_path") or self.model
+            est = self.estimate_vram(bp, self._loaded.get("adapter_path")) \
+                if os.path.isfile(bp) else None
         else:
             ok, reason = self.available()  # cold: resolve + probe the next target (picks up a promote)
-        est = self.estimate_vram() if os.path.isfile(self.model) else None
+            est = self.estimate_vram() if os.path.isfile(self.model) else None
         ident = self._loaded if resident_child else {
             "model_name": self.alias, "registry_version": self.registry_version,
             "base": os.path.basename(self.model),
