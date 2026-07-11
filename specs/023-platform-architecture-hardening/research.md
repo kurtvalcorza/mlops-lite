@@ -150,6 +150,27 @@ operation, pointer, target/previous aliases, and agent identity. Reissue only id
 Operator intervention can retry or explicitly choose rollback; it cannot mark an operation active
 without resident verification.
 
+**Prior art (022 offline slice, merged in PR #65 `1008dcc` after this review's `42f8c6e` baseline)**:
+the single-shot recovery primitives this state machine coordinates ALREADY EXIST in code and MUST be
+wrapped, not reimplemented:
+
+- **validate-before-evict** (sequence step 1 / FR-307): `hostagent/swap.py` raises the distinct
+  `TargetUnresolvable` from an `available()` probe run *before* any unload/evict, so a bad artifact
+  never takes down the working holder.
+- **restore-previous / degraded** (steps 6–7 / FR-311): `gateway/app/registry.py`'s
+  `restore_serving_llm(prior)` rolls the active pointer back; a failed rollback surfaces
+  `{rolled_back: false, pointer_error}` (degraded) rather than a false success — the promote route
+  already captures `prior` before mutating and distinguishes an unloadable target (`unresolvable`)
+  from a retryable job-holder deferral.
+- **desired vs. resident** (ordering note / FR-309): serving identity is already agent-reported end
+  to end; predictions log the resident identity.
+
+023 US5 elevates these from a synchronous best-effort promote into the DURABLE, SERIALIZED,
+IDEMPOTENT, RECONCILABLE `ActivationOperation` (the parts #65 does not have: a persisted operation
+record, per-platform serialization, an idempotency key, and startup/periodic reconciliation). The
+implementer extends the merged mechanism; introducing a parallel rollback path would risk regressing
+#65's guarantees.
+
 **Rejected**:
 
 - Best-effort sequential calls: timeout ambiguity creates silent divergence.

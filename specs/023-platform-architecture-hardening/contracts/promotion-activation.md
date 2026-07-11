@@ -14,6 +14,22 @@ partial failure.
 
 No authority may substitute for another during an incomplete activation.
 
+## Prior art — build on the merged 022 offline slice (PR #65 `1008dcc`)
+
+This contract post-dates the review's `42f8c6e` baseline; 022's offline slice has since merged and
+already provides the single-shot primitives this contract coordinates. 023 wraps them in the durable
+operation — it MUST NOT introduce a parallel rollback:
+
+- **Probe before eviction** is `hostagent/swap.py`'s `TargetUnresolvable` (an `available()` check
+  before any unload). The reload route tags it `{"unresolvable": true}`.
+- **Restore-previous / degraded** is `registry.restore_serving_llm(prior)`; a failed restore already
+  surfaces `{rolled_back: false, pointer_error}` — the degraded outcome this contract names.
+- **Desired vs. resident** identity is already agent-reported; prediction logging uses resident.
+
+What 022 lacks and 023 adds: the durable `ActivationOperation` record, per-platform serialization,
+the idempotency key, and startup/periodic reconciliation. Implementations extend `restore_serving_llm`
+/ the `unresolvable` signal into these states rather than re-deriving them.
+
 ## Submit contract
 
 An operator promotion supplies target model/version, preemption confirmation when required, and an

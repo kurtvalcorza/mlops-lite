@@ -180,6 +180,13 @@ never silently reports a model that is not serving.
 **Why this priority**: Promotion spans MLflow, Postgres, and the host agent. Without a durable
 operation model, no implementation can make the cross-system action atomic.
 
+**Prior art**: 022's offline slice (merged in PR #65, after this spec's `42f8c6e` baseline) already
+ships the single-shot recovery primitives — probe-before-evict (`TargetUnresolvable`), pointer
+rollback with a degraded `pointer_error` outcome (`restore_serving_llm`), and agent-reported
+desired-vs-resident identity. US5 wraps these in the durable, serialized, idempotent,
+reconcilable `ActivationOperation`; it extends the merged mechanism rather than replacing it (see
+`contracts/promotion-activation.md` §Prior art and research R5).
+
 **Independent Test**: Inject a failure after each activation step, restart the gateway/agent as
 applicable, run reconciliation, and verify convergence to either the new active model or the
 recorded previous model with honest degraded status throughout.

@@ -185,6 +185,10 @@ target or previous identity without duplicate reload or false prediction attribu
 
 022 T461–T466 and T469 (pointer, resolver, adapter binding, reload primitive, honest identity) must
 exist or be implemented in the same integration sequence. 023 does not duplicate those capabilities.
+**Merged since the `42f8c6e` baseline (PR #65 `1008dcc`)**: 022's single-shot recovery primitives —
+`swap.TargetUnresolvable` (probe-before-evict), `registry.restore_serving_llm` + the `pointer_error`
+degraded outcome, and agent-reported desired-vs-resident identity — already exist. US5 wraps them in
+the durable `ActivationOperation`; extend them, do not re-derive (see contract §Prior art, research R5).
 
 ### Tests
 
