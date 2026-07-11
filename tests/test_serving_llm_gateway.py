@@ -164,7 +164,8 @@ def test_target_info_recognizes_legacy_untagged_adapter(fake_reg):
 
 # -- T467: promote = go live -------------------------------------------------------------------------
 
-def _promote_env(monkeypatch, *, target, promoted=True, reload_result=None, prior=None):
+def _promote_env(monkeypatch, *, target, promoted=True, reload_result=None, prior=None,
+                 restore_raises=None):
     calls = {"promote": [], "pointer": [], "reload": [], "restore": []}
     monkeypatch.setattr(registry, "list_versions",
                         lambda name: [{"version": "2"}])
@@ -178,8 +179,13 @@ def _promote_env(monkeypatch, *, target, promoted=True, reload_result=None, prio
     monkeypatch.setattr(registry, "set_serving_llm",
                         lambda n, actor="operator": calls["pointer"].append(n) or
                         {"model_name": n})
-    monkeypatch.setattr(registry, "restore_serving_llm",
-                        lambda p: calls["restore"].append(p))
+
+    def _restore(p):
+        calls["restore"].append(p)
+        if restore_raises is not None:
+            raise restore_raises
+
+    monkeypatch.setattr(registry, "restore_serving_llm", _restore)
     monkeypatch.setattr(serving, "request_llm_reload",
                         lambda preempt=False: calls["reload"].append(preempt) or
                         (reload_result or {"status": "reloaded"}))
@@ -214,6 +220,23 @@ def test_promote_llm_rolls_back_pointer_when_target_unloadable(monkeypatch):
     assert calls["restore"] == [{"model_name": "qwen", "selected_by": "operator"}]  # … then reverted
     assert res["serving_llm"]["rolled_back"] is True
     assert res["serving_llm"]["active"] == "qwen"                             # served LLM unchanged
+
+
+def test_promote_llm_surfaces_pointer_error_when_rollback_write_fails(monkeypatch):
+    # Double fault (@claude review): the reload is `unresolvable` AND the rollback write itself fails
+    # (a store blip). set_serving_llm landed but restore didn't, so the pointer may STILL name the
+    # unloadable target — the 503-on-next-cold-load bug. It must NOT be masked as a generic error:
+    # surface rolled_back=false + pointer_error so the operator knows to re-promote/reset.
+    target = {"task": "text-generation", "kind": "full-model", "base": None, "error": None}
+    calls = _promote_env(
+        monkeypatch, target=target, prior={"model_name": "qwen", "selected_by": "operator"},
+        reload_result={"status": "deferred", "unresolvable": True, "reason": "not loadable"},
+        restore_raises=registry.RegistryError("pointer rollback failed: store down"))
+    res = models_router.promote("ops-bot", models_router.PromoteRequest(version="2", preempt=True))
+    assert calls["pointer"] == ["ops-bot"] and len(calls["restore"]) == 1  # both attempted
+    sl = res["serving_llm"]
+    assert sl["rolled_back"] is False and "store down" in sl["pointer_error"]
+    assert "error" not in sl  # NOT collapsed into the generic outer-except error
 
 
 def test_promote_llm_keeps_pointer_on_retryable_deferral(monkeypatch):

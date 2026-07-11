@@ -128,11 +128,21 @@ def promote(name: str, req: PromoteRequest):
                 # would 503 the next cold load (after the current model is idle-reaped). The alias
                 # stays moved (the console shows it promoted-but-not-live); the operator re-promotes
                 # once the GGUF is present on the host.
-                registry.restore_serving_llm(prior)
                 REGISTRY_OPS.labels(op="promote", status="unresolvable").inc()
-                res["serving_llm"] = {"active": (prior or {}).get("model_name"),
-                                      "kind": llm_target["kind"], "base": llm_target["base"],
-                                      "reload": reload, "rolled_back": True}
+                sl = {"active": (prior or {}).get("model_name"), "kind": llm_target["kind"],
+                      "base": llm_target["base"], "reload": reload}
+                try:
+                    registry.restore_serving_llm(prior)
+                    sl["rolled_back"] = True
+                except registry.RegistryError as re_err:
+                    # The rollback WRITE itself failed (a store blip in the double-fault window):
+                    # set_serving_llm landed but restore didn't, so the pointer may STILL name the
+                    # unloadable target — the very 503-on-next-cold-load bug this path closes. Do NOT
+                    # let the outer except mask it as a generic error (@claude review); surface it
+                    # distinctly so the operator knows the pointer needs a manual re-promote/reset.
+                    sl["rolled_back"] = False
+                    sl["pointer_error"] = str(re_err)
+                res["serving_llm"] = sl
             else:
                 res["serving_llm"] = {"active": name, "kind": llm_target["kind"],
                                       "base": llm_target["base"], "reload": reload}

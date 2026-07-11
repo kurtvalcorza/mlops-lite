@@ -51,6 +51,8 @@ type ServingLLMResult = {
   // 022 FR-265: the agent couldn't load the promoted artifact → the pointer was rolled back so the
   // served LLM stays unchanged (the alias still moved: promoted-but-not-live).
   rolled_back?: boolean;
+  // the rollback WRITE itself failed (rare double-fault) → the pointer may still name the bad target.
+  pointer_error?: string;
   error?: string;
 };
 type PromoteResult = {
@@ -233,7 +235,12 @@ export function PromoteGate({
           agent's reason (job holder, missing confirm), or a pointer error. Never silent. */}
       {servingLLM && (
         <p className="mt-2 text-caption-md">
-          {servingLLM.error ? (
+          {servingLLM.pointer_error ? (
+            <span className="st-danger">
+              [x] switch reverted, but the pointer may still name the bad target — re-promote once
+              the artifact is present: {servingLLM.pointer_error}
+            </span>
+          ) : servingLLM.error ? (
             <span className="st-danger">[x] switch: {servingLLM.error}</span>
           ) : servingLLM.reload &&
             ['loaded', 'reloaded', 'swapped', 'noop'].includes(servingLLM.reload.status) ? (
