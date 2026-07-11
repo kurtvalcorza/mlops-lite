@@ -35,7 +35,9 @@ export function LoopNav() {
         <Link href="/serving" className="text-heading-md tracking-tight text-ink">
           MLOPS-LITE
         </Link>
-        <span className="text-caption-md text-ash">// operator console</span>
+        {/* the literal "//" is DISPLAY text (the console wordmark), not a comment — braces make
+            that explicit so react/jsx-no-comment-textnodes can't read it as a lost comment */}
+        <span className="text-caption-md text-ash">{'// operator console'}</span>
         {/* off-axis chrome: GPU pill + health — right-aligned, not part of the ordered loop */}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           <GpuPill live={live} />

@@ -13,4 +13,14 @@ select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# --strict-markers (023 T491, FR-293): an unregistered marker is a collection ERROR, so a typo'd
+# @pytest.mark.hw can never silently run (or silently not-skip) in the wrong environment.
+addopts = "-q --strict-markers"
+# The offline/live/hardware taxonomy (023, contracts/delivery-gates.md): UNMARKED tests are the
+# offline suite CI runs in full. `live` tests self-skip through the tests/conftest.py guard
+# fixtures when the stack is absent (each names its bring-up hint). `hw` tests additionally
+# require the target GPU machine and NEVER run from hosted CI (RUN_HW_TESTS=1 opts in).
+markers = [
+    "live: needs the running local stack (gateway/agent/MLflow); self-skips with a bring-up hint when unreachable",
+    "hw: needs the target GPU hardware; skipped unless RUN_HW_TESTS=1 (never satisfiable from hosted CI)",
+]

@@ -579,14 +579,35 @@ def _live_predictor(modality: str) -> Callable:
                     f"pass predict_fn= to evaluate it")
 
 
-def _predict_llm(rows, _modality, _version) -> list:
-    """Greedy single-shot generations for each QA prompt via the serving supervisor (LLM lease tenant).
+def _engine_base(engine: str, override_env: str) -> str:
+    """The live predictor base URL for an agent engine (023 US1, FR-277/278).
 
-    Scores the model the supervisor currently holds for the LLM lease; wiring an on-demand load of a
-    *specific* registered version (rather than the resident one) is the on-hardware step for SC-068."""
+    Pre-023 these read `SERVING_URL`/`BENTO_URL` with the RETIRED per-daemon port defaults
+    (:8090/:8092 — dead since 018 folded every engine into the one host agent at :8100), so an
+    unconfigured live evaluation dialed endpoints nothing listens on. The default now derives from
+    the canonical consolidated topology — `platformlib.topology.agent_url()` + the engine sub-path —
+    exactly like `gateway/app/settings.py`. The env override survives (an explicitly configured
+    deployment keeps working); only the silent dead default is gone.
+
+    platformlib is imported lazily but is present in every runtime that loads this module: the
+    gateway image COPYs it, and every standalone load (training/scoring, HPO) reaches this module
+    THROUGH `platformlib.gateway_bridge` — so the import cannot be the thing that breaks
+    standalone loading (FR-279)."""
+    override = os.getenv(override_env)
+    if override:
+        return override
+    from platformlib.topology import agent_url
+
+    return f"{agent_url()}/engines/{engine}"
+
+
+def _predict_llm(rows, _modality, _version) -> list:
+    """Greedy single-shot generations for each QA prompt via the host agent's llm engine (the GPU
+    admission tenant). Scores the model the agent currently serves for text-generation; wiring an
+    on-demand load of a *specific* registered version is the on-hardware step for SC-068."""
     import httpx
 
-    url = os.getenv("SERVING_URL", "http://host.docker.internal:8090")
+    url = _engine_base("llm", "SERVING_URL")  # → <agent>/engines/llm/infer (FR-278)
     out = []
     with httpx.Client(timeout=300) as client:
         for r in rows:
@@ -599,12 +620,12 @@ def _predict_llm(rows, _modality, _version) -> list:
 
 
 def _predict_vision(rows, _modality, _version) -> list:
-    """Top-1 label for each held-out image via the BentoML vision service (vision lease tenant)."""
+    """Top-1 label for each held-out image via the host agent's vision engine (GPU tenant)."""
     import base64
 
     import httpx
 
-    url = os.getenv("BENTO_URL", "http://host.docker.internal:8092")
+    url = _engine_base("vision", "BENTO_URL")  # → <agent>/engines/vision/classify (FR-278)
     out = []
     with httpx.Client(timeout=120) as client:
         for r in rows:

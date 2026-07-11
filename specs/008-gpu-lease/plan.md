@@ -97,7 +97,7 @@ for v1.3.0.
 > proceed onto the GPU. CPU-only models (e.g. embeddings, tabular) hold no lease and are exempt. Tenants load on
 > request and release VRAM after use (idle-release); workers are not always-on. Admission is checked
 > against **live free VRAM** and no feature may assume more VRAM than the host GPU provides (`VRAM_GB` in
-> [hardware-profile.md](./hardware-profile.md)). This single-tenant GPU lease is the core constraint that
+> [hardware-profile.md](../../.specify/memory/hardware-profile.md)). This single-tenant GPU lease is the core constraint that
 > separates this platform from production cluster designs — violating it defeats the project's purpose.
 
 **Amendment metadata to apply at ratification (T132):** bump `**Version**: 1.3.0` → `1.4.0`, set
