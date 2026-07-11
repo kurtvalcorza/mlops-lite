@@ -146,6 +146,24 @@ def test_target_info_resolves_adapter_base(fake_reg):
     assert info["base"]["name"] == "qwen-base" and info["base"]["source"] == "/zoo/base.gguf"
 
 
+def test_target_info_resolves_slashed_hf_base_id(fake_reg):
+    # ON-HW FINDING: real trained adapters stamp `base_model` as the raw HF id
+    # ("Qwen/Qwen2.5-0.5B-Instruct"), and MLflow rejects a '/' as a model NAME with
+    # INVALID_PARAMETER_VALUE (not RESOURCE_DOES_NOT_EXIST) — so the name/alias lookups raise and
+    # 502 the promote. The base MUST be found via its `base_id` tag. Offline missed this because the
+    # fake used slash-free base names; the fake now rejects slashed names like MLflow (_check_name).
+    fake_reg.add("qwen2.5-0.5b-instruct", 1, "s3://models/base-zoo/b.gguf",
+                 {"kind": "full-model", "task": "text-generation",
+                  "base_id": "Qwen/Qwen2.5-0.5B-Instruct"})
+    fake_reg.add("ops-bot-v2", 1, "s3://models/a.gguf",
+                 {"kind": "lora-adapter", "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+                  "task": "text-generation"})
+    info = registry.llm_target_info("ops-bot-v2", "1")
+    assert info["error"] is None                                  # NOT a 502 from the '/' name
+    assert info["kind"] == "lora-adapter"
+    assert info["base"]["name"] == "qwen2.5-0.5b-instruct"        # resolved via base_id, not name
+
+
 def test_target_info_unresolvable_base_carries_error(fake_reg):
     fake_reg.add("ops-bot", 1, "s3://models/a.gguf",
                  {"kind": "lora-adapter", "base_model": "nowhere", "task": "text-generation"})
