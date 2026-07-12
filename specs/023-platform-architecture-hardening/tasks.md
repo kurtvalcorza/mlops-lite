@@ -306,6 +306,11 @@ parity across extractions, and the documentation checklist finds no current-stat
   `monitoring/README.md`; do not add Alertmanager or external credentials (FR-323).
 - [ ] **T543** [US7] Extract relational repositories/migration concerns from `platformlib/store.py`
   behind the existing public facade, keeping callers and stored contracts compatible (FR-324/325).
+  - Landing incrementally behind the facade, each increment verified green: the shared
+    `platformlib/storeimpl/_base.py` (store errors + epoch/jsonb seam) + the ActivationOperation
+    repository (`platformlib/storeimpl/activations.py`) are extracted first, guarded by
+    `tests/test_store_facade.py` (T539). The remaining repos (predictions/policies/suggestions/
+    serving_llm/jobs) follow the same pattern.
 - [ ] **T544** [US7] Extract evaluation live predictors/benchmark metrics and scheduler external
   adapters/state transitions into coherent internal modules under `gateway/app/`, preserving
   standalone load and injected test seams (FR-324/325).
