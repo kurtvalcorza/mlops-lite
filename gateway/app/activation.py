@@ -24,6 +24,7 @@ Injectable seams (`_store`, `_registry`, `_serving`) keep the machine unit-testa
 (tests/test_activation.py drives it with fakes; tests/test_activation_recovery.py injects
 failures after every step)."""
 import os
+import threading
 import time
 import uuid
 
@@ -67,6 +68,14 @@ class ActivationService:
         self._registry = registry or _default_registry()
         self._serving = serving or _default_serving()
         self._log = log
+        # 023 review (US5-F2): serialize every run() in-process. At most one non-terminal operation
+        # exists platform-wide (the 002 partial unique index), so this single lock makes the initial
+        # activate()'s run() and the periodic reconciler's run() of the SAME operation mutually
+        # exclusive — otherwise both could issue the agent's keyed reload before either stored a
+        # result, and swap.reload_serving_llm_op re-executes an in-flight (result-None) op → a
+        # duplicate reload / serving blip on a slow (>reconcile-interval) load. One gateway process,
+        # so an in-process lock is sufficient; the reconciler tick simply waits and then no-ops.
+        self._run_lock = threading.Lock()
 
     # -- connection helper ---------------------------------------------------------------------------
 
@@ -76,12 +85,17 @@ class ActivationService:
     # -- submit (contract §Submit) --------------------------------------------------------------------
 
     def submit(self, *, name: str, version, actor: str = "operator", prior: dict = None,
-               idempotency_key: str = None) -> dict:
+               idempotency_key: str = None, preempt: bool = False) -> dict:
         """Create (or return) the durable operation for activating name@version. The caller (the
         gated promote route) has already authenticated the operator, run the gate, resolved the
         target, and moved the alias — this records the recoverable half. Returns the operation;
         raises ActivationError on a same-key-different-target or a concurrent non-terminal
-        operation for a different target (contract: 409, never a duplicate reload)."""
+        operation for a different target (contract: 409, never a duplicate reload).
+
+        `preempt` is the operator's preemption confirmation. It is persisted in `evidence`
+        (US5-F1) so that reconciliation after a crash re-issues the reload WITH the confirmation —
+        otherwise a mid-flight preempting activation degrades on restart (reconcile would drive
+        preempt=False → PreemptRefused → degraded) instead of recovering, defeating US5's guarantee."""
         key = idempotency_key or f"promote:{name}@{version}"
         conn = self._conn()
         try:
@@ -102,7 +116,8 @@ class ActivationService:
                     previous_model=(prior or {}).get("model_name"),
                     previous_version=str((prior or {}).get("version"))
                     if (prior or {}).get("version") is not None else None,
-                    evidence={"submitted_at": time.time()})
+                    evidence={"submitted_at": time.time(),
+                              "requires_preemption": bool(preempt)})
             except self._store.ActivationConflict as e:
                 current = self._store.current_activation(conn)
                 raise ActivationError(
@@ -119,24 +134,26 @@ class ActivationService:
     def run(self, operation_id: str, *, preempt: bool = False) -> dict:
         """Advance the operation as far as it can go right now; returns the final record. Every
         step is idempotent, so run() after a crash (or a reconcile pass) is the SAME code path as
-        the first attempt."""
-        conn = self._conn()
-        try:
-            op = self._store.get_activation(conn, operation_id)
-            if op is None:
-                raise ActivationError(f"no activation operation {operation_id}")
-            if op["state"] == "prepared":
-                op = self._commit_pointer(conn, op) or self._reread(conn, operation_id)
-            if op["state"] == "committing":
-                op = self._advance_to_reloading(conn, op) or self._reread(conn, operation_id)
-            if op["state"] == "reloading":
-                op = self._reload_and_verify(conn, op, preempt=preempt) \
-                    or self._reread(conn, operation_id)
-            if op["state"] == "rolling_back":
-                op = self._roll_back(conn, op) or self._reread(conn, operation_id)
-            return op
-        finally:
-            conn.close()
+        the first attempt. Serialized process-wide (US5-F2) so a concurrent activate()+reconcile of
+        the same operation cannot double-issue the agent's keyed reload."""
+        with self._run_lock:
+            conn = self._conn()
+            try:
+                op = self._store.get_activation(conn, operation_id)
+                if op is None:
+                    raise ActivationError(f"no activation operation {operation_id}")
+                if op["state"] == "prepared":
+                    op = self._commit_pointer(conn, op) or self._reread(conn, operation_id)
+                if op["state"] == "committing":
+                    op = self._advance_to_reloading(conn, op) or self._reread(conn, operation_id)
+                if op["state"] == "reloading":
+                    op = self._reload_and_verify(conn, op, preempt=preempt) \
+                        or self._reread(conn, operation_id)
+                if op["state"] == "rolling_back":
+                    op = self._roll_back(conn, op) or self._reread(conn, operation_id)
+                return op
+            finally:
+                conn.close()
 
     def _reread(self, conn, operation_id):
         return self._store.get_activation(conn, operation_id)
@@ -146,9 +163,13 @@ class ActivationService:
         try:
             self._registry.set_serving_llm(op["target_model"], actor=op["actor"])
         except Exception as e:  # noqa: BLE001 — pointer write failed; stay prepared, record it
+            # US5-F4: never persist raw exception text — a driver error can carry host/IP/port; the
+            # bounded error_code is the machine signal, the class name is the human breadcrumb.
             return self._store.cas_activation(
                 conn, op["operation_id"], "prepared", "prepared",
-                error_code="pointer_write_failed", error=str(e)[:300], bump_attempts=True)
+                error_code="pointer_write_failed",
+                error=f"pointer write failed ({type(e).__name__}) — see gateway logs",
+                bump_attempts=True)
         return self._store.cas_activation(
             conn, op["operation_id"], "prepared", "committing",
             evidence_patch={"pointer_set": op["target_model"]})
@@ -229,7 +250,8 @@ class ActivationService:
         except Exception as e:  # noqa: BLE001 — the double-fault window: pointer may still name
             done = self._store.cas_activation(  # the unloadable target — degraded, visible
                 conn, op["operation_id"], "rolling_back", "degraded",
-                error_code="pointer_error", error=str(e)[:400])
+                error_code="pointer_error",  # US5-F4: sanitized — no raw driver text
+                error=f"rollback pointer write failed ({type(e).__name__}) — see gateway logs")
             if done:
                 ACTIVATION_OUTCOMES.labels(outcome="degraded").inc()
             return done
@@ -250,7 +272,8 @@ class ActivationService:
         falls back to 022's exact single-shot sequence — an operator promote must not fail just
         because durability is degraded; it only loses recoverability, visibly."""
         try:
-            op = self.submit(name=name, version=version, actor="operator", prior=prior)
+            op = self.submit(name=name, version=version, actor="operator", prior=prior,
+                             preempt=preempt)
         except ActivationError:
             raise  # a REAL conflict (concurrent op / key reuse) → the route's 409
         except Exception as e:  # noqa: BLE001 — no durable store: the 022 single-shot path
@@ -323,7 +346,11 @@ class ActivationService:
         for op in ops:
             summary["resumed"] += 1
             try:
-                final = self.run(op["operation_id"])
+                # US5-F1: drive with the operator's PERSISTED preemption confirmation, so resuming a
+                # mid-flight preempting activation re-issues the reload with preempt=true rather than
+                # degrading on a PreemptRefused it would never clear.
+                preempt = bool((op.get("evidence") or {}).get("requires_preemption"))
+                final = self.run(op["operation_id"], preempt=preempt)
                 if final and final["state"] not in self._store.ACTIVATION_NONTERMINAL:
                     summary["terminal"] += 1
             except Exception as e:  # noqa: BLE001 — one stuck op must not stall the loop
@@ -356,7 +383,11 @@ class ActivationService:
                     desired["model_name"] = rec["model_name"]
                 op = self._store.current_activation(conn)
                 if op:
-                    desired.setdefault("model_name", op["target_model"])
+                    # US5-F3: fall back to the operation's target when the pointer is unset/unreadable
+                    # (e.g. state `prepared`, pointer not yet written). `setdefault` was a no-op here
+                    # because "model_name" is always present (initialized to None above).
+                    if desired["model_name"] is None:
+                        desired["model_name"] = op["target_model"]
                     desired["version"] = op["target_version"] \
                         if op["target_model"] == desired["model_name"] else None
                     activation = {"operation_id": op["operation_id"], "state": op["state"],

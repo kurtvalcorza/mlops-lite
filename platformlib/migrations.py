@@ -241,7 +241,7 @@ def apply(conn=None, *, dsn: str = None, directory: str = None, applied_by: str 
                 if version > newest_local:
                     raise MigrationError(
                         f"database is at migration {version:03d}, newer than this binary's "
-                        f"{newest_local:03d} — refusing to touch a newer schema (FR-300)")
+                        f"{newest_local:03d} — refusing to touch a newer schema (FR-301)")
                 raise MigrationError(
                     f"ledger records migration {version:03d} but no such file ships — "
                     f"repository/database history diverged; manual reconciliation required")
@@ -252,6 +252,16 @@ def apply(conn=None, *, dsn: str = None, directory: str = None, applied_by: str 
                     f"(FR-300)")
 
         have = max(recorded) if recorded else 0
+        # US4-F3 (review): a below-max version missing from the ledger is a silent gap (a bad merge
+        # that renumbered, or a hand-edited ledger). Forward-only numbering should prevent it, but
+        # `pending` is version>have, so an unrecorded hole at <=have would never apply — fail LOUD
+        # rather than skip it.
+        gap = sorted(m.version for m in migrations if m.version <= have and m.version not in recorded)
+        if gap:
+            raise MigrationError(
+                f"ledger is at {have:03d} but earlier migration(s) "
+                f"{', '.join(f'{v:03d}' for v in gap)} are unrecorded — history has a gap; "
+                f"manual reconciliation required (never silently skipped)")
         pending = [m for m in migrations if m.version > have]
 
         # Legacy adoption (FR-297/300): no ledger rows but the old bootstrap's tables exist →

@@ -99,6 +99,12 @@ services:
       context: .
       dockerfile: gateway/Dockerfile
     depends_on:
+      # 023 review (US4-F1): the gateway now OWNS the schema migration at startup, with only a
+      # ~20s connect-retry budget, and on exhaustion it wedges in migration `error`/503 until a
+      # container restart. Wait for Postgres's healthcheck (pg_isready) so a cold-machine `initdb`
+      # + init.sql can't outlast that budget on first bring-up.
+      postgres:
+        condition: service_healthy
       mlflow:
         condition: service_started
       garage-init:

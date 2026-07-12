@@ -45,7 +45,12 @@ groups:
           runbook: "monitoring/README.md#alert-migrationfailed"
 
       - alert: RepeatedSchedulerFailures
-        expr: increase(gateway_policy_checks_total{result="error"}[30m]) > 3
+        # review US7-F2: match EVERY error outcome, not just result="error". The store-outage path
+        # (scheduler.list_policies() throwing → result="store_error") is the case this alert's own
+        # runbook names as the typical cause, yet result="error" alone never counted it — the whole
+        # retrain loop could be dead while this stayed silent. Also covers check_error /
+        # pending_clear_error / watch_persist_error.
+        expr: increase(gateway_policy_checks_total{result=~".*error.*"}[30m]) > 3
         for: 5m
         labels:
           severity: warning

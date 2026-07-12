@@ -40,7 +40,12 @@ MLFLOW_TRACKING_URI = _os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 # 023 US2 (FR-286): the internal agent credential. Server-side ONLY — never surfaces through the
 # BFF/browser, error payloads, logs, or metrics. Every gateway HTTP client that targets the agent
 # sends it as X-Agent-Key via agent_headers() below.
-AGENT_API_KEY = _os.getenv("AGENT_API_KEY", "")
+# FR-288 migration grace (review US2-F1): mirror the AGENT's key precedence so a legacy host
+# upgraded with ONLY the deprecated AGENT_CONTROL_SECRET keeps serving — otherwise the agent would
+# enforce that value while the gateway sent an empty key and 401'd every hop. SWAP_CONTROL_SECRET is
+# deliberately excluded (it "must not alone enable" the boundary). Removed next release with the
+# agent-side fallback.
+AGENT_API_KEY = _os.getenv("AGENT_API_KEY") or _os.getenv("AGENT_CONTROL_SECRET") or ""
 
 
 def agent_headers() -> dict:

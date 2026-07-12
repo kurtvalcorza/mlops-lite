@@ -667,8 +667,11 @@ def make_handler(admission, journal, manager, jobs, policy=None):
 
         def _read_chunked(self, limit: int):
             """Counted chunked-transfer read (FR-317): aborts at `limit` — an unknown-length body
-            cannot buffer unbounded. Returns bytes, or None once the limit is exceeded."""
-            total, parts = 0, []
+            cannot buffer unbounded. Accumulates into ONE bytearray so memory tracks the DATA size,
+            not the chunk COUNT (review US6-F1: a body dripped as ~1-byte chunks up to the limit
+            must not build tens of millions of per-chunk objects → ~1 GB RSS for a 32 MiB payload).
+            Returns bytes, or None once the limit is exceeded."""
+            total, buf = 0, bytearray()
             while True:
                 size_line = self.rfile.readline(64).strip()
                 try:
@@ -677,11 +680,11 @@ def make_handler(admission, journal, manager, jobs, policy=None):
                     return None
                 if size == 0:
                     self.rfile.readline(4)  # trailing CRLF
-                    return b"".join(parts)
+                    return bytes(buf)
                 total += size
                 if total > limit:
                     return None
-                parts.append(self.rfile.read(size))
+                buf.extend(self.rfile.read(size))
                 self.rfile.readline(4)  # chunk-terminating CRLF
 
         def _read_body(self):

@@ -9,6 +9,7 @@ operation's target.
 """
 import os
 import sys
+import threading
 
 import pytest
 
@@ -121,6 +122,102 @@ def test_reconcile_advances_via_authorities_not_the_last_call():
     _force_state(store, op["operation_id"], "reloading")
     store.pointer = {"model_name": "ops-bot", "selected_at": 1.0, "selected_by": "operator"}
     svc.reconcile_all()
+    assert store.ops[op["operation_id"]]["state"] == "active"
+
+
+# --- US5-F1 (review): the operator's preemption confirmation survives a crash ---------------------
+
+class _PreemptGatedServing(FakeServing):
+    """A cross-tenant holder that refuses without the operator's preemption confirmation and
+    completes WITH it — the case reconcile used to lose (drove preempt=False → permanent defer)."""
+
+    def request_llm_reload(self, preempt=False, *, operation_id=None, target=None):
+        self.reload_calls.append({"preempt": preempt, "operation_id": operation_id})
+        if operation_id and operation_id in self._completed:
+            return {**self._completed[operation_id], "replayed": True}
+        if not preempt:
+            return {"status": "deferred",
+                    "reason": "would displace the resident serving engine — confirm preemption"}
+        res = {"status": "reloaded", "model_name": "ops-bot", "registry_version": "2"}
+        if operation_id:
+            self._completed[operation_id] = res
+        self.real_reloads += 1
+        return dict(res)
+
+
+def test_reconcile_preserves_operator_preemption_confirmation():
+    """US5-F1: a crash mid-activation of an operator-CONFIRMED preemption must RESUME with the
+    confirmation. The confirmation is persisted at submit; reconcile_all re-issues the reload with
+    preempt=true and converges to `active`, instead of driving preempt=false → permanent defer →
+    degraded (which would defeat US5's recoverability guarantee for exactly the preemption case)."""
+    store, reg = FakeActivationStore(), FakeRegistry()
+    srv = _PreemptGatedServing(resident=RESIDENT_OK)
+    act, svc = make_service(store, reg, srv)
+
+    op = svc.submit(name="ops-bot", version="2", preempt=True)     # operator confirmed preemption
+    assert store.ops[op["operation_id"]]["evidence"]["requires_preemption"] is True
+    _force_state(store, op["operation_id"], "reloading")           # crash after pointer, pre-verify
+
+    svc.reconcile_all()                                            # the restarted gateway's pass
+
+    assert store.ops[op["operation_id"]]["state"] == "active"      # recovered, not degraded
+    assert any(c["preempt"] for c in srv.reload_calls)             # drove WITH the confirmation
+
+
+def test_reconcile_without_confirmation_still_defers_then_degrades():
+    """The negative control: an UNCONFIRMED activation against the same holder must NOT self-grant
+    preemption on reconcile — it defers and (bounded) degrades, never silently displaces a holder."""
+    store, reg = FakeActivationStore(), FakeRegistry()
+    srv = _PreemptGatedServing(resident=RESIDENT_OK)
+    act, svc = make_service(store, reg, srv)
+
+    op = svc.submit(name="ops-bot", version="2")                   # preempt defaults False
+    assert store.ops[op["operation_id"]]["evidence"]["requires_preemption"] is False
+    _force_state(store, op["operation_id"], "reloading")
+    for _ in range(act.MAX_ATTEMPTS + 1):
+        svc.reconcile_all()
+    assert store.ops[op["operation_id"]]["state"] == "degraded"
+    assert all(not c["preempt"] for c in srv.reload_calls)         # never self-granted preemption
+
+
+# --- US5-F2 (review): concurrent drive of one operation issues a single reload ---------------------
+
+def test_concurrent_run_of_one_operation_issues_a_single_reload():
+    """US5-F2: the initial activate()'s run() and the periodic reconciler's run() of the SAME
+    operation are serialized process-wide, so the agent's keyed reload is issued once even when the
+    load is slow (> the reconcile interval). Without the lock both would call request_llm_reload
+    before either stored a result → the agent re-executes an in-flight op → a duplicate reload."""
+    store, reg = FakeActivationStore(), FakeRegistry()
+    in_reload = threading.Event()
+    release = threading.Event()
+
+    class _SlowServing(FakeServing):
+        def request_llm_reload(self, preempt=False, *, operation_id=None, target=None):
+            in_reload.set()
+            release.wait(2.0)                                      # a slow (>tick) load, held open
+            return super().request_llm_reload(preempt=preempt, operation_id=operation_id,
+                                              target=target)
+
+    srv = _SlowServing([TARGET_OK], resident=RESIDENT_OK)
+    act, svc = make_service(store, reg, srv)
+    op = svc.submit(name="ops-bot", version="2")
+    _force_state(store, op["operation_id"], "reloading")
+
+    results = []
+
+    def drive():
+        results.append(svc.run(op["operation_id"]))
+
+    t1 = threading.Thread(target=drive)
+    t1.start()
+    assert in_reload.wait(2.0)                                     # t1 is inside the (locked) reload
+    t2 = threading.Thread(target=drive)                           # the reconciler, same op
+    t2.start()
+    release.set()                                                 # let the slow reload finish
+    t1.join(3.0)
+    t2.join(3.0)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert srv.real_reloads == 1                                  # serialized: exactly one reload
     assert store.ops[op["operation_id"]]["state"] == "active"
 
 
