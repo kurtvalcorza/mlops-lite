@@ -119,7 +119,7 @@ def test_stuck_child_is_reaped_before_relaunch_for_every_engine():
     rt.ensure_loaded()
     eng.ready_state = False                   # child alive but unresponsive — the stuck case
     assert rt.state()["state"] == "loading"
-    eng2_ready = {"n": 0}
+    {"n": 0}
 
     def ready_after_respawn():
         # not-ready until a SECOND child exists (the reaped relaunch), then ready

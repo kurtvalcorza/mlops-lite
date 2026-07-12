@@ -9,7 +9,6 @@ Requires the stack up with auth enabled (GATEWAY_API_KEYS set on the gateway) an
 exposed to the test as GATEWAY_API_KEY (scripts/gen_secrets prints both). SKIPs cleanly if no key
 is configured for the test, so it never blocks an open dev run. Exits non-zero on failure.
 """
-import json
 import os
 import sys
 import urllib.error

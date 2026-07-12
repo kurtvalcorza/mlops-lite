@@ -23,7 +23,15 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # _common/lineage import as module or script
-from _common import MLFLOW_URI, MODELS_BUCKET, _log, fetch_jsonl, flow, free_cuda, s3_client  # noqa: E402
+from _common import (  # noqa: E402
+    MLFLOW_URI,
+    MODELS_BUCKET,
+    _log,
+    fetch_jsonl,
+    flow,
+    free_cuda,
+    s3_client,
+)
 from lineage import lineage_tags, link_parent_run, resolve_parent  # noqa: E402
 
 TASK = "image-classification"
@@ -104,7 +112,7 @@ def _train(images, labels, categories, *, backbone, epochs, lr, batch_size, unfr
     cat_index = {c: i for i, c in enumerate(categories)}
     pre = _preprocess()
     x = torch.stack([pre(im) for im in images])
-    y = torch.tensor([cat_index[l] for l in labels], dtype=torch.long)
+    y = torch.tensor([cat_index[lab] for lab in labels], dtype=torch.long)
 
     model = _build_model(backbone, len(categories), pretrained=parent_source is None)
     if parent_source:
@@ -151,7 +159,7 @@ def _train(images, labels, categories, *, backbone, epochs, lr, batch_size, unfr
     state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
     metrics = {"train_loss": train_loss, "train_accuracy": train_acc,
                "num_classes": len(categories), "epochs": epochs, "device": device}
-    del model
+    model = None  # drop the only reference (del would make the closure's `model` unbound — F821)
     free_cuda()  # nothing stays resident after training (Principle II)
     _log(f"vision training done: loss={train_loss:.4f} acc={train_acc:.4f}")
     return state_dict, metrics, device

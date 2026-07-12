@@ -7,10 +7,29 @@ requires-python = ">=3.11"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Notebooks are exploratory captures, not gated code (023 T504).
+extend-exclude = ["notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+# 023 US3 (T504/T551): Ruff becomes a REQUIRED CI gate. 100 stays the target width, but the repo's
+# settled prose style (docstrings/comments written before enforcement) peaks at 117 — so the E501
+# failure threshold is 120: the gate is green on day one without rewriting ~1200 historical prose
+# lines, while genuinely long new lines still fail. Tighten toward 100 opportunistically.
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# --strict-markers (023 T491, FR-293): an unregistered marker is a collection ERROR, so a typo'd
+# @pytest.mark.hw can never silently run (or silently not-skip) in the wrong environment.
+addopts = "-q --strict-markers"
+# The offline/live/hardware taxonomy (023, contracts/delivery-gates.md): UNMARKED tests are the
+# offline suite CI runs in full. `live` tests self-skip through the tests/conftest.py guard
+# fixtures when the stack is absent (each names its bring-up hint). `hw` tests additionally
+# require the target GPU machine and NEVER run from hosted CI (RUN_HW_TESTS=1 opts in).
+markers = [
+    "live: needs the running local stack (gateway/agent/MLflow); self-skips with a bring-up hint when unreachable",
+    "hw: needs the target GPU hardware; skipped unless RUN_HW_TESTS=1 (never satisfiable from hosted CI)",
+]

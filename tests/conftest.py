@@ -18,6 +18,23 @@ import urllib.request
 
 import pytest
 
+# --- 023 T491 (FR-293, SC-155): offline/live/hardware selection is explicit, never silent ---------
+# The OFFLINE suite is every unmarked test: CI runs `pytest` with no deselection flags, so a module
+# that fails to import is a loud collection error (the job fails), never a silently smaller suite.
+# `live` tests skip through the guard fixtures below (each skip names the bring-up command).
+# `hw` tests are gated here: they need the target GPU machine, so hosted CI can never satisfy them —
+# an explicit RUN_HW_TESTS=1 on the target host opts in (contracts/delivery-gates.md §Hardware gate).
+
+def pytest_collection_modifyitems(config, items):
+    if os.getenv("RUN_HW_TESTS", "").lower() in ("1", "true", "yes"):
+        return
+    skip_hw = pytest.mark.skip(
+        reason="[HW] target-hardware test — run with RUN_HW_TESTS=1 on the GPU host (quickstart)")
+    for item in items:
+        if "hw" in item.keywords:
+            item.add_marker(skip_hw)
+
+
 GATEWAY_PORT = os.getenv("GATEWAY_PORT", "8080")
 UI_PORT = os.getenv("UI_PORT", "3000")
 MLFLOW_PORT = os.getenv("MLFLOW_PORT", "5500")

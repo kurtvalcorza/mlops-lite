@@ -13,8 +13,8 @@ from fastapi.responses import JSONResponse
 from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
-from .. import evaluation, quality, registry, serving, shadow
-from ..settings import TRAINER_URL
+from .. import activation, evaluation, quality, registry, shadow
+from ..settings import TRAINER_URL, agent_headers
 
 router = APIRouter()
 
@@ -111,6 +111,15 @@ def promote(name: str, req: PromoteRequest):
     if llm_target and llm_target.get("error"):
         REGISTRY_OPS.labels(op="promote", status="refused").inc()
         raise HTTPException(status_code=409, detail=f"promotion refused: {llm_target['error']}")
+    if llm_target:
+        # review (Codex, alias order): refuse a conflicting in-flight activation BEFORE promote
+        # moves the @serving alias — otherwise the conflict surfaces only at activate()/submit(),
+        # after the alias moved, leaving the registry naming a version we never activated.
+        try:
+            activation.service().assert_no_conflict(name, req.version)
+        except activation.ActivationError as e:
+            REGISTRY_OPS.labels(op="promote", status="conflict").inc()
+            raise HTTPException(status_code=409, detail=f"activation refused: {e}")
     try:
         res = registry.promote(name, req.version, override=req.override)
     except registry.RegistryError as e:
@@ -119,37 +128,24 @@ def promote(name: str, req: PromoteRequest):
     REGISTRY_OPS.labels(op="promote", status="blocked" if not res.get("promoted", True) else "ok").inc()
     if llm_target and res.get("promoted"):
         prior = registry.get_serving_llm()  # capture BEFORE the pointer moves (FR-265 rollback)
+        # 023 US5 (T522): the pointer write → keyed reload → verify/rollback sequence runs as ONE
+        # durable ActivationOperation (gateway/app/activation.py) — recoverable across crashes and
+        # restarts, reconciled from gateway lifespan (FR-305..312). With the activation store
+        # unavailable the service falls back to 022's exact single-shot sequence (same rollback +
+        # double-fault semantics), so a promote never fails merely because durability is degraded.
+        # Response shape is 022's, plus an `activation` object when the durable record exists.
+        # This route stays the ONLY go-live surface — the policy path calls registry.promote
+        # directly and cannot live-switch text generation (FR-275/307/313).
         try:
-            registry.set_serving_llm(name, actor="operator")
-            reload = serving.request_llm_reload(preempt=req.preempt)
-            if reload.get("unresolvable"):
-                # FR-265: the agent can't load this artifact, so the served LLM must stay UNCHANGED —
-                # not just for this reload. Roll the pointer back: left set to an unloadable model it
-                # would 503 the next cold load (after the current model is idle-reaped). The alias
-                # stays moved (the console shows it promoted-but-not-live); the operator re-promotes
-                # once the GGUF is present on the host.
-                REGISTRY_OPS.labels(op="promote", status="unresolvable").inc()
-                sl = {"active": (prior or {}).get("model_name"), "kind": llm_target["kind"],
-                      "base": llm_target["base"], "reload": reload}
-                try:
-                    registry.restore_serving_llm(prior)
-                    sl["rolled_back"] = True
-                except registry.RegistryError as re_err:
-                    # The rollback WRITE itself failed (a store blip in the double-fault window):
-                    # set_serving_llm landed but restore didn't, so the pointer may STILL name the
-                    # unloadable target — the very 503-on-next-cold-load bug this path closes. Do NOT
-                    # let the outer except mask it as a generic error (@claude review); surface it
-                    # distinctly so the operator knows the pointer needs a manual re-promote/reset.
-                    sl["rolled_back"] = False
-                    sl["pointer_error"] = str(re_err)
-                res["serving_llm"] = sl
-            else:
-                res["serving_llm"] = {"active": name, "kind": llm_target["kind"],
-                                      "base": llm_target["base"], "reload": reload}
-        except registry.RegistryError as e:
-            # The alias moved but the go-live pointer didn't stick — surface it; a re-promote of
-            # the same version retries both halves idempotently.
-            res["serving_llm"] = {"active": None, "error": str(e)}
+            sl = activation.service().activate(
+                name=name, version=req.version, prior=prior, preempt=req.preempt,
+                kind=llm_target["kind"], base=llm_target["base"])
+        except activation.ActivationError as e:
+            REGISTRY_OPS.labels(op="promote", status="conflict").inc()
+            raise HTTPException(status_code=409, detail=f"activation refused: {e}")
+        if sl.get("rolled_back") is not None:
+            REGISTRY_OPS.labels(op="promote", status="unresolvable").inc()
+        res["serving_llm"] = sl
     return res
 
 
@@ -269,7 +265,7 @@ async def shadow_replay(name: str, req: ShadowReplayRequest):
     payload = {"shadow_id": prep["shadow_id"], "name": name, "challenger": req.challenger,
                "champion_version": prep["champion_version"], "modality": prep["modality"],
                "window_n": prep["n_pairs"]}
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.post(f"{TRAINER_URL}/shadow-replay", json=payload)
         except httpx.HTTPError as e:
@@ -294,7 +290,7 @@ async def get_shadow_replay(name: str, shadow_id: str):
     verdict = await run_in_threadpool(shadow.read_verdict, shadow_id)
     if verdict is not None:
         return verdict
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.get(f"{TRAINER_URL}/shadow-replay/{shadow_id}")
         except httpx.HTTPError as e:

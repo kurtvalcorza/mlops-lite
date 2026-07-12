@@ -224,3 +224,42 @@ docker compose --env-file .env.ci config --quiet
 Then complete all `[HW]` tasks and attach results with hardware profile, commit, commands, timestamps,
 and observed invariants. Only after both offline and target-hardware gates pass may 023 be marked
 implemented.
+
+## Evidence — offline slice (2026-07-12, implementation PR)
+
+Recorded from the implementation environment (Linux sandbox, Python 3.11, Node 22, local
+Postgres 16 for the migration suite; the pinned CI environment is Python 3.12 + postgres:17).
+
+- **SC-152 (US1 routing)**: `tests/test_evaluation_topology.py` — 7/7 pass (standalone load,
+  URL derivation `<agent>/engines/llm|vision`, override precedence, fake-HTTP path assertions);
+  `python scripts/check_specs.py` retired-port guard: **OK** over the whole executable tree.
+- **SC-153 (US2 boundary)**: `tests/test_agent_auth.py` — 22/22 pass (fail-closed startup incl.
+  the SWAP_CONTROL_SECRET non-enable rule, exact public allow-list, 401/403 payloads,
+  auth-before-side-effects, constant-time seam, /metrics redaction, open-mode warning);
+  `tests/test_serving_client.py` key-injection + no-redirect pins pass.
+- **SC-154/155 (US3 gates)**: `python -m ruff check .` → All checks passed; full offline
+  `pytest` → **green** (594+ passed at US2 checkpoint, grown since; 0 failed; live/hw skips are
+  reasoned); `npm ci && npm run lint && npm run build` → clean;
+  `docker compose config --quiet` (both files, `.env.ci.example` values) → exit 0;
+  `scripts/check_specs.py` → OK. Branch protection (T509's external half) awaits the repo admin.
+- **SC-156/157 (US4 migrations)**: `tests/test_migrations.py` — 10/10 pass against real Postgres:
+  fresh apply + exact shape, legacy adoption with row preservation, no-op repeat, 4-way
+  concurrent apply-once, mid-file rollback, checksum refusal, newer-schema refusal,
+  bootstrap-never-creates, activation-repository CAS. Populated-copy backup/restore drill (T517)
+  is the [HW/store] tail.
+- **SC-158 (US5 recovery)**: `tests/test_activation.py` 13/13 + `tests/test_activation_recovery.py`
+  8/8 — failure after every step + restart reconciliation converge with no duplicate reload;
+  prediction identity stays agent-resident throughout. The 100-switch drill (T528) is [HW].
+- **SC-160/161 (US6 bounds)**: `tests/test_agent_limits.py` — 8/8 socket-level pins
+  (413-before-read, counted chunked abort, multipart bound, auth-before-buffer, saturation 503,
+  bounded queueing, shutdown drain, applied IO timeout). On-host thread/memory measurement (T536)
+  is [HW].
+- **SC-162..164 (US7)**: metrics/alert contracts pass (`tests/test_metrics_contract.py` +
+  `tests/test_alert_rules.py`, 17 tests — synthetic evaluation = every rule's expression resolves
+  against exported metrics, runbook anchors verified); README/current-architecture/constitution
+  v1.5.2 updated. The extraction-parity and resource-comparison halves ride the deferred
+  T539/T543–T545 + T549.
+- **T554 security review (offline scope)**: `scripts/check_secrets.sh` → no committed
+  credentials; no `follow_redirects=True` anywhere agent-directed (also pinned by test); key
+  values never printed by gen_secrets (written to .env only) and never serialized in
+  health/metrics/errors (pinned by tests); unauthorized paths proven side-effect-free (T497).

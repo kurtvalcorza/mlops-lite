@@ -1,0 +1,108 @@
+# 023 US3 (T492/T504–T507, FR-289..296 — contracts/delivery-gates.md): the required PR quality
+# gates. Four independent jobs with stable names suitable for branch protection. Every command here
+# is locally reproducible from a clean checkout (quickstart.md §Delivery gates / Makefile targets);
+# CI adds orchestration only, never a materially different test path.
+#
+# Deliberately absent: GPU, model downloads, the live stack, and repository secrets — the offline
+# gates must pass on a bare hosted runner (FR-294). Target-hardware validation stays a manual,
+# recorded quickstart drill ([HW] tasks) and is NOT represented as a hosted job.
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read # least-privilege (delivery-gates.md): no job needs write access
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    services:
+      # Ephemeral Postgres for tests/test_migrations.py (023 US4 — contract §Ledger/adoption);
+      # matches the platform's pinned major (infra Postgres 17). Not a secret: CI-only values.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: migtest
+          POSTGRES_PASSWORD: migtest
+          POSTGRES_DB: migtest
+        ports:
+          - 55499:5432
+        options: >-
+          --health-cmd "pg_isready -U migtest"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_MIGRATIONS_ADMIN_DSN: postgresql://migtest:migtest@127.0.0.1:55499/migtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            gateway/requirements.txt
+      - name: Install the dependency-light test environment (T490)
+        run: python -m pip install -r requirements-dev.txt
+      - name: Ruff
+        run: python -m ruff check .
+      - name: Offline pytest (full suite — live/hw tests self-skip with reasons, FR-293)
+        run: python -m pytest --junitxml=pytest-report.xml
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest-report
+          path: pytest-report.xml
+
+  ui:
+    name: ui
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # pinned with ui/package.json engines (FR-291)
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Clean install from the lockfile (never a reused node_modules, FR-291)
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Production build + type-check
+        run: npm run build
+
+  compose:
+    name: compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Non-secret CI interpolation values (FR-292/294)
+        run: cp .env.ci.example .env
+      - name: Validate the Compose model (render only — no start, no pull)
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config --quiet
+
+  specs:
+    name: specs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Spec artifact/ID/placeholder/task consistency (FR-296) + retired-port guard (FR-280)
+        run: python scripts/check_specs.py

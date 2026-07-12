@@ -3,7 +3,9 @@
 Replaces the string literals scattered across the gateway and the native daemons (review §4.3):
 tenant names and the holder→URL map all resolve here. The strangler migration is complete
 (T364): the native daemons are gone, so a single `AGENT_URL` is the only endpoint — the six
-per-daemon URL resolvers and their hand-allocated ports (8090–8095/8099) retired with the lockfile.
+per-daemon URL resolvers and their hand-allocated inference ports (8090–8095) retired with the
+lockfile. (The supervisor's status port :8099 is NOT retired — the supervisor now watches the one
+host agent and still serves `/status` there; see docs/current-architecture.md.)
 """
 import os
 
@@ -56,9 +58,9 @@ ENGINES = {
 #: definition — `training/flow_dispatch.VALID_MODALITIES` mirrors it until the jobs fold-in (T362).
 TRAINABLE_MODALITIES = ("llm", "vision", "embeddings", "asr")
 
-#: The host agent's single stable endpoint (research R3) — the ONLY port the platform binds now
-#: that every engine + the jobs surface is folded into the agent (the legacy daemon ports
-#: 8090–8095/8099 retired at T364).
+#: The host agent's single stable endpoint (research R3) — the ONLY port the platform binds for
+#: inference/jobs now that every engine + the jobs surface is folded into the agent (the legacy
+#: per-daemon inference ports 8090–8095 retired at T364; the supervisor's :8099/status is still live).
 AGENT_PORT = 8100
 
 #: Fixed, reboot-stable host state dir (FR-166): the transitional lease + beacon, the agent

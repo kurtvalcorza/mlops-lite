@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from platformlib.topology import TRAINABLE_MODALITIES
 
 from .. import monitoring, policies, quality
-from ..settings import TRAINER_URL
+from ..settings import TRAINER_URL, agent_headers
 
 router = APIRouter()
 
@@ -65,7 +65,7 @@ def _launch_retrain(spec: RetrainSpec) -> dict:
     body = spec.model_dump()
     body["dataset_version"] = policies.resolve_dataset_version(
         spec.dataset_name, spec.dataset_version)
-    with httpx.Client(timeout=15) as client:
+    with httpx.Client(headers=agent_headers(), timeout=15) as client:
         r = client.post(f"{TRAINER_URL}/train", json=body)
     if r.status_code not in (200, 202):
         raise RuntimeError(f"trainer returned {r.status_code}: {r.text[:200]}")

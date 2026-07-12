@@ -1,5 +1,10 @@
 # MLOps-Lite — Architecture Review (2026-07)
 
+> **HISTORICAL (labeled at 023, FR-327).** This review evaluated the post-017 tree; its findings
+> were addressed across 018–023 (agent consolidation, stack remediation, hardening). For current
+> state see [current-architecture.md](current-architecture.md) and the
+> [2026-07-11 review](architecture-review-2026-07-11.md) that seeded 023.
+
 **Scope**: full-repo design evaluation at `b999020` (post-017, constitution v1.4.1).
 **Method**: subsystem-by-subsystem read of the gateway, serving layer + GPU lease, training/
 orchestration/monitoring, UI/BFF, infra, and test suite, checked against the constitution and the

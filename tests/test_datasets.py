@@ -102,7 +102,7 @@ def test_datasets(require_gateway, require_key):
 # Pre-018 `list_datasets`/`_versions` and `monitoring.latest_reports` read a single
 # `list_objects_v2` page: past 1000 entries the platform silently showed an arbitrary slice.
 
-import importlib.util as _ilu
+import importlib.util as _ilu  # noqa: E402
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
@@ -120,11 +120,11 @@ class _PagedS3:
         if Delimiter:
             rows = [p for p in self.prefixes if p.startswith(Prefix)]
             label = "CommonPrefixes"
-            wrap = lambda v: {"Prefix": v}
+            wrap = lambda v: {"Prefix": v}  # noqa: E731
         else:
             rows = [k for k in self.keys if k.startswith(Prefix)]
             label = "Contents"
-            wrap = lambda v: {"Key": v}
+            wrap = lambda v: {"Key": v}  # noqa: E731
         start = int(ContinuationToken or 0)
         page = rows[start:start + self.page_size]
         out = {label: [wrap(v) for v in page]}

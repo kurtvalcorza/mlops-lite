@@ -99,6 +99,12 @@ services:
       context: .
       dockerfile: gateway/Dockerfile
     depends_on:
+      # 023 review (US4-F1): the gateway now OWNS the schema migration at startup, with only a
+      # ~20s connect-retry budget, and on exhaustion it wedges in migration `error`/503 until a
+      # container restart. Wait for Postgres's healthcheck (pg_isready) so a cold-machine `initdb`
+      # + init.sql can't outlast that budget on first bring-up.
+      postgres:
+        condition: service_healthy
       mlflow:
         condition: service_started
       garage-init:
@@ -137,6 +143,9 @@ services:
       # SWAP_CONTROL_SECRET must reach the gateway too — else every reload is refused with 403.
       AGENT_CONTROL_SECRET: ${AGENT_CONTROL_SECRET:-}
       SWAP_CONTROL_SECRET: ${SWAP_CONTROL_SECRET:-}
+      # 023 US2 (FR-286): the internal agent credential — every gateway->agent call sends it as
+      # X-Agent-Key. Server-side only; the BFF/browser never sees it.
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
       # Garage/S3 for the dataset registry (US3) — the store-minted pair (T406 cutover).
       MLFLOW_S3_ENDPOINT_URL: http://garage:3900
       AWS_ACCESS_KEY_ID: "${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env (scripts/gen_secrets --record-garage)}"
@@ -166,6 +175,8 @@ services:
       # 018 FR-174: file_sd target for the native host agent — up_all.ps1 writes the injected WSL IP
       # here so the DIRECT agent scrape works cross-distro; Prometheus hot-reloads it (no restart).
       - ./infra/prometheus/targets:/etc/prometheus/targets:ro
+      # 023 US7 (FR-322): local alert rules (no Alertmanager — Prometheus UI + Grafana surface them)
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
     extra_hosts:
       # 018 (FR-174): direct scrape of the native host agent (:8100) — same host-gateway mapping
       # the gateway uses to reach the native daemons.

@@ -10,7 +10,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
-from ..settings import TRAINER_URL
+
+from ..settings import TRAINER_URL, agent_headers
 
 router = APIRouter()
 
@@ -49,7 +50,7 @@ async def launch_run(req: RunRequest):
 
     Forwards only the set fields (`exclude_none`) so the trainer applies each flow's own per-modality
     defaults for anything the operator left blank, rather than overriding them with nulls."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.post(f"{TRAINER_URL}/train", json=req.model_dump(exclude_none=True))
         except httpx.HTTPError as e:
@@ -73,7 +74,7 @@ async def launch_run(req: RunRequest):
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str):
     """Status + metrics for a run, including the registered model version once it completes."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.get(f"{TRAINER_URL}/train/{run_id}")
         except httpx.HTTPError as e:
@@ -103,7 +104,7 @@ class StudyRequest(BaseModel):
 async def launch_study(req: StudyRequest):
     """Launch an HPO study (async; poll GET /studies/{id}). Mirrors POST /runs: trials run strictly
     sequentially on the single GPU, so total wall-clock ≈ n_trials × per-train-time."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.post(f"{TRAINER_URL}/study", json=req.model_dump(exclude_none=True))
         except httpx.HTTPError as e:
@@ -125,7 +126,7 @@ async def launch_study(req: StudyRequest):
 @router.get("/studies/{study_id}")
 async def get_study(study_id: str):
     """Status + best-trial for an HPO study (trials, per-trial objective, the registered winner)."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.get(f"{TRAINER_URL}/study/{study_id}")
         except httpx.HTTPError as e:
@@ -137,7 +138,7 @@ async def get_study(study_id: str):
 
 @router.get("/training/health")
 async def training_health():
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{TRAINER_URL}/health")
             return {"backend": "trainer (native WSL)", "reachable": True, **r.json()}

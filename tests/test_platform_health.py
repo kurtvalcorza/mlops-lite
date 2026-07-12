@@ -45,7 +45,10 @@ def _load(mod_name):
     for k in ("AGENT_URL", "SERVING_URL", "TRAINER_URL", "BENTO_URL", "EMBED_URL", "TABULAR_URL",
               "ASR_URL"):
         setattr(stub, k, "http://agent.test" if k == "AGENT_URL" else f"http://{k.lower()}.test")
+    stub.AGENT_API_KEY = ""
+    stub.agent_headers = lambda: {}  # 023 US2: the real settings injects X-Agent-Key here
     sys.modules["app.settings"] = stub
+    sys.modules["app"].settings = stub  # attribute too — `from . import settings` prefers it
     spec = importlib.util.spec_from_file_location(
         f"app.{mod_name}", os.path.join(REPO, "gateway", "app", f"{mod_name}.py"))
     mod = importlib.util.module_from_spec(spec)
@@ -61,6 +64,13 @@ class _Resp:
 
     def json(self):
         return self._body
+
+    def raise_for_status(self):
+        # Model httpx.Response: a 4xx/5xx (e.g. a 401 when the agent key is missing) raises, so
+        # platform_metrics.refresh() reports the agent DOWN instead of parsing the error body and
+        # marking it up (review, Codex).
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class _AsyncClient:
@@ -155,6 +165,29 @@ def test_metrics_serving_resident_true_while_loading(monkeypatch):
     monkeypatch.setattr(mod.httpx, "Client", lambda **kw: _Client())
     mod.refresh()
     assert mod.SERVING_RESIDENT._value.get() == 1            # loading child is resident
+
+
+def test_metrics_refresh_reports_down_on_agent_auth_failure(monkeypatch):
+    # review (Codex): with the 023 agent trust boundary, a missing/stale X-Agent-Key makes /health
+    # a 401 with a JSON body. refresh() must NOT parse it and report the agent up — a misconfigured
+    # gateway that can reach the socket but not authenticate is DOWN for every operation.
+    mod = _load("platform_metrics")
+    mod.SERVING_UP.set(1)
+    mod.TRAINER_UP.set(1)
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            return _Resp(401, {"error": "agent authentication required"})
+
+    monkeypatch.setattr(mod.httpx, "Client", lambda **kw: _Client())
+    mod.refresh()
+    assert mod.SERVING_UP._value.get() == 0 and mod.TRAINER_UP._value.get() == 0
 
 
 if __name__ == "__main__":

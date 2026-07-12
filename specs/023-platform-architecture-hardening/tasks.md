@@ -9,8 +9,14 @@ description: "Implementation task list for post-021 architecture hardening and d
 
 **Prerequisites**: `spec.md`, `plan.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
 
-**Numbering**: Continues after 022's T489. All tasks are intentionally unchecked; this PR specifies
-the work and does not claim implementation.
+**Numbering**: Continues after 022's T489.
+
+**Status (2026-07-12, implementation PR)**: the OFFLINE slice is built and checked off with
+evidence in `quickstart.md` §Evidence. Still open: `[HW]`/populated-store drills (T517, T528,
+T536, T555, T556 — and T557, which gates on them), the external branch-protection setting half of
+T509 (the workflow + jobs exist; an admin marks them required), and the US7 module extractions
+(T539, T543–T545) + their completion gate T549 — independent, contract-preserving refactors
+deferred to land separately without conflict churn (see the US7 commit).
 
 **Tests**: Required. Correctness, security, migration, activation, and transport tests are written
 before their implementation tasks. `[HW]` tasks require target-machine evidence and cannot be
@@ -24,14 +30,14 @@ completed from hosted CI.
 
 ## Phase 1: Setup — reproducible foundations
 
-- [ ] **T490** Add the dependency-light backend developer/test environment in
+- [x] **T490** Add the dependency-light backend developer/test environment in
   `requirements-dev.txt` and document the exact clean-checkout install command; include pytest,
   Ruff, and all dependencies needed for offline collection without torch/CUDA/model packages
   (FR-289/294).
-- [ ] **T491** [P] Normalize offline/live/hardware markers and skip reasons in `pyproject.toml` and
+- [x] **T491** [P] Normalize offline/live/hardware markers and skip reasons in `pyproject.toml` and
   `tests/conftest.py`; prove ordinary CI selects the complete offline suite and never silently
   deselects an import failure (FR-293, SC-155).
-- [ ] **T492** [P] Create the initial `.github/workflows/quality.yml` skeleton with stable, independent
+- [x] **T492** [P] Create the initial `.github/workflows/quality.yml` skeleton with stable, independent
   `backend`, `ui`, `compose`, and `specs` jobs, least-privilege permissions, concurrency cancellation,
   and dependency caching boundaries from `contracts/delivery-gates.md` (FR-290..296).
 
@@ -48,19 +54,19 @@ and the retired-port guard passes.
 
 ### Tests
 
-- [ ] **T493** [P] [US1] Add failing standalone-load and URL-resolution tests in
+- [x] **T493** [P] [US1] Add failing standalone-load and URL-resolution tests in
   `tests/test_evaluation_topology.py` for LLM, vision, explicit overrides, and absence of retired
   defaults (FR-277..280).
 
 ### Implementation
 
-- [ ] **T494** [US1] Change `gateway/app/evaluation.py` to derive live predictor bases through
+- [x] **T494** [US1] Change `gateway/app/evaluation.py` to derive live predictor bases through
   `platformlib.topology.agent_url()` and the canonical engine paths while preserving isolated module
   loading and injected predictors (FR-277..279).
-- [ ] **T495** [US1] Extend `scripts/check_specs.py` or add a focused repository guard to scan
+- [x] **T495** [US1] Extend `scripts/check_specs.py` or add a focused repository guard to scan
   executable Python/PowerShell/shell routing for retired ports while excluding historical docs and
   explicit negative fixtures; wire it into the specs/backend gate (FR-280).
-- [ ] **T496** [US1] Run `tests/test_evaluation_topology.py`, existing evaluation/gate tests, and the
+- [x] **T496** [US1] Run `tests/test_evaluation_topology.py`, existing evaluation/gate tests, and the
   retired-port scan; record SC-152 evidence in `specs/023-platform-architecture-hardening/quickstart.md`.
 
 **Checkpoint**: Live evaluation uses the consolidated topology independently of later hardening.
@@ -76,28 +82,28 @@ with the gateway-injected key; public probes remain available.
 
 ### Tests
 
-- [ ] **T497** [P] [US2] Add failing auth/config/public-route/side-effect-order tests in
+- [x] **T497** [P] [US2] Add failing auth/config/public-route/side-effect-order tests in
   `tests/test_agent_auth.py`, covering stdlib transport, open-development warning, deprecated secret
   migration, constant-time comparison seam, and secret-redaction assertions (FR-281..288).
-- [ ] **T498** [P] [US2] Extend gateway client tests (`tests/test_serving_client.py`,
+- [x] **T498** [P] [US2] Extend gateway client tests (`tests/test_serving_client.py`,
   `tests/test_agent_jobs_http.py`, router tests) to require `X-Agent-Key` injection and prevent
   cross-origin redirect forwarding (FR-286).
 
 ### Implementation
 
-- [ ] **T499** [US2] Implement `hostagent/auth.py` with exact public-route allow-list, secret/file
+- [x] **T499** [US2] Implement `hostagent/auth.py` with exact public-route allow-list, secret/file
   resolution, fail-closed startup policy, `AGENT_ALLOW_OPEN`, deprecated input warning, constant-time
   comparison, and stable 401/403 payloads per `contracts/agent-security.md`.
-- [ ] **T500** [US2] Gate all routes in `hostagent/main.py` before body parsing/domain effects; reduce
+- [x] **T500** [US2] Gate all routes in `hostagent/main.py` before body parsing/domain effects; reduce
   `/healthz` and `/readyz` to documented public shapes and keep `/metrics` secret-free (FR-281..285).
-- [ ] **T501** [US2] Add `AGENT_API_KEY` server-side settings and header injection to every gateway
+- [x] **T501** [US2] Add `AGENT_API_KEY` server-side settings and header injection to every gateway
   agent client in `gateway/app/settings.py`, `gateway/app/serving.py`, routers, scheduler/evaluation
   adapters, platform health/metrics, and shared client helpers; consolidate clients where mechanical
   to avoid missed call sites (FR-286).
-- [ ] **T502** [P] [US2] Update `.env.example`, `scripts/gen_secrets.ps1`, `scripts/gen_secrets.sh`,
+- [x] **T502** [P] [US2] Update `.env.example`, `scripts/gen_secrets.ps1`, `scripts/gen_secrets.sh`,
   `hostagent/run.sh`, `scripts/up_all.ps1`, and approved host tools to generate/pass the internal key
   without command-line/log exposure; document one-release deprecated-secret migration (FR-284..288).
-- [ ] **T503** [US2] Run auth, serving, job, platform-health, SSE, BFF security, and secret-scan tests;
+- [x] **T503** [US2] Run auth, serving, job, platform-health, SSE, BFF security, and secret-scan tests;
   manually prove startup refusal/open-development warning and record SC-153 evidence.
 
 **Checkpoint**: Direct agent callers cannot bypass the gateway or consume execution resources
@@ -114,18 +120,18 @@ stack, or secrets.
 
 ### Implementation and tests
 
-- [ ] **T504** [P] [US3] Complete the `backend` job in `.github/workflows/quality.yml`: Python 3.12,
+- [x] **T504** [P] [US3] Complete the `backend` job in `.github/workflows/quality.yml`: Python 3.12,
   clean `requirements-dev.txt` install, Ruff, full offline pytest, test report artifact, and explicit
   live/hardware skips (FR-289/290/293/294).
-- [ ] **T505** [P] [US3] Complete the `ui` job and `ui/package.json` runtime/lint metadata: pinned Node,
+- [x] **T505** [P] [US3] Complete the `ui` job and `ui/package.json` runtime/lint metadata: pinned Node,
   `npm ci`, supported lint command, production build/type-check, and no reused `node_modules`
   (FR-291).
-- [ ] **T506** [P] [US3] Complete the `compose` job plus non-secret `.env.ci.example`/temporary env
+- [x] **T506** [P] [US3] Complete the `compose` job plus non-secret `.env.ci.example`/temporary env
   generation to run `docker compose config --quiet` without start/pull (FR-292/294).
-- [ ] **T507** [P] [US3] Implement `scripts/check_specs.py` with artifact, link, placeholder,
+- [x] **T507** [P] [US3] Implement `scripts/check_specs.py` with artifact, link, placeholder,
   ID uniqueness/order, story/task coverage, and spec-only unchecked-task validation; complete the
   `specs` job (FR-296).
-- [ ] **T508** [US3] Add a `make test`, `make lint`, `make ui-check`, `make compose-check`, and
+- [x] **T508** [US3] Add a `make test`, `make lint`, `make ui-check`, `make compose-check`, and
   `make spec-check` interface or cross-platform documented equivalents in `Makefile`/README, ensuring
   local commands match CI behavior (contracts/delivery-gates.md).
 - [ ] **T509** [US3] Run all workflow commands from a clean checkout, open a validation PR, configure
@@ -145,27 +151,27 @@ newer-schema cases satisfy `contracts/schema-migrations.md` with no fixture data
 
 ### Tests
 
-- [ ] **T510** [P] [US4] Add Postgres-backed migration tests in `tests/test_migrations.py` for fresh
+- [x] **T510** [P] [US4] Add Postgres-backed migration tests in `tests/test_migrations.py` for fresh
   apply, recognized legacy adoption, exact final shape, row preservation, no-op repeat, concurrent
   runners, transaction rollback, checksum mismatch, and newer-schema refusal (FR-297..304).
 
 ### Implementation
 
-- [ ] **T511** [US4] Implement the immutable migration discovery/ledger/checksum/advisory-lock runner
+- [x] **T511** [US4] Implement the immutable migration discovery/ledger/checksum/advisory-lock runner
   in `platformlib/migrations.py` with explicit minimum/current compatibility APIs and bounded metrics
   hooks (FR-297..301).
-- [ ] **T512** [US4] Add `platformlib/migrations/001_baseline.sql` representing the existing store
+- [x] **T512** [US4] Add `platformlib/migrations/001_baseline.sql` representing the existing store
   schema and implement exact legacy-shape verification/stamping; prove every table/index/constraint
   in current `platformlib/store.py` is represented (FR-297/300).
-- [ ] **T513** [US4] Refactor `platformlib/store.py` bootstrap to call/check migrations and remove its
+- [x] **T513** [US4] Refactor `platformlib/store.py` bootstrap to call/check migrations and remove its
   embedded full-schema DDL; reduce `infra/postgres/init.sql` to database/bootstrap ownership only
   (FR-297/302).
-- [ ] **T514** [US4] Make gateway startup in `gateway/app/main.py` the normal migration owner and make
+- [x] **T514** [US4] Make gateway startup in `gateway/app/main.py` the normal migration owner and make
   host-agent/store writers fail readiness/writes on incompatible schema without attempting evolution
   (FR-299/301).
-- [ ] **T515** [P] [US4] Add `scripts/migrate_db.py` status/apply commands and a safe documented
+- [x] **T515** [P] [US4] Add `scripts/migrate_db.py` status/apply commands and a safe documented
   `pg_dump`/restore helper or exact platform commands; no destructive automatic rollback (FR-303/304).
-- [ ] **T516** [P] [US4] Export migration version/pending/outcome/duration metrics through gateway
+- [x] **T516** [P] [US4] Export migration version/pending/outcome/duration metrics through gateway
   monitoring code and add a failure status to platform health without DSN/SQL exposure.
 - [ ] **T517** [US4] On a copy of populated target state, perform backup+restore verification, apply
   baseline adoption twice, compare data counts/constraints, and record SC-156/157 evidence `[HW/store]`.
@@ -192,37 +198,37 @@ the durable `ActivationOperation`; extend them, do not re-derive (see contract �
 
 ### Tests
 
-- [ ] **T518** [P] [US5] Add pure state-machine/idempotency/serialization tests in
+- [x] **T518** [P] [US5] Add pure state-machine/idempotency/serialization tests in
   `tests/test_activation.py` for every state/transition and conflicting operation key (FR-305..314).
-- [ ] **T519** [P] [US5] Add failure-injection/restart reconciliation tests in
+- [x] **T519** [P] [US5] Add failure-injection/restart reconciliation tests in
   `tests/test_activation_recovery.py` for failures after prepare, alias, pointer, reload acceptance,
   resident success, and rollback substeps; assert resident-based prediction identity (SC-158).
 
 ### Implementation
 
-- [ ] **T520** [US5] Add the next immutable SQL migration for `activation_operations` and any 022
+- [x] **T520** [US5] Add the next immutable SQL migration for `activation_operations` and any 022
   active-pointer schema in `platformlib/migrations/`; implement repository accessors/CAS transitions
   in `platformlib/store.py` or an extracted activation repository (FR-305/306/314).
-- [ ] **T521** [US5] Implement `gateway/app/activation.py` as the durable state machine from
+- [x] **T521** [US5] Implement `gateway/app/activation.py` as the durable state machine from
   `contracts/promotion-activation.md`: validation, serialization, idempotent steps, rollback,
   sanitized evidence, and desired/resident read model (FR-305..314).
-- [ ] **T522** [US5] Integrate the existing gated operator promote path in `gateway/app/registry.py`
+- [x] **T522** [US5] Integrate the existing gated operator promote path in `gateway/app/registry.py`
   and `gateway/app/routers/models.py` with activation submission; keep policy-driven text-generation
   live switches disabled (FR-307/313).
-- [ ] **T523** [US5] Extend the 022 host-agent reload command in `hostagent/main.py`, lifecycle/swap,
+- [x] **T523** [US5] Extend the 022 host-agent reload command in `hostagent/main.py`, lifecycle/swap,
   and shared contracts by keying its EXISTING same-target no-op and pre-eviction probe
   (`swap.TargetUnresolvable`, already merged in #65) by `operation_id`, and ADDING the genuinely-new
   `operation_id` idempotency store, conflicting-target reject, and exact resident verification
   (FR-307/308/312). Do not re-implement the probe/no-op — wrap them.
-- [ ] **T524** [US5] Start bounded activation reconciliation from gateway lifespan in
+- [x] **T524** [US5] Start bounded activation reconciliation from gateway lifespan in
   `gateway/app/main.py`; resume non-terminal/retryable degraded operations and expose exact status
   through models/serving APIs without blocking unrelated gateway startup (FR-309..311).
-- [ ] **T525** [P] [US5] Extend 022 UI model/serving surfaces to show desired vs resident identity,
+- [x] **T525** [P] [US5] Extend 022 UI model/serving surfaces to show desired vs resident identity,
   activation state/error, retry/rollback operator actions, and never label incomplete desired state
   as serving; update `ui/lib/gw-allowlist.ts` only for required routes.
-- [ ] **T526** [P] [US5] Add bounded-cardinality activation outcome/reconcile-duration metrics and a
+- [x] **T526** [P] [US5] Add bounded-cardinality activation outcome/reconcile-duration metrics and a
   degraded activation rule/runbook in Prometheus configuration (FR-314/321..323).
-- [ ] **T527** [US5] Run the full failure matrix and existing promotion/gate/shadow/policy suite;
+- [x] **T527** [US5] Run the full failure matrix and existing promotion/gate/shadow/policy suite;
   demonstrate automated policy cannot live-switch LLM and record SC-158.
 - [ ] **T528** [US5] [HW] Execute 100 accepted rapid switches, client-timeout idempotency, and
   job-holder refusal on the target GPU; capture agent identity + `nvidia-smi` evidence for SC-159.
@@ -241,25 +247,25 @@ remain within bounds and preserve domain contracts.
 
 ### Tests
 
-- [ ] **T529** [P] [US6] Add failing transport-bound tests in `tests/test_agent_limits.py` for JSON,
+- [x] **T529** [P] [US6] Add failing transport-bound tests in `tests/test_agent_limits.py` for JSON,
   multipart, chunked/unknown length, auth-before-buffer, worker/queue saturation, timeouts, and
   graceful shutdown (FR-315..320).
-- [ ] **T530** [P] [US6] Expand REST/SSE golden parity coverage in
+- [x] **T530** [P] [US6] Expand REST/SSE golden parity coverage in
   `tests/test_agent_engines_http.py`, `tests/test_agent_stream_drill.py`, and job HTTP tests before
   transport removal (FR-319, SC-161).
 
 ### Implementation
 
-- [ ] **T531** [US6] Replace raw `ThreadingHTTPServer` usage in `hostagent/main.py` with a bounded
+- [x] **T531** [US6] Replace raw `ThreadingHTTPServer` usage in `hostagent/main.py` with a bounded
   stdlib server/worker implementation and configurable safe defaults for workers and queue
   (FR-316/320).
-- [ ] **T532** [US6] Implement exact endpoint body limits and counted streaming/chunked reads before
+- [x] **T532** [US6] Implement exact endpoint body limits and counted streaming/chunked reads before
   full buffering; return stable 413 and preserve multipart forwarding within bounds (FR-317).
-- [ ] **T533** [US6] Add explicit read/write/probe/shutdown timeouts and graceful accept-stop/drain/
+- [x] **T533** [US6] Add explicit read/write/probe/shutdown timeouts and graceful accept-stop/drain/
   child-cleanup behavior while preserving journal interruption semantics (FR-318).
-- [ ] **T534** [P] [US6] Add bounded-cardinality request, saturation, rejection, disconnect, and
+- [x] **T534** [P] [US6] Add bounded-cardinality request, saturation, rejection, disconnect, and
   latency metrics in `hostagent/metrics.py` (FR-321).
-- [ ] **T535** [US6] Run all parity/limit tests and `scripts/agent_stream_drill.py`; after parity,
+- [x] **T535** [US6] Run all parity/limit tests and `scripts/agent_stream_drill.py`; after parity,
   delete `hostagent/asgi.py`, the `AGENT_RUNTIME=uvicorn` branch, uvicorn-only runtime docs/deps, and
   duplicate-only tests while retaining shared behavior tests (FR-315).
 - [ ] **T536** [US6] [HW] Repeat REST/stream/disconnect/saturation drills on the target host, measure
@@ -279,9 +285,9 @@ parity across extractions, and the documentation checklist finds no current-stat
 
 ### Tests and characterization
 
-- [ ] **T537** [P] [US7] Add metrics contract tests in `tests/test_metrics_contract.py` for required
+- [x] **T537** [P] [US7] Add metrics contract tests in `tests/test_metrics_contract.py` for required
   operation families and forbidden high-cardinality labels (FR-321).
-- [ ] **T538** [P] [US7] Add Prometheus rule syntax/synthetic-evaluation tests in
+- [x] **T538** [P] [US7] Add Prometheus rule syntax/synthetic-evaluation tests in
   `tests/test_alert_rules.py` for every required alert and runbook link (FR-322/323).
 - [ ] **T539** [P] [US7] Add characterization tests around `platformlib/store.py`,
   `gateway/app/evaluation.py`, `gateway/app/scheduler.py`, `hostagent/main.py`, and the large training
@@ -289,13 +295,13 @@ parity across extractions, and the documentation checklist finds no current-stat
 
 ### Implementation
 
-- [ ] **T540** [P] [US7] Add fixed-cardinality request/admission/swap/reload/job/scheduler/database/
+- [x] **T540** [P] [US7] Add fixed-cardinality request/admission/swap/reload/job/scheduler/database/
   object-store outcome and latency metrics in owning gateway/agent modules, reusing a small helper
   only where names/labels are identical (FR-321).
-- [ ] **T541** [P] [US7] Add `infra/prometheus/rules/mlops-lite.yml`, load it from
+- [x] **T541** [P] [US7] Add `infra/prometheus/rules/mlops-lite.yml`, load it from
   `infra/prometheus/prometheus.yml`/Compose, and cover wedged engine, prolonged holder, repeated
   scheduler/activation/migration failures, low disk, and unavailable stores (FR-322/323).
-- [ ] **T542** [P] [US7] Add alert-focused Grafana panels/links and operator remediation sections in
+- [x] **T542** [P] [US7] Add alert-focused Grafana panels/links and operator remediation sections in
   `monitoring/README.md`; do not add Alertmanager or external credentials (FR-323).
 - [ ] **T543** [US7] Extract relational repositories/migration concerns from `platformlib/store.py`
   behind the existing public facade, keeping callers and stored contracts compatible (FR-324/325).
@@ -305,13 +311,13 @@ parity across extractions, and the documentation checklist finds no current-stat
 - [ ] **T545** [US7] Separate host-agent route dispatch from retained stdlib transport and split
   `ui/app/training/page.tsx` orchestration into tested hooks/panels, without a new process or route
   contract (FR-324/325).
-- [ ] **T546** [P] [US7] Refresh `README.md` to actual merged/spec status and concise current topology;
+- [x] **T546** [P] [US7] Refresh `README.md` to actual merged/spec status and concise current topology;
   link `docs/architecture-review-2026-07-11.md`, label the prior review historical, and resolve
   present-tense `in progress`/retired-framework contradictions (FR-326/327).
-- [ ] **T547** [P] [US7] Add a reusable current-architecture checklist under `.specify` or
+- [x] **T547** [P] [US7] Add a reusable current-architecture checklist under `.specify` or
   `docs/` covering topology, data authority, trust boundaries, runtime status, ports, and commands;
   reference it from future spec/checklist guidance (FR-328).
-- [ ] **T548** [US7] Process the observed Principle VI DVC wording conflict as a separate
+- [x] **T548** [US7] Process the observed Principle VI DVC wording conflict as a separate
   constitution v1.5.2 wording-only amendment in `.specify/memory/constitution.md`, explicitly
   preserving the rule while naming the implemented content-addressed dataset registry.
 - [ ] **T549** [US7] Run synthetic alert evaluation, all characterization/regression tests, resource
@@ -324,15 +330,15 @@ new services or behavior drift.
 
 ## Phase 9: Polish, security review, and complete validation
 
-- [ ] **T550** [P] Run `scripts/check_specs.py`, link/placeholder/ID checks, `git diff --check`, and
+- [x] **T550** [P] Run `scripts/check_specs.py`, link/placeholder/ID checks, `git diff --check`, and
   update all 023 artifacts only for implementation-discovered facts; preserve historical evidence.
-- [ ] **T551** [P] Run Ruff and the complete offline pytest suite from a clean `requirements-dev.txt`
+- [x] **T551** [P] Run Ruff and the complete offline pytest suite from a clean `requirements-dev.txt`
   environment; attach job/test evidence and resolve warnings introduced by 023.
-- [ ] **T552** [P] Run clean `npm ci`, supported lint, and production build/type-check; validate BFF
+- [x] **T552** [P] Run clean `npm ci`, supported lint, and production build/type-check; validate BFF
   allow-list and secret non-exposure for activation additions.
-- [ ] **T553** [P] Run Compose config and Prometheus/Grafana provisioning/rule validation with
+- [x] **T553** [P] Run Compose config and Prometheus/Grafana provisioning/rule validation with
   non-secret CI values.
-- [ ] **T554** Perform a focused security review of agent bind/auth/redirect/header/body-limit/logging
+- [x] **T554** Perform a focused security review of agent bind/auth/redirect/header/body-limit/logging
   behavior and a repository secret scan; verify all unauthorized paths are side-effect free.
 - [ ] **T555** Perform migration backup/restore/adoption/concurrency evidence on a populated database
   copy and verify gateway/agent compatibility failure modes.

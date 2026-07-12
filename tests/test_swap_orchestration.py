@@ -18,6 +18,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from _agentstore import FakeJobStore  # noqa: E402
 from test_agent_lifecycle import FakeChild  # noqa: E402
 
 from hostagent import admission as adm  # noqa: E402
@@ -25,7 +26,6 @@ from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
-from _agentstore import FakeJobStore  # noqa: E402
 
 
 class FakeGpuEngine:

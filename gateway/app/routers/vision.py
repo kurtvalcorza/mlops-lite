@@ -15,7 +15,7 @@ from prometheus_client import Counter
 from pydantic import BaseModel
 
 from .. import background, quality, registry
-from ..settings import BENTO_URL
+from ..settings import BENTO_URL, agent_headers
 
 router = APIRouter()
 
@@ -67,7 +67,7 @@ async def classify(req: ClassifyRequest):
     # single admission lock (a `kind="job"` holder refuses structurally → the agent 409s below). The
     # gateway no longer brokers the eviction.
     url = f"{BENTO_URL}/classify" + ("?preempt=true" if req.preempt else "")
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=60) as client:
         try:
             r = await client.post(
                 url,
@@ -117,7 +117,7 @@ async def classify(req: ClassifyRequest):
 
 @router.get("/vision/health")
 async def vision_health():
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{BENTO_URL}/readyz")
             return {"backend": "bentoml vision (native WSL, CPU)", "reachable": r.status_code == 200}

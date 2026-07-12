@@ -1,0 +1,104 @@
+# MLOps-Lite local alert rules (023 US7 T541, FR-322/323).
+#
+# LOCAL alerts only: they fire in the Prometheus UI (:9090/alerts) and back the Grafana alert
+# panels — no Alertmanager or notification service is added (Principle III; FR-323). Every rule
+# carries an operator summary + a runbook reference into this repository. Labels are a fixed
+# severity vocabulary {warning, critical}; expressions use only metrics the platform already
+# exports (gateway re-exports + the directly-scraped host agent).
+groups:
+  - name: mlops-lite
+    rules:
+      - alert: WedgedEngine
+        expr: hostagent_wedged == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An engine child survived SIGKILL and is pinning the GPU (wedged)"
+          runbook: "monitoring/README.md#alert-wedgedengine"
+
+      - alert: ProlongedGpuHold
+        expr: hostagent_slot_held == 1
+        for: 45m
+        labels:
+          severity: warning
+        annotations:
+          summary: "One tenant has held the single GPU slot for over 45 minutes"
+          runbook: "monitoring/README.md#alert-prolongedgpuhold"
+
+      - alert: ActivationDegraded
+        expr: increase(gateway_activation_outcomes_total{outcome="degraded"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An LLM activation degraded — desired and resident may diverge; operator action needed"
+          runbook: "monitoring/README.md#alert-activationdegraded"
+
+      - alert: MigrationFailed
+        expr: increase(mlops_migrations_outcomes_total{outcome="error"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway schema migration failed — the gateway is failing readiness until resolved"
+          runbook: "monitoring/README.md#alert-migrationfailed"
+
+      - alert: RepeatedSchedulerFailures
+        # review US7-F2: match EVERY error outcome, not just result="error". The store-outage path
+        # (scheduler.list_policies() throwing → result="store_error") is the case this alert's own
+        # runbook names as the typical cause, yet result="error" alone never counted it — the whole
+        # retrain loop could be dead while this stayed silent. Also covers check_error /
+        # pending_clear_error / watch_persist_error.
+        expr: increase(gateway_policy_checks_total{result=~".*error.*"}[30m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The policy scheduler keeps failing its checks (>3 errors in 30m)"
+          runbook: "monitoring/README.md#alert-repeatedschedulerfailures"
+
+      - alert: AgentSaturated
+        expr: increase(hostagent_requests_rejected_total[10m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The host agent is rejecting requests at its worker/queue/body bounds"
+          runbook: "monitoring/README.md#alert-agentsaturated"
+
+      - alert: LowDiskSpace
+        expr: hostagent_disk_free_gb < 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Under 20 GB free on the host volume backing models/state — loads and jobs will start failing"
+          runbook: "monitoring/README.md#alert-lowdiskspace"
+
+      - alert: ServingStoreUnavailable
+        expr: mlops_serving_up == 0 or mlops_trainer_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The gateway cannot reach the host agent (serving + jobs surface down)"
+          runbook: "monitoring/README.md#alert-servingstoreunavailable"
+
+      - alert: AgentScrapeDown
+        expr: up{job="hostagent"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape the host agent directly (agent down or IP target stale)"
+          runbook: "monitoring/README.md#alert-agentscrapedown"
+
+      - alert: JobsInterruptedByRestart
+        expr: increase(hostagent_jobs_interrupted_total[1h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An agent restart interrupted queued/running jobs (FR-173) — inspect and resubmit"
+          runbook: "monitoring/README.md#alert-jobsinterruptedbyrestart"

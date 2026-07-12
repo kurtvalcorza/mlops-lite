@@ -170,11 +170,10 @@ def set_serving_llm(model_name: str, actor: str = "operator") -> dict:
         s = _store()
         conn = s.connect()
         try:
-            # Apply the additive DDL first (Codex F2): on a Postgres volume created BEFORE this
-            # migration `infra/postgres/init.sql` never re-runs, so `serving_llm` may not exist yet;
-            # bootstrap() is idempotent (IF NOT EXISTS) — the same guard the quality/policy/job
-            # clients use. Without it a first LLM promote moves the MLflow alias and then fails here
-            # with `relation "serving_llm" does not exist`, leaving the switch half-applied.
+            # 023 US4: bootstrap() VERIFIES schema compatibility now (gateway startup applies
+            # the migrations, FR-299). The guard survives so a promote against an unmigrated or
+            # newer-schema DB fails HERE with the migration verdict — before the pointer write
+            # half-applies (the original Codex F2 concern, now enforced by the ledger).
             s.bootstrap(conn)
             s.set_serving_llm(conn, model_name, time.time(), actor)
         finally:

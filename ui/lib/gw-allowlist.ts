@@ -32,6 +32,7 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'POST', pattern: 'models/:name/compare' }, // 011 US3: offline champion-challenger
   // serving stage
   { method: 'GET', pattern: 'serving/state' }, // GPU/lease status (pill + LeaseView + panel gating, 008 US3)
+  { method: 'GET', pattern: 'serving/llm/activation' }, // 023 US5: desired vs resident + activation state (T525)
   { method: 'GET', pattern: 'serving/tasks' }, // task discovery → one panel per task (009 US1)
   { method: 'POST', pattern: 'infer' }, // 021: LLM trace mode — returns registry_version + prediction_id + load_ms (FR-232/233)
   { method: 'POST', pattern: 'infer/stream' }, // streaming inference (SSE)

@@ -50,7 +50,10 @@ _ALL = {
         # /engines/llm/health returns 503 in those cases (a cold/idle engine still reports 200, so
         # this doesn't restart-loop on normal idle). Restarting clears a wedged child; a missing
         # model surfaces as an unhealthy daemon (backoff-paced) rather than a silently-up agent.
-        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/engines/llm/health"),
+        # 023 US2: probe the PUBLIC minimal /readyz — /engines/*/health now requires the
+        # internal key (FR-283), and an unauthenticated 401 would read as "dead" here and
+        # restart-loop a healthy agent.
+        "health_url": os.getenv("AGENT_HEALTH", "http://localhost:8100/readyz"),
         "grace_s": float(os.getenv("AGENT_GRACE", "30")),
     },
     # Operator console (003 US1) — a 4th native non-GPU daemon, bound to 127.0.0.1 (FR-025/FR-028).

@@ -44,7 +44,7 @@ class ServingBusyError(ServingError):
 
 
 async def health() -> bool:
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{SERVING_URL}/health")
             return r.status_code == 200 and r.json().get("ok", False)
@@ -80,7 +80,7 @@ async def gpu_state() -> dict:
     BFF contract is unchanged (no key reaches the browser). holder=None when unreadable.
     """
     holder, resident, ident = None, False, dict(_UNKNOWN_IDENTITY)
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{SERVING_URL}/health")
             if r.status_code in (200, 503):  # 503 = engine unavailable, but the payload is honest
@@ -98,7 +98,7 @@ async def llm_identity() -> dict:
     what prediction logging attributes each served prediction to (022 US2, FR-261: the quality
     window must key on the model+version that actually produced the output). `unknown`/None when
     the agent is unreachable — a prediction is never logged under a config guess."""
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{SERVING_URL}/health")
             if r.status_code in (200, 503):
@@ -108,20 +108,46 @@ async def llm_identity() -> dict:
     return dict(_UNKNOWN_IDENTITY)
 
 
-def request_llm_reload(preempt: bool = False) -> dict:
+def resident_identity() -> dict:
+    """SYNC agent-reported resident identity {serving_model, serving_version, ..., resident} for
+    the activation verifier/reconciler (023 US5, FR-312) — they run in the threadpool, not the
+    event loop. Same honesty rule as llm_identity(): unknown when unreachable, never a config
+    guess."""
+    try:
+        with httpx.Client(headers=settings.agent_headers(), timeout=5) as client:
+            r = client.get(f"{SERVING_URL}/health")
+            if r.status_code in (200, 503):
+                h = r.json()
+                return {**_identity_from_health(h), "resident": bool(h.get("resident"))}
+    except (httpx.HTTPError, ValueError):
+        pass
+    return {**_UNKNOWN_IDENTITY, "resident": False}
+
+
+def request_llm_reload(preempt: bool = False, *, operation_id: str = None,
+                       target: dict = None) -> dict:
     """Ask the agent to make the newly selected serving-LLM live NOW (022 US1, FR-255 — the
     gated promote is the go-live action; this is its reload half). Synchronous (the promote
     handler runs in the threadpool). Never raises: the alias + pointer have already moved, so a
     refused/failed reload is reported as status=deferred|unreachable with the agent's reason —
     FR-259's refuse/defer vocabulary — for the operator to see and retry (re-promoting the same
-    version re-requests the reload idempotently)."""
+    version re-requests the reload idempotently).
+
+    023 US5 (FR-307/308/312): `operation_id` + `target` {model_name, version} key the reload to
+    the durable ActivationOperation — the agent replays a completed same-target operation instead
+    of reloading twice, rejects a different target under the same id, and accepts success only
+    with the EXACT target resident."""
     headers = {}
     if settings.AGENT_CONTROL_SECRET:
         headers["X-Agent-Control"] = settings.AGENT_CONTROL_SECRET
+    payload = {"preempt": preempt}
+    if operation_id:
+        payload["operation_id"] = operation_id
+        payload["target"] = target or {}
     try:
-        with httpx.Client(timeout=300) as client:
+        with httpx.Client(headers=settings.agent_headers(), timeout=300) as client:
             r = client.post(f"{settings.AGENT_URL}/control/reload",
-                            json={"preempt": preempt}, headers=headers)
+                            json=payload, headers=headers)
     except httpx.HTTPError as e:
         return {"status": "unreachable",
                 "reason": f"agent unreachable at {settings.AGENT_URL}: {e} — the switch is "
@@ -146,7 +172,7 @@ async def run_inference(prompt: str, max_tokens: int = 256, temperature: float =
     holder, refuse a `kind="job"` holder) — the gateway no longer brokers it."""
     url = f"{SERVING_URL}/infer" + ("?preempt=true" if preempt else "")
     async with _gpu_lock:
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=300) as client:
             try:
                 r = await client.post(
                     url,

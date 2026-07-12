@@ -16,8 +16,9 @@ stays importable in stdlib-only contexts — the native daemons import
 `platformlib.topology`/`contracts` without needing either driver installed.
 
 Relational design notes:
-  - **bootstrap() is idempotent + additive-only** (`CREATE ... IF NOT EXISTS`), mirrored in
-    `infra/postgres/init.sql` for a fresh volume; a single `meta(schema_version)` row tracks it.
+  - **Schema lives in ordered migrations** (023 US4): `platformlib/migrations/*.sql` via
+    `platformlib.migrations` — the gateway applies at startup; `bootstrap()` here only VERIFIES
+    compatibility before writes (the old embedded DDL + its init.sql mirror are retired, T513).
   - **Write-once labels (FR-185)** are enforced by the `labels` PRIMARY KEY, NOT an in-process lock:
     a second insert for the same `prediction_id` raises `LabelExists` (from a UniqueViolation), so
     concurrent duplicate submissions store exactly one label.
@@ -101,89 +102,12 @@ def list_common_prefixes(s3, bucket: str, prefix: str = "", delimiter: str = "/"
 # Relational store (US4, T373) — contracts/store-schema.md
 # ==================================================================================================
 
-#: Bumped only on a non-additive schema change (none within 018). `bootstrap()` seeds `meta`.
+#: Kept for backward compatibility with the pre-023 meta seed (001_baseline.sql seeds the same 1).
 SCHEMA_VERSION = 1
 
-#: The full schema (contracts/store-schema.md). Additive-only; every statement is IF NOT EXISTS so
-#: bootstrap() is safe on every client init and the infra/postgres/init.sql mirror can't drift.
-DDL = """
-CREATE TABLE IF NOT EXISTS meta (schema_version int NOT NULL);
-
-CREATE TABLE IF NOT EXISTS predictions (
-  prediction_id text PRIMARY KEY,
-  model_name    text NOT NULL,
-  version       text NOT NULL,
-  modality      text NOT NULL,
-  served_at     timestamptz NOT NULL,
-  streamed      boolean NOT NULL DEFAULT false,
-  payload_ref   text
-);
-CREATE INDEX IF NOT EXISTS ix_pred_window
-  ON predictions (modality, model_name, version, served_at DESC);
-
-CREATE TABLE IF NOT EXISTS labels (
-  prediction_id text PRIMARY KEY REFERENCES predictions(prediction_id),
-  label         jsonb NOT NULL,
-  submitted_at  timestamptz NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS capture_index (
-  prediction_id text PRIMARY KEY,
-  modality      text NOT NULL,
-  input_ref     text NOT NULL,
-  captured_at   timestamptz NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS jobs (
-  job_id       text PRIMARY KEY,
-  kind         text NOT NULL,
-  modality     text NOT NULL,
-  request      jsonb NOT NULL,
-  state        text NOT NULL,
-  submitted_at timestamptz NOT NULL,
-  started_at   timestamptz,
-  ended_at     timestamptz,
-  result       jsonb
-);
-CREATE INDEX IF NOT EXISTS ix_jobs_kind ON jobs (kind, submitted_at DESC);
-
-CREATE TABLE IF NOT EXISTS policies (
-  model_name text PRIMARY KEY,
-  document   jsonb NOT NULL,
-  updated_at timestamptz NOT NULL,
-  updated_by text NOT NULL
-);
--- US4 T375: the queue-of-one parked retrain + the last per-model check status fold onto the policy
--- row (both are strictly 1:1 with the policy, keyed by model_name), replacing the pre-US4
--- policies/_pending/ + policies/_status/ objects. Additive (ADD COLUMN IF NOT EXISTS) so an existing
--- live `policies` table gains them on the next bootstrap without a schema-version bump.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS pending jsonb;
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS status  jsonb;
-
-CREATE TABLE IF NOT EXISTS suggestions (
-  id                text PRIMARY KEY,
-  model_name        text NOT NULL,
-  candidate_version text NOT NULL,
-  gate_verdict      jsonb NOT NULL,
-  shadow_verdict    jsonb,
-  state             text NOT NULL,
-  created_at        timestamptz NOT NULL,
-  resolved_at       timestamptz,
-  actor             text
-);
-
--- 022 T461 (data-model.md §ActiveServingLLM): the ONE platform-scoped pointer naming the active
--- text-generation model. A single row (the CHECKed boolean PK makes a second row impossible);
--- absent row ⇒ the configured default base serves (today's behavior). Additive — no version bump.
-CREATE TABLE IF NOT EXISTS serving_llm (
-  singleton   boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-  model_name  text NOT NULL,
-  selected_at timestamptz NOT NULL,
-  selected_by text NOT NULL
-);
-"""
-
-#: The tables bootstrap() must create — used by the test + a post-bootstrap self-check.
+#: The tables the schema must present — used by tests and shape checks. The DDL itself moved to
+#: `platformlib/migrations/001_baseline.sql` (023 US4, FR-297): ordered migration files are the
+#: ONLY schema authority now; the embedded full-schema DDL string and its init.sql mirror are gone.
 TABLES = ("meta", "predictions", "labels", "capture_index", "jobs", "policies", "suggestions",
           "serving_llm")
 
@@ -226,21 +150,34 @@ def connect(dsn_str: str = None, *, autocommit: bool = True):
 
 
 def bootstrap(conn=None) -> None:
-    """Apply the schema idempotently and seed `meta`. Safe to call on every client init (all DDL is
-    IF NOT EXISTS). Opens its own connection when `conn` is None."""
+    """Verify the schema is COMPATIBLE (023 US4, FR-299/301) — this no longer applies DDL.
+
+    Ordered migrations own evolution now: the GATEWAY applies them at startup
+    (gateway/app/main.py); every other store client (host-agent journal, tools, ad-hoc writers)
+    calls this before writing and fails closed on an unledgered/older/newer schema instead of
+    racing its own `CREATE IF NOT EXISTS` against a live database. The name survives because
+    every pre-023 client init already calls it at exactly the right moment."""
+    from platformlib import migrations
     close = conn is None
     conn = conn or connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(DDL)
-            cur.execute(
-                "INSERT INTO meta (schema_version) SELECT %s "
-                "WHERE NOT EXISTS (SELECT 1 FROM meta)", (SCHEMA_VERSION,))
-        if not getattr(conn, "autocommit", True):
-            conn.commit()
+        try:
+            migrations.check_compatible(conn)
+        except migrations.MigrationError as e:
+            raise StoreError(str(e)) from e
     finally:
         if close:
             conn.close()
+
+
+def ensure_schema(dsn_str: str = None, applied_by: str = "tool") -> dict:
+    """Apply pending migrations (the gateway-startup/CLI/test entry point — NOT for the agent's
+    write path, which only checks). Returns the migrations report."""
+    from platformlib import migrations
+    try:
+        return migrations.apply(dsn=dsn_str or dsn(), applied_by=applied_by, log=lambda *a: None)
+    except migrations.MigrationError as e:
+        raise StoreError(str(e)) from e
 
 
 def _json(value):
@@ -574,6 +511,119 @@ def clear_serving_llm(conn) -> None:
     """Unset the pointer — back to the configured default base (tests/reset; no operator surface)."""
     with conn.cursor() as cur:
         cur.execute("DELETE FROM serving_llm")
+
+
+# ==================================================================================================
+# 023 US5 (T520) — ActivationOperation repository (contracts/promotion-activation.md)
+# ==================================================================================================
+#
+# One operator go-live action, made recoverable. Every transition is a COMPARE-AND-SET on `state`
+# (a lost race updates 0 rows and returns None); the partial unique indexes in 002_activation.sql
+# enforce one non-terminal operation platform-wide and idempotency-key uniqueness among them.
+# Timestamps follow the house rule (epoch floats at the seam, timestamptz in the column); the
+# `evidence` jsonb carries sanitized authority observations only — never secrets/paths/stacks.
+
+#: Non-terminal states — the reconciler resumes these (degraded is visible but terminal-manual).
+ACTIVATION_NONTERMINAL = ("prepared", "committing", "reloading", "rolling_back")
+
+_ACTIVATION_COLS = ("operation_id", "idempotency_key", "state", "actor", "target_model",
+                    "target_version", "previous_model", "previous_version", "attempts",
+                    "created_at", "updated_at", "last_error_code", "last_error", "evidence")
+
+
+class ActivationConflict(StoreError):
+    """Another non-terminal activation exists (or an idempotency-key collision) — the caller maps
+    this to 409, never a duplicate reload."""
+
+
+def _activation_row(row) -> dict:
+    d = dict(zip(_ACTIVATION_COLS, row))
+    d["created_at"] = _epoch(d["created_at"])
+    d["updated_at"] = _epoch(d["updated_at"])
+    d["evidence"] = d["evidence"] or {}
+    return d
+
+
+def create_activation(conn, *, operation_id: str, idempotency_key: str, actor: str,
+                      target_model: str, target_version: str, previous_model=None,
+                      previous_version=None, evidence: dict = None) -> dict:
+    import psycopg
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO activation_operations (operation_id, idempotency_key, state, actor, "
+                "target_model, target_version, previous_model, previous_version, evidence) "
+                "VALUES (%s, %s, 'prepared', %s, %s, %s, %s, %s, %s) "
+                f"RETURNING {', '.join(_ACTIVATION_COLS)}",
+                (operation_id, idempotency_key, actor, target_model, str(target_version),
+                 previous_model, str(previous_version) if previous_version is not None else None,
+                 _json(evidence or {})))
+            return _activation_row(cur.fetchone())
+    except psycopg.errors.UniqueViolation as e:
+        raise ActivationConflict(
+            "another activation is already in progress (one non-terminal operation platform-wide)"
+        ) from e
+
+
+def get_activation(conn, operation_id: str):
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {', '.join(_ACTIVATION_COLS)} FROM activation_operations "
+                    "WHERE operation_id = %s", (operation_id,))
+        row = cur.fetchone()
+        return _activation_row(row) if row else None
+
+
+def find_activation_by_key(conn, idempotency_key: str):
+    """Newest operation for this idempotency key (non-terminal first, then most recent)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(_ACTIVATION_COLS)} FROM activation_operations "
+            "WHERE idempotency_key = %s "
+            "ORDER BY (state = ANY(%s)) DESC, created_at DESC LIMIT 1",
+            (idempotency_key, list(ACTIVATION_NONTERMINAL)))
+        row = cur.fetchone()
+        return _activation_row(row) if row else None
+
+
+def current_activation(conn):
+    """The single non-terminal operation, or the most recent terminal one (for the read model)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(_ACTIVATION_COLS)} FROM activation_operations "
+            "ORDER BY (state = ANY(%s)) DESC, created_at DESC LIMIT 1",
+            (list(ACTIVATION_NONTERMINAL),))
+        row = cur.fetchone()
+        return _activation_row(row) if row else None
+
+
+def list_resumable_activations(conn) -> list:
+    """Every non-terminal operation (the startup/periodic reconciler's work queue)."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {', '.join(_ACTIVATION_COLS)} FROM activation_operations "
+                    "WHERE state = ANY(%s) ORDER BY created_at",
+                    (list(ACTIVATION_NONTERMINAL),))
+        return [_activation_row(r) for r in cur.fetchall()]
+
+
+def cas_activation(conn, operation_id: str, expect_state, new_state: str, *,
+                   error_code=None, error=None, evidence_patch: dict = None,
+                   bump_attempts: bool = False):
+    """Compare-and-set transition: succeeds only from `expect_state` (str or tuple). Returns the
+    updated record, or None when the operation moved concurrently (the caller re-reads and defers
+    to whoever won). `evidence_patch` merges (never replaces) the observation object."""
+    expect = [expect_state] if isinstance(expect_state, str) else list(expect_state)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE activation_operations SET state = %s, updated_at = now(), "
+            "last_error_code = %s, last_error = %s, "
+            "evidence = evidence || %s::jsonb, "
+            "attempts = attempts + %s "
+            "WHERE operation_id = %s AND state = ANY(%s) "
+            f"RETURNING {', '.join(_ACTIVATION_COLS)}",
+            (new_state, error_code, (error or "")[:500] or None, _json(evidence_patch or {}),
+             1 if bump_attempts else 0, operation_id, expect))
+        row = cur.fetchone()
+        return _activation_row(row) if row else None
 
 
 # ==================================================================================================

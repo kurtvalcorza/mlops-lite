@@ -16,7 +16,6 @@ for _p in (REPO, os.path.join(REPO, "gateway")):
         sys.path.insert(0, _p)
 
 from _quality import install_policy_store  # noqa: E402
-
 from app import policies, scheduler  # noqa: E402
 
 

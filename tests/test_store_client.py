@@ -18,16 +18,22 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from platformlib import store  # noqa: E402
+from platformlib import migrations, store  # noqa: E402
+
+# 023 US4 (T512/T513): the schema authority moved from store.DDL to the ordered migration files —
+# the same pins now hold against the shipped baseline's exact bytes.
+BASELINE_SQL = [m for m in migrations.discover() if m.version == 1][0].sql
 
 # -- offline (no DB) -------------------------------------------------------------------------------
 
 def test_ddl_covers_every_contract_table():
     for t in store.TABLES:
-        assert f"CREATE TABLE IF NOT EXISTS {t} " in store.DDL, t
+        assert f"CREATE TABLE IF NOT EXISTS {t} " in BASELINE_SQL, t
     # the window ordering index + the jobs listing index must exist (SC-111 bounded scans)
-    assert "ix_pred_window" in store.DDL and "ix_jobs_kind" in store.DDL
+    assert "ix_pred_window" in BASELINE_SQL and "ix_jobs_kind" in BASELINE_SQL
     assert store.SCHEMA_VERSION == 1
+    # and the runner's recognized-shape map covers exactly the contract tables (T512)
+    assert set(migrations.BASELINE_SHAPE) == set(store.TABLES)
 
 
 def test_dsn_prefers_full_url_then_builds_from_components(monkeypatch):
@@ -114,8 +120,8 @@ def test_prediction_label_window_roundtrip_and_write_once(db):
 # -- US4 T375: policies + pending + status + suggestions -------------------------------------------
 
 def test_ddl_folds_pending_and_status_onto_policies():
-    assert "ADD COLUMN IF NOT EXISTS pending" in store.DDL
-    assert "ADD COLUMN IF NOT EXISTS status" in store.DDL
+    assert "ADD COLUMN IF NOT EXISTS pending" in BASELINE_SQL
+    assert "ADD COLUMN IF NOT EXISTS status" in BASELINE_SQL
 
 
 def test_policy_pending_status_roundtrip(db):
@@ -171,7 +177,7 @@ def test_suggestion_lifecycle_and_atomic_resolve(db):
 # -- US4 T375-B: jobs (the durable host-agent journal) --------------------------------------------
 
 def test_ddl_has_jobs_listing_index():
-    assert "ix_jobs_kind" in store.DDL
+    assert "ix_jobs_kind" in BASELINE_SQL
 
 
 def test_job_record_round_trips_through_columns_and_catch_all(db):

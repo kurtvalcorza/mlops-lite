@@ -34,21 +34,30 @@ def _bases(tmp_path, present=("b1.gguf",)):
             {"name": "qwen-b2", "base_id": "Qwen/B2", "file": "b2.gguf"}]
 
 
+def _no_upload(path, bucket, key, log):
+    """Stub the Garage upload seam (023 T491): these are OFFLINE tests — the default `_garage_upload`
+    reaches for a live S3 endpoint, which fails on any host without the stack (CI, clean checkout)."""
+
+
 def test_register_bases_registers_present_and_skips_absent(tmp_path):
     reg = FakeRegistry()
-    report = register_bases(reg, bases=_bases(tmp_path), gguf_dir=str(tmp_path), log=_quiet)
+    report = register_bases(reg, bases=_bases(tmp_path), gguf_dir=str(tmp_path), log=_quiet,
+                            upload=_no_upload)
     assert [r["name"] for r in report["registered"]] == ["qwen-b1"]
     assert [r["name"] for r in report["skipped"]] == ["qwen-b2"]  # absent → skipped, no download
     mv = reg.get_model_version("qwen-b1", "1")
     assert mv.tags["kind"] == "full-model" and mv.tags["task"] == "text-generation"
-    assert mv.tags["base_id"] == "Qwen/B1" and mv.source == str(tmp_path / "b1.gguf")
+    # The registered source is the STORE object (022 on-HW: MLflow 3.x rejects a bare local path;
+    # the agent materializes this s3:// object) — not the local zoo file the upload read from.
+    assert mv.tags["base_id"] == "Qwen/B1" and mv.source == "s3://models/base-zoo/qwen-b1.gguf"
 
 
 def test_register_bases_is_idempotent(tmp_path):
     reg = FakeRegistry()
     bases = _bases(tmp_path)
-    register_bases(reg, bases=bases, gguf_dir=str(tmp_path), log=_quiet)
-    report = register_bases(reg, bases=bases, gguf_dir=str(tmp_path), log=_quiet)
+    register_bases(reg, bases=bases, gguf_dir=str(tmp_path), log=_quiet, upload=_no_upload)
+    report = register_bases(reg, bases=bases, gguf_dir=str(tmp_path), log=_quiet,
+                            upload=_no_upload)
     assert report["registered"] == []  # re-run registers nothing new
     assert len([mv for mv in reg.versions if mv.name == "qwen-b1"]) == 1
 

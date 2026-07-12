@@ -1,0 +1,28 @@
+# 023 T490 (FR-289/294): the dependency-light backend developer/test environment.
+#
+# One command from a clean checkout gives everything the OFFLINE suite needs to collect and run —
+# no torch/CUDA, no model weights, no BentoML, no llama.cpp. The runtime pins are the gateway's own
+# (single source of truth — the gateway image installs the same file), so a passing offline run here
+# exercises the same library versions the container ships.
+#
+#   python -m pip install -r requirements-dev.txt
+#   ruff check .
+#   pytest
+#
+# Live/hardware tests skip themselves via tests/conftest.py guards; nothing below reaches for a GPU.
+-r gateway/requirements.txt
+
+# Test-only tooling (not shipped in any image).
+pytest==9.0.2
+ruff==0.14.1
+
+# Light runtime deps of offline-tested modules that live OUTSIDE the gateway image (FR-293: these
+# suites run against fakes, but their code under test imports the library at call time — without it
+# 16 offline tests fail on ModuleNotFoundError, which is a silent-coverage hole, not a skip).
+# Pins match the owning component's requirements file.
+optuna==4.9.0      # training/flows/hpo.py (the HPO objective/register suites)
+pillow==12.2.0     # scripts/capture_goldens.py + the vision multipart drills
+pyyaml==6.0.3      # tests/test_alert_rules.py parses infra/prometheus/rules/*.yml — declare it
+                   # explicitly (review US7-F5) rather than leaning on mlflow/optuna's transitive
+                   # copy, so a future transitive drop can't turn the whole backend job red
+

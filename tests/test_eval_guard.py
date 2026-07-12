@@ -69,5 +69,6 @@ def test_serving_version_is_scored_via_the_serving_path(monkeypatch):
 
 if __name__ == "__main__":
     import sys
+
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

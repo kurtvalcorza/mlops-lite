@@ -178,7 +178,6 @@ def _vision_predict_fn(source: str, tags: dict):
     import os as _os
 
     import torch
-
     from vision_finetune import _build_model
 
     # weights_only=False: model.pt carries the `categories` list alongside the state_dict, so the

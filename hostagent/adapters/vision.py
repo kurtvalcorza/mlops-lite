@@ -16,9 +16,8 @@ import json
 import os
 import urllib.request
 
-from platformlib.topology import vram_budget_gb
-
 from hostagent.adapters._common import bento_spawn, engine_health, http_200
+from platformlib.topology import vram_budget_gb
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

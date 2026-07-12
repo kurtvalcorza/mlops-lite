@@ -65,7 +65,7 @@ def main() -> int:
     print(f"[OK] stable: max_psi={rep['max_psi']} -> no drift, no retrain")
 
     # 2. Drift check: reference vs shifted → drift flagged.
-    serving_idle = not (_req("GET", "/serving/health")[1].get("reachable") and
+    not (_req("GET", "/serving/health")[1].get("reachable") and
                         _req("GET", "/serving/health")[1].get("resident", False))
     s, res = _req("POST", "/monitor/check",
                   {"reference": {"name": REF, "version": ref_v},
@@ -91,7 +91,7 @@ def main() -> int:
     # 4. Report is persisted and retrievable.
     s, mon = _req("GET", "/monitor")
     if s != 200 or not any(r["current"] == f"{LIVE}@{live_v}" for r in mon["reports"]):
-        print(f"[FAIL] drift report not persisted in /monitor")
+        print("[FAIL] drift report not persisted in /monitor")
         return 1
     print(f"[OK] /monitor lists {len(mon['reports'])} report(s), including the drift one")
 

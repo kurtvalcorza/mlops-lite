@@ -24,9 +24,8 @@ import urllib.error
 import urllib.request
 import uuid
 
-from platformlib.topology import vram_budget_gb
-
 from hostagent.adapters._common import engine_health, free_port
+from platformlib.topology import vram_budget_gb
 
 DEFAULT_MODEL = "~/models/whisper/ggml-base.en.bin"
 DEFAULT_ALIAS = "whisper-base.en"
