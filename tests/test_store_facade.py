@@ -55,6 +55,8 @@ FACADE = {
     "cas_activation": ["conn", "operation_id", "expect_state", "new_state"],
     # jobs repository
     "upsert_job": ["conn", "record"], "import_job": ["conn", "record"],
+    "get_job": ["conn", "job_id"], "list_jobs": ["conn", "kind"],
+    "count_active_jobs": ["conn"], "mark_jobs_interrupted": ["conn", "reason", "ended_at"],
 }
 
 FACADE_TYPES = ("StoreError", "LabelExists", "ActivationConflict")
