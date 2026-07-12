@@ -199,3 +199,79 @@ def _identity(adapter) -> dict:
     """The bound (now loading/loaded) serving identity for the reload response."""
     name, version = adapter.bound_identity()
     return {"model_name": name, "registry_version": version}
+
+
+# --- 023 US5 (T523, FR-307/308/312): the reload command keyed by operation_id -----------------------
+#
+# WRAPS reload_serving_llm — the pre-evict probe (TargetUnresolvable), the idempotent same-target
+# no-op, and both swap paths above are NOT re-implemented (contract §Prior art). What is new here:
+# a per-process operation store (same operation + same target replays the stored result with no
+# second reload; same operation + a DIFFERENT target is rejected), and exact resident verification
+# against the gateway-supplied target. Durable cross-process truth stays in Postgres on the
+# gateway side (ActivationOperation); this store only needs to cover retries within the agent's
+# process lifetime (contract §Agent reload).
+
+_OPS_LOCK_ATTR = "_reload_ops_lock"
+_OPS_ATTR = "_reload_operations"
+
+
+class OperationTargetMismatch(PreemptRefused):
+    """The operation_id was previously issued for a DIFFERENT target — a stale/duplicated client
+    must never flip the served model to whatever it happens to name now (FR-308). 409."""
+
+
+def _ops(manager):
+    import threading
+    lock = getattr(manager, _OPS_LOCK_ATTR, None)
+    if lock is None:
+        lock = threading.Lock()
+        setattr(manager, _OPS_LOCK_ATTR, lock)
+        setattr(manager, _OPS_ATTR, {})
+    return lock, getattr(manager, _OPS_ATTR)
+
+
+def reload_serving_llm_op(manager, *, operation_id=None, target=None, preempt=False,
+                          batch_active_fn=None, drain_timeout_s: float = 10.0) -> dict:
+    """`reload_serving_llm` with operation semantics. Without an `operation_id` this IS the plain
+    022 reload (byte-compatible). With one:
+
+      - a stored completed result for (operation_id, same target) returns AS-IS — no second
+        unload/reload, however the first attempt ended up resolving (FR-307);
+      - (operation_id, different target) raises OperationTargetMismatch → 409 (FR-308);
+      - a successful reload is accepted only when the loaded identity IS the requested target
+        (FR-312) — a resolver/alias race surfaces as `verify_failed`, never a silent wrong model;
+      - a FAILED attempt is not stored, so a retry re-executes (the probe/no-op inside
+        reload_serving_llm keep that retry cheap and idempotent)."""
+    if not operation_id:
+        return reload_serving_llm(manager, preempt=preempt, batch_active_fn=batch_active_fn,
+                                  drain_timeout_s=drain_timeout_s)
+    want = ((target or {}).get("model_name") or None,
+            str((target or {}).get("version")) if (target or {}).get("version") is not None
+            else None)
+    lock, ops = _ops(manager)
+    with lock:
+        rec = ops.get(operation_id)
+        if rec is not None and rec["target"] != want:
+            raise OperationTargetMismatch(
+                f"operation {operation_id} was issued for "
+                f"{rec['target'][0]}@{rec['target'][1]}, not {want[0]}@{want[1]} — rejected "
+                f"(FR-308)")
+        if rec is not None and rec.get("result") is not None:
+            return {**rec["result"], "replayed": True}
+        ops[operation_id] = {"target": want, "result": None}
+    result = reload_serving_llm(manager, preempt=preempt, batch_active_fn=batch_active_fn,
+                                drain_timeout_s=drain_timeout_s)
+    # Exact resident verification (FR-312): success is only success when the agent now serves the
+    # very model+version the operation names. `noop` included — a stale operation must not claim
+    # active against a different resident.
+    if want[0] is not None:
+        got = (result.get("model_name"),
+               str(result.get("registry_version"))
+               if result.get("registry_version") is not None else None)
+        if got != want:
+            return {**result, "status": "verify_failed",
+                    "error": f"resident is {got[0]}@{got[1]}, operation targets "
+                             f"{want[0]}@{want[1]}"}  # NOT stored — a later retry re-executes
+    with lock:
+        ops[operation_id]["result"] = result
+    return result

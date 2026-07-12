@@ -193,3 +193,45 @@ def test_never_two_children_alive_across_the_switch():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# -- 023 US5 (T523, FR-307/308/312): the reload keyed by operation_id --------------------------------
+
+def test_operation_same_target_replays_without_second_reload():
+    mgr, a, llm = _manager()
+    tgt = {"model_name": "model-a", "version": "1"}
+    r1 = swap.reload_serving_llm_op(mgr, operation_id="op1", target=tgt)
+    assert r1["status"] == "loaded" and "replayed" not in r1
+    spawns_after_first = len(llm.spawned)
+    r2 = swap.reload_serving_llm_op(mgr, operation_id="op1", target=tgt)
+    assert r2["replayed"] is True and r2["status"] == "loaded"   # the STORED result, as-is
+    assert len(llm.spawned) == spawns_after_first                      # no second unload/reload (FR-307)
+
+
+def test_operation_different_target_is_rejected():
+    mgr, a, llm = _manager()
+    swap.reload_serving_llm_op(mgr, operation_id="op1",
+                               target={"model_name": "model-a", "version": "1"})
+    with pytest.raises(swap.OperationTargetMismatch):            # 409 via PreemptRefused (FR-308)
+        swap.reload_serving_llm_op(mgr, operation_id="op1",
+                                   target={"model_name": "model-B", "version": "9"})
+
+
+def test_operation_verifies_exact_resident_target():
+    # The gateway's operation names model-X@9 but the resolver binds model-a@1 (an alias race):
+    # the reload itself succeeds, yet the operation must NOT claim it — verify_failed, not stored,
+    # so a retry after the registry settles re-executes (FR-312).
+    mgr, a, llm = _manager()
+    res = swap.reload_serving_llm_op(mgr, operation_id="op2",
+                                     target={"model_name": "model-X", "version": "9"})
+    assert res["status"] == "verify_failed" and "model-X@9" in res["error"]
+    # not stored: the next call with the SAME op re-executes rather than replaying the failure
+    res2 = swap.reload_serving_llm_op(mgr, operation_id="op2",
+                                      target={"model_name": "model-X", "version": "9"})
+    assert res2["status"] == "verify_failed" and "replayed" not in res2
+
+
+def test_operation_absent_is_the_plain_022_reload():
+    mgr, a, llm = _manager()
+    res = swap.reload_serving_llm_op(mgr)                        # no operation_id
+    assert res["status"] == "loaded" and "replayed" not in res

@@ -233,3 +233,38 @@ def test_status_reports_versions_and_pending(fresh_db, custom_dir):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --- 023 US5 (T520): the activation_operations accessors against real Postgres ----------------------
+
+def test_activation_repository_cas_and_serialization(fresh_db):
+    migrations.apply(dsn=fresh_db, applied_by="test", log=lambda *a: None)
+    with _conn(fresh_db) as c:
+        op = store.create_activation(
+            c, operation_id="op-1", idempotency_key="k1", actor="operator",
+            target_model="ops-bot", target_version="2", previous_model="qwen")
+        assert op["state"] == "prepared" and op["previous_model"] == "qwen"
+        # one non-terminal activation platform-wide (the partial unique index)
+        with pytest.raises(store.ActivationConflict):
+            store.create_activation(c, operation_id="op-2", idempotency_key="k2",
+                                    actor="operator", target_model="x", target_version="1")
+        # CAS: wrong expected state loses the race (None), right one transitions + merges evidence
+        assert store.cas_activation(c, "op-1", "reloading", "active") is None
+        moved = store.cas_activation(c, "op-1", "prepared", "committing",
+                                     evidence_patch={"pointer_set": "ops-bot"})
+        assert moved["state"] == "committing" and moved["evidence"]["pointer_set"] == "ops-bot"
+        moved = store.cas_activation(c, "op-1", "committing", "reloading", bump_attempts=True)
+        assert moved["attempts"] == 1
+        done = store.cas_activation(c, "op-1", "reloading", "active",
+                                    evidence_patch={"resident": {"model": "ops-bot"}})
+        assert done["state"] == "active"
+        assert done["evidence"] == {"pointer_set": "ops-bot", "resident": {"model": "ops-bot"}}
+        # terminal ⇒ a new operation is admitted; the key lookup prefers the non-terminal one
+        op2 = store.create_activation(c, operation_id="op-3", idempotency_key="k1",
+                                      actor="operator", target_model="ops-bot",
+                                      target_version="3")
+        found = store.find_activation_by_key(c, "k1")
+        assert found["operation_id"] == "op-3"                 # non-terminal wins the lookup
+        assert [o["operation_id"] for o in store.list_resumable_activations(c)] == ["op-3"]
+        assert store.current_activation(c)["operation_id"] == "op-3"
+        assert op2["previous_version"] is None

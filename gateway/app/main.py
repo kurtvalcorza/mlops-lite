@@ -168,6 +168,60 @@ def _apply_migrations():
     _MIG_OUTCOMES.labels(outcome="error").inc()
 
 
+# --- 023 US5 (T524, FR-309..311): activation reconciliation from gateway lifespan -------------------
+# One pass right after migrations (resume whatever a crash/restart stranded), then periodic while
+# non-terminal operations exist. Bounded and contained: one stuck operation cannot stall the loop,
+# and the loop never blocks unrelated startup (it runs as a background task, in the threadpool).
+_reconcile_stop = None
+_reconcile_task = None  # strong reference — a bare ensure_future task can be GC'd mid-flight
+
+
+@app.get("/serving/llm/activation")
+def serving_llm_activation():
+    """The desired/resident/activation read model (023 US5 — contracts/promotion-activation.md
+    §Read): `desired` is the pointer, `resident` is agent-reported, `consistent` only when they
+    agree in a terminal-success state. Additive; no secret/path/exception internals."""
+    REQUESTS.labels(route="/serving/llm/activation").inc()
+    from . import activation
+    return activation.service().read_model()
+
+
+@app.on_event("startup")
+async def _start_activation_reconciler():
+    global _reconcile_stop, _reconcile_task
+    if os.getenv("ACTIVATION_RECONCILER_ENABLED", "1").lower() in ("0", "false", "no"):
+        return
+    import asyncio
+
+    from fastapi.concurrency import run_in_threadpool
+
+    from . import activation
+
+    interval = float(os.getenv("ACTIVATION_RECONCILE_INTERVAL_S", "60"))
+    _reconcile_stop = asyncio.Event()
+
+    async def loop():
+        while not _reconcile_stop.is_set():
+            try:
+                pending = await run_in_threadpool(activation.service().pending_count)
+                if pending:
+                    await run_in_threadpool(activation.service().reconcile_all)
+            except Exception:  # noqa: BLE001 — store/agent blip: try again next tick
+                pass
+            try:
+                await asyncio.wait_for(_reconcile_stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    _reconcile_task = asyncio.ensure_future(loop())
+
+
+@app.on_event("shutdown")
+async def _stop_activation_reconciler():
+    if _reconcile_stop is not None:
+        _reconcile_stop.set()
+
+
 # --- 018 US3 (FR-180): the policy scheduler — the loop runs without an external trigger -------------
 # A lifespan asyncio task (research R5). Fail-open by construction: a tick with no policies is a
 # no-op, per-policy errors are contained inside tick(), and the whole loop is disable-able.

@@ -31,3 +31,21 @@ export type TaskEntry = {
 // lease-governed renderers (stream/classify/transcribe) gate on `serving`; the always-on CPU
 // renderers (embed/predict) ignore it (FR-082).
 export type PanelProps = { entry: TaskEntry; serving: ServingState | null };
+
+// 023 US5 (T525 — contracts/promotion-activation.md §Read): the desired/resident/activation read
+// model. `desired` is the ActiveServingLLM pointer, `resident` is AGENT-reported, `consistent`
+// only when they agree in a terminal-success state — incomplete desired state is never shown as
+// serving.
+export type ActivationView = {
+  desired: { model_name: string | null; version: string | null };
+  resident: { model_name: string | null; version: string | null; resident: boolean };
+  activation: {
+    operation_id: string;
+    state: string;
+    target: string;
+    attempts: number;
+    last_error: string | null;
+    last_error_code: string | null;
+  } | null;
+  consistent: boolean;
+};

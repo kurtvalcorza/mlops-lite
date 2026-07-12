@@ -381,8 +381,13 @@ def handle_post(path: str, query: str, content_type: str, control_header: str, r
         if body is None:
             return "json", 400, {"error": "invalid JSON"}
         try:
-            result = swap_mod.reload_serving_llm(
-                manager, preempt=bool(body.get("preempt")),
+            # 023 US5 (T523): an operation_id keys the reload for idempotent retry — same op +
+            # same target replays the stored result; a different target under the same op is a
+            # 409; success requires the EXACT target resident (FR-307/308/312). Absent (a plain
+            # 022 caller) this is byte-compatibly the unkeyed reload.
+            result = swap_mod.reload_serving_llm_op(
+                manager, operation_id=body.get("operation_id"), target=body.get("target"),
+                preempt=bool(body.get("preempt")),
                 batch_active_fn=lambda: jobs.health_fields()["gpu_batch_active"],
                 drain_timeout_s=float(body.get("drain_timeout_s", 10)))
         except swap_mod.TargetUnresolvable as e:

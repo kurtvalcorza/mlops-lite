@@ -6,7 +6,7 @@
 // Principle II visualize-only: reads serving/state + serving/tasks, never touches admission.
 
 import { Panel } from '@/components/Panel';
-import type { ServingState, TaskEntry } from './types';
+import type { ActivationView, ServingState, TaskEntry } from './types';
 
 // task tag → engine label + tenancy (the registry's task vocabulary, 009).
 const TENANCY: Record<string, { engine: string; lease: boolean }> = {
@@ -17,12 +17,47 @@ const TENANCY: Record<string, { engine: string; lease: boolean }> = {
   tabular: { engine: 'predict', lease: false },
 };
 
+// 023 US5 (T525): desired vs resident, honestly. `desired` is the pointer the operator promoted;
+// `resident` is what the AGENT reports actually loaded. An incomplete activation is shown by its
+// state (reloading/degraded/…) with retry guidance — never labeled as serving (FR-311).
+function ActivationLine({ activation }: { activation: ActivationView | null }) {
+  if (!activation) return null;
+  const { desired, resident, activation: op, consistent } = activation;
+  if (!desired.model_name && !op) return null; // nothing selected yet — the resident line suffices
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-caption-md">
+      <span className="text-mute">desired:</span>
+      <span className="text-ink">{desired.model_name ?? '(default base)'}</span>
+      <span className="text-mute">resident:</span>
+      <span className="text-ink">
+        {resident.model_name ?? 'unknown'}
+        {resident.version ? `@v${resident.version}` : ''}
+      </span>
+      {consistent ? (
+        <span className="st-accent">[●] consistent</span>
+      ) : op ? (
+        <span className={op.state === 'degraded' ? 'st-error' : 'st-warning'}>
+          [{op.state === 'degraded' ? '!' : '~'}] activation {op.state}
+          {op.last_error ? ` — ${op.last_error}` : ''}
+          {op.state === 'degraded' || op.state === 'reloading'
+            ? ' (re-promote the target to retry, or the reconciler converges it)'
+            : ''}
+        </span>
+      ) : (
+        <span className="st-warning">[~] desired ≠ resident (converging on next load)</span>
+      )}
+    </div>
+  );
+}
+
 export function LeaseView({
   serving,
   tasks,
+  activation = null,
 }: {
   serving: ServingState | null;
   tasks: TaskEntry[] | null;
+  activation?: ActivationView | null;
 }) {
   return (
     <Panel title="lease" hint="GET /serving/state + /serving/tasks — one model in VRAM (Principle II)">
@@ -47,6 +82,8 @@ export function LeaseView({
           <span className="text-ash">nothing loaded</span>
         )}
       </div>
+
+      <ActivationLine activation={activation} />
 
       <p className="mb-1 text-caption-md text-mute">promoted engines</p>
       {tasks === null ? (

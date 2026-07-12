@@ -14,7 +14,7 @@ import { TranscribePanel } from './TranscribePanel';
 import type { PanelProps } from './types';
 
 export { NoRenderer } from './NoRenderer';
-export type { PanelProps, ServingState, TaskEntry } from './types';
+export type { ActivationView, PanelProps, ServingState, TaskEntry } from './types';
 
 export const RENDERERS: Record<string, ComponentType<PanelProps>> = {
   'text-generation': StreamPanel,
