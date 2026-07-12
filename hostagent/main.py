@@ -177,6 +177,35 @@ def stream_frames(manager, rt, engine_id: str, verb: str, body: dict, *, preempt
 _ready_check = None
 
 
+def _make_store_ready_check(ttl_s: float = 30.0):
+    """The /readyz US4 half (FR-299/301): NOT-ready when the gateway DB schema is INCOMPATIBLE
+    with this agent (writers refuse rather than evolve). A transient store outage deliberately
+    does NOT flip readiness — the supervisor restarts on failed probes, and restarting a healthy
+    agent for a Postgres blip fixes nothing (job writes already fail loud on StoreError). The
+    verdict is cached for `ttl_s` so a hot-polled /readyz costs one DB round-trip per window."""
+    state = {"at": 0.0, "verdict": (True, None)}
+
+    def check():
+        now = time.time()
+        if now - state["at"] >= ttl_s:
+            state["at"] = now
+            from platformlib import migrations, store
+            try:
+                conn = store.connect()
+                try:
+                    migrations.check_compatible(conn)
+                    state["verdict"] = (True, None)
+                finally:
+                    conn.close()
+            except migrations.MigrationError as e:
+                state["verdict"] = (False, f"store schema incompatible: {e}")
+            except Exception:  # noqa: BLE001 — unreachable store: transient, not a schema verdict
+                state["verdict"] = (True, None)
+        return state["verdict"]
+
+    return check
+
+
 def _readiness():
     """(ready, reason) for the public minimal `/readyz` (023 FR-283). Never leaks internals: the
     reason is a short operator hint (e.g. the US4 schema-compatibility verdict), not a stack."""
@@ -525,7 +554,7 @@ def make_handler(admission, journal, manager, jobs, policy=None):
 
 
 def main() -> None:
-    global _interrupted_at_start
+    global _interrupted_at_start, _ready_check
     runtime = os.getenv("AGENT_RUNTIME", "stdlib")
     if runtime not in ("stdlib", "uvicorn"):
         raise SystemExit(f"AGENT_RUNTIME must be 'stdlib' or 'uvicorn', got {runtime!r}")
@@ -537,6 +566,7 @@ def main() -> None:
     except agent_auth.AgentAuthConfigError as e:
         raise SystemExit(f"hostagent refused to start: {e}")
     admission, journal, manager, jobs = build_agent()
+    _ready_check = _make_store_ready_check()  # /readyz reports schema compatibility (FR-301)
     _interrupted_at_start = journal.mark_interrupted("agent restart")
     if _interrupted_at_start:
         REGISTRY.inc("hostagent_jobs_interrupted_total", by=_interrupted_at_start)

@@ -37,7 +37,9 @@ def _gguf(tmp_path, name):
 # -- T461: the pointer table + accessors ------------------------------------------------------------
 
 def test_ddl_covers_the_serving_llm_pointer_table():
-    assert "CREATE TABLE IF NOT EXISTS serving_llm " in store.DDL
+    from platformlib import migrations
+    baseline = [m for m in migrations.discover() if m.version == 1][0].sql
+    assert "CREATE TABLE IF NOT EXISTS serving_llm " in baseline  # 023 US4: files own the schema
     assert "serving_llm" in store.TABLES
     # additive-only — the schema version does not bump for a new IF NOT EXISTS table
     assert store.SCHEMA_VERSION == 1

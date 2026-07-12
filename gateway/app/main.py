@@ -11,8 +11,8 @@ Phase 8: GPU/daemon metrics proxied into /metrics; OpenAPI exported for contract
 import os
 
 from fastapi import Depends, FastAPI
-from fastapi.responses import PlainTextResponse
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
+from fastapi.responses import JSONResponse, PlainTextResponse
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from . import platform_health, platform_metrics, tracing
 from .auth import auth_mode, require_api_key
@@ -57,8 +57,13 @@ REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"]
 
 @app.get("/healthz")
 def healthz():
-    """Liveness probe (FR-015)."""
+    """Liveness + readiness probe (FR-015; 023 US4 FR-299: a migration failure fails readiness —
+    the platform must not look healthy while its schema is wrong-shaped or unapplied)."""
     REQUESTS.labels(route="/healthz").inc()
+    if _MIGRATION_STATUS["state"] == "error":
+        return JSONResponse(status_code=503, content={
+            "status": "error", "service": "gateway",
+            "migrations": _MIGRATION_STATUS["error"]})
     return {"status": "ok", "service": "gateway"}
 
 
@@ -71,9 +76,12 @@ def metrics():
 
 @app.get("/platform/health")
 async def platform_health_endpoint():
-    """Aggregated native-daemon reachability (002 US2, T051) — open like /healthz, for probes."""
+    """Aggregated native-daemon reachability (002 US2, T051) — open like /healthz, for probes.
+    023 T516: carries the sanitized migration verdict too (state/version/error — no DSN/SQL)."""
     REQUESTS.labels(route="/platform/health").inc()
-    return await platform_health.aggregate()
+    out = await platform_health.aggregate()
+    out["migrations"] = migration_status()
+    return out
 
 
 @app.get("/")
@@ -107,6 +115,57 @@ def root():
         "tracing": tracing.enabled(),
         "trace_capture": tracing.capture_io(),
     }
+
+
+# --- 023 US4 (T514, FR-299): gateway startup OWNS schema migrations ---------------------------------
+# Applied before anything serves; a migration failure fails readiness (the status below reads
+# "error" and /healthz flips 503) rather than letting requests run against a wrong-shaped schema.
+# Fail-CLOSED but not crash-looped: the gateway stays up to report WHAT failed via
+# /platform/health, and the metrics gauges expose version/pending (T516) — no DSN/SQL in any of it.
+_MIGRATION_STATUS = {"state": "pending", "db_version": None, "applied": [], "error": None}
+
+_MIG_DB_VERSION = Gauge("mlops_migrations_db_version", "Applied gateway-DB schema version")
+_MIG_PENDING = Gauge("mlops_migrations_pending", "Migrations shipped by this binary not yet applied")
+_MIG_OUTCOMES = Counter("mlops_migrations_outcomes_total", "Migration apply outcomes", ["outcome"])
+_MIG_DURATION = Gauge("mlops_migrations_last_apply_ms", "Duration of the last migration apply run")
+
+
+def migration_status() -> dict:
+    """The sanitized migration verdict for /platform/health (T516) — never a DSN or SQL text."""
+    return dict(_MIGRATION_STATUS)
+
+
+@app.on_event("startup")
+def _apply_migrations():
+    if os.getenv("GATEWAY_MIGRATIONS_ENABLED", "1").lower() in ("0", "false", "no"):
+        _MIGRATION_STATUS["state"] = "disabled"
+        return
+    import time as _time
+
+    from platformlib import migrations
+
+    last_err = None
+    for attempt in range(int(os.getenv("GATEWAY_MIGRATIONS_RETRIES", "5"))):
+        if attempt:
+            _time.sleep(min(2.0 * attempt, 8.0))  # Postgres may still be coming up alongside us
+        try:
+            report = migrations.apply(applied_by="gateway")
+            _MIGRATION_STATUS.update(state="ok", db_version=report["db_version"],
+                                     applied=report["applied"], error=None)
+            _MIG_DB_VERSION.set(report["db_version"])
+            _MIG_PENDING.set(0)
+            _MIG_DURATION.set(report["duration_ms"])
+            _MIG_OUTCOMES.labels(outcome="ok").inc()
+            return
+        except migrations.MigrationError as e:
+            # A REAL migration failure (checksum drift, newer schema, failed SQL) is terminal —
+            # retrying cannot fix bytes; surface it at once.
+            last_err = f"{e}"
+            break
+        except Exception as e:  # noqa: BLE001 — connection-level: retry while Postgres warms up
+            last_err = f"database unreachable ({e.__class__.__name__})"
+    _MIGRATION_STATUS.update(state="error", error=last_err)
+    _MIG_OUTCOMES.labels(outcome="error").inc()
 
 
 # --- 018 US3 (FR-180): the policy scheduler — the loop runs without an external trigger -------------

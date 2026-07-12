@@ -31,9 +31,11 @@ from _agentserver import start_agent  # noqa: E402
 from _agentstore import FakeJobStore  # noqa: E402
 
 from hostagent import admission as adm  # noqa: E402
-from hostagent import auth  # noqa: E402
+from hostagent import (  # noqa: E402
+    auth,
+    lifecycle,
+)
 from hostagent import jobs as jobs_mod  # noqa: E402
-from hostagent import lifecycle  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
 
 KEY = "k-0123456789abcdef0123456789abcdef"

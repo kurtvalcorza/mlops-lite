@@ -16,8 +16,9 @@ stays importable in stdlib-only contexts — the native daemons import
 `platformlib.topology`/`contracts` without needing either driver installed.
 
 Relational design notes:
-  - **bootstrap() is idempotent + additive-only** (`CREATE ... IF NOT EXISTS`), mirrored in
-    `infra/postgres/init.sql` for a fresh volume; a single `meta(schema_version)` row tracks it.
+  - **Schema lives in ordered migrations** (023 US4): `platformlib/migrations/*.sql` via
+    `platformlib.migrations` — the gateway applies at startup; `bootstrap()` here only VERIFIES
+    compatibility before writes (the old embedded DDL + its init.sql mirror are retired, T513).
   - **Write-once labels (FR-185)** are enforced by the `labels` PRIMARY KEY, NOT an in-process lock:
     a second insert for the same `prediction_id` raises `LabelExists` (from a UniqueViolation), so
     concurrent duplicate submissions store exactly one label.
@@ -101,89 +102,12 @@ def list_common_prefixes(s3, bucket: str, prefix: str = "", delimiter: str = "/"
 # Relational store (US4, T373) — contracts/store-schema.md
 # ==================================================================================================
 
-#: Bumped only on a non-additive schema change (none within 018). `bootstrap()` seeds `meta`.
+#: Kept for backward compatibility with the pre-023 meta seed (001_baseline.sql seeds the same 1).
 SCHEMA_VERSION = 1
 
-#: The full schema (contracts/store-schema.md). Additive-only; every statement is IF NOT EXISTS so
-#: bootstrap() is safe on every client init and the infra/postgres/init.sql mirror can't drift.
-DDL = """
-CREATE TABLE IF NOT EXISTS meta (schema_version int NOT NULL);
-
-CREATE TABLE IF NOT EXISTS predictions (
-  prediction_id text PRIMARY KEY,
-  model_name    text NOT NULL,
-  version       text NOT NULL,
-  modality      text NOT NULL,
-  served_at     timestamptz NOT NULL,
-  streamed      boolean NOT NULL DEFAULT false,
-  payload_ref   text
-);
-CREATE INDEX IF NOT EXISTS ix_pred_window
-  ON predictions (modality, model_name, version, served_at DESC);
-
-CREATE TABLE IF NOT EXISTS labels (
-  prediction_id text PRIMARY KEY REFERENCES predictions(prediction_id),
-  label         jsonb NOT NULL,
-  submitted_at  timestamptz NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS capture_index (
-  prediction_id text PRIMARY KEY,
-  modality      text NOT NULL,
-  input_ref     text NOT NULL,
-  captured_at   timestamptz NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS jobs (
-  job_id       text PRIMARY KEY,
-  kind         text NOT NULL,
-  modality     text NOT NULL,
-  request      jsonb NOT NULL,
-  state        text NOT NULL,
-  submitted_at timestamptz NOT NULL,
-  started_at   timestamptz,
-  ended_at     timestamptz,
-  result       jsonb
-);
-CREATE INDEX IF NOT EXISTS ix_jobs_kind ON jobs (kind, submitted_at DESC);
-
-CREATE TABLE IF NOT EXISTS policies (
-  model_name text PRIMARY KEY,
-  document   jsonb NOT NULL,
-  updated_at timestamptz NOT NULL,
-  updated_by text NOT NULL
-);
--- US4 T375: the queue-of-one parked retrain + the last per-model check status fold onto the policy
--- row (both are strictly 1:1 with the policy, keyed by model_name), replacing the pre-US4
--- policies/_pending/ + policies/_status/ objects. Additive (ADD COLUMN IF NOT EXISTS) so an existing
--- live `policies` table gains them on the next bootstrap without a schema-version bump.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS pending jsonb;
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS status  jsonb;
-
-CREATE TABLE IF NOT EXISTS suggestions (
-  id                text PRIMARY KEY,
-  model_name        text NOT NULL,
-  candidate_version text NOT NULL,
-  gate_verdict      jsonb NOT NULL,
-  shadow_verdict    jsonb,
-  state             text NOT NULL,
-  created_at        timestamptz NOT NULL,
-  resolved_at       timestamptz,
-  actor             text
-);
-
--- 022 T461 (data-model.md §ActiveServingLLM): the ONE platform-scoped pointer naming the active
--- text-generation model. A single row (the CHECKed boolean PK makes a second row impossible);
--- absent row ⇒ the configured default base serves (today's behavior). Additive — no version bump.
-CREATE TABLE IF NOT EXISTS serving_llm (
-  singleton   boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-  model_name  text NOT NULL,
-  selected_at timestamptz NOT NULL,
-  selected_by text NOT NULL
-);
-"""
-
-#: The tables bootstrap() must create — used by the test + a post-bootstrap self-check.
+#: The tables the schema must present — used by tests and shape checks. The DDL itself moved to
+#: `platformlib/migrations/001_baseline.sql` (023 US4, FR-297): ordered migration files are the
+#: ONLY schema authority now; the embedded full-schema DDL string and its init.sql mirror are gone.
 TABLES = ("meta", "predictions", "labels", "capture_index", "jobs", "policies", "suggestions",
           "serving_llm")
 
@@ -226,21 +150,34 @@ def connect(dsn_str: str = None, *, autocommit: bool = True):
 
 
 def bootstrap(conn=None) -> None:
-    """Apply the schema idempotently and seed `meta`. Safe to call on every client init (all DDL is
-    IF NOT EXISTS). Opens its own connection when `conn` is None."""
+    """Verify the schema is COMPATIBLE (023 US4, FR-299/301) — this no longer applies DDL.
+
+    Ordered migrations own evolution now: the GATEWAY applies them at startup
+    (gateway/app/main.py); every other store client (host-agent journal, tools, ad-hoc writers)
+    calls this before writing and fails closed on an unledgered/older/newer schema instead of
+    racing its own `CREATE IF NOT EXISTS` against a live database. The name survives because
+    every pre-023 client init already calls it at exactly the right moment."""
+    from platformlib import migrations
     close = conn is None
     conn = conn or connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(DDL)
-            cur.execute(
-                "INSERT INTO meta (schema_version) SELECT %s "
-                "WHERE NOT EXISTS (SELECT 1 FROM meta)", (SCHEMA_VERSION,))
-        if not getattr(conn, "autocommit", True):
-            conn.commit()
+        try:
+            migrations.check_compatible(conn)
+        except migrations.MigrationError as e:
+            raise StoreError(str(e)) from e
     finally:
         if close:
             conn.close()
+
+
+def ensure_schema(dsn_str: str = None, applied_by: str = "tool") -> dict:
+    """Apply pending migrations (the gateway-startup/CLI/test entry point — NOT for the agent's
+    write path, which only checks). Returns the migrations report."""
+    from platformlib import migrations
+    try:
+        return migrations.apply(dsn=dsn_str or dsn(), applied_by=applied_by, log=lambda *a: None)
+    except migrations.MigrationError as e:
+        raise StoreError(str(e)) from e
 
 
 def _json(value):

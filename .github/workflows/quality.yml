@@ -24,6 +24,24 @@ jobs:
   backend:
     name: backend
     runs-on: ubuntu-latest
+    services:
+      # Ephemeral Postgres for tests/test_migrations.py (023 US4 — contract §Ledger/adoption);
+      # matches the platform's pinned major (infra Postgres 17). Not a secret: CI-only values.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: migtest
+          POSTGRES_PASSWORD: migtest
+          POSTGRES_DB: migtest
+        ports:
+          - 55499:5432
+        options: >-
+          --health-cmd "pg_isready -U migtest"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_MIGRATIONS_ADMIN_DSN: postgresql://migtest:migtest@127.0.0.1:55499/migtest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
