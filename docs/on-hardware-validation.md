@@ -476,6 +476,16 @@ this document as the record.
 }
 ```
 
+Notes (review tightening): the PRIMARY one-tenant witness is **structural** — every accepted switch
+asserts a single `holder` and a single non-cold GPU engine (the single admission slot cannot name
+two tenants) plus `activation.consistent` — so identity/last-wins/no-false-identity hold regardless
+of the VRAM sample. `peak_vram_gb=1.89` is a coarse secondary backstop; the drill's ceiling default
+is now `2.7 GB` (one resident 0.5B ≈ 1.9 GB total, two co-resident ≈ 3.1 GB — so 2.7 passes one and
+trips two; the prior 6 GB default did not bound co-residency for this model). The job-holder Direction
+B outcome is recorded specifically as `deferred` (HTTP 200 + `reload.status=='deferred'`) vs a
+`refused-409`, and an *applied* switch (loaded/reloaded/swapped/noop) fails the leg — the preempting
+switch never silently displaces the non-preemptable job.
+
 ### SC-156/157 migration drills on populated state (T517 + T555) — 2026-07-12
 
 Target: Compose Postgres (postgres:17.10), live `gateway` DB populated

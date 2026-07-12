@@ -8,8 +8,10 @@ Exercises the durable ActivationOperation switch path (the gated `POST /models/{
      accepted switch it asserts the four SC-159 invariants:
        * `activation.consistent` is true and the agent-reported RESIDENT identity equals the
          just-promoted target (never the desired pointer — no false identity);
-       * exactly one GPU tenant — the agent holder is `llm` and only one GPU engine is non-cold;
-       * peak total VRAM stays under a one-model ceiling (two co-resident models would exceed it);
+       * exactly one GPU tenant — the agent holder is `llm` and only one GPU engine is non-cold
+         (the PRIMARY one-tenant witness: the single admission slot can never name two tenants);
+       * as a COARSE secondary backstop, peak total VRAM stays under `--max-vram-gb` (set between
+         1x and 2x the model's total footprint — 2.7 GB for the 0.5B: ~1.9 GB one, ~3.1 GB two);
        * the last accepted target wins (resident follows the most recent promote).
   2. **Client-timeout idempotency** — a switch whose client aborts mid-reload, retried for the SAME
      target, causes exactly ONE physical reload (delta of the agent's
@@ -302,10 +304,20 @@ def phase_job_holder(gw, agent, model, a, b, dataset, dsver):
         rstatus = (sl.get("reload") or {}).get("status")
         h2 = agent.health()
         job_alive = h2.get("holder_kind") == "job" or (h2.get("jobs_active") or 0) >= 1
-        dir_b_ok = (rstatus in ("deferred", None) or st == 409) and job_alive
-        print(f"  B) switch while job holds -> reload status={rstatus} http={st} "
-              f"job_still_holding={job_alive} (expect deferred + job uninterrupted)")
-        result["direction_b_deferred"] = rstatus == "deferred" or st == 409
+        # The switch must NOT be silently applied over the job: either the promote is refused (409)
+        # or its reload DEFERS behind the holder (200 + reload.status=='deferred'). A
+        # loaded/reloaded/swapped/noop here would mean the non-preemptable job was preempted — fail.
+        if st == 409:
+            outcome = "refused-409"
+        elif st == 200 and rstatus == "deferred":
+            outcome = "deferred"
+        else:
+            outcome = f"applied(status={rstatus},http={st})"
+        dir_b_ok = outcome in ("refused-409", "deferred") and job_alive
+        print(f"  B) switch while job holds -> outcome={outcome} job_still_holding={job_alive} "
+              f"(expect refused/deferred + job uninterrupted)")
+        result["direction_b_outcome"] = outcome
+        result["direction_b_refused_or_deferred"] = outcome in ("refused-409", "deferred")
         result["direction_b_job_uninterrupted"] = job_alive
     else:
         print("  B) fine-tune never acquired the lease within 90s — Direction B not exercised")
@@ -334,8 +346,14 @@ def main():
     ap.add_argument("--agent-url", default=os.getenv("AGENT_URL", ""))
     ap.add_argument("--distro", default="Ubuntu")
     ap.add_argument("--env", default=os.path.join(REPO, ".env"))
-    ap.add_argument("--max-vram-gb", type=float, default=6.0,
-                    help="one-model ceiling (the 0.5B footprint is ~1.9GB; two would exceed 6)")
+    ap.add_argument("--max-vram-gb", type=float, default=2.7,
+                    help="coarse physical backstop on TOTAL nvidia-smi VRAM: one resident "
+                         "qwen2.5-0.5b is ~1.9 GB total, two co-resident ~3.1 GB, so 2.7 passes one "
+                         "and trips two. Set it between 1x and 2x the model's total footprint for a "
+                         "different model. NOTE: the PRIMARY one-tenant proof is structural (single "
+                         "`holder` + a single non-cold GPU engine, asserted every switch); this "
+                         "post-switch total-VRAM check is a secondary sanity bound (a co-residency "
+                         "bug is transient during the swap and can slip a post-switch-only sample).")
     ap.add_argument("--job-dataset", default="jobsmoke-sft")
     ap.add_argument("--job-dataset-version", default="8647d3617633")
     ap.add_argument("--skip-job-holder", action="store_true")
