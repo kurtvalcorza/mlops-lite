@@ -27,7 +27,9 @@ def refresh() -> None:
     in), so a single read backs the (retained) Prometheus gauge names."""
     try:
         with httpx.Client(headers=settings.agent_headers(), timeout=2) as client:
-            h = client.get(f"{AGENT_URL}/health").json()
+            resp = client.get(f"{AGENT_URL}/health")
+            resp.raise_for_status()  # review (Codex): a missing/stale X-Agent-Key makes /health a
+            h = resp.json()          # 401/403 with a JSON body — do NOT parse it and report up=1
     except Exception:
         SERVING_UP.set(0)
         TRAINER_UP.set(0)

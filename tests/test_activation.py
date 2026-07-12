@@ -34,6 +34,26 @@ def _happy():
     return act, svc, store, reg, srv
 
 
+# --- assert_no_conflict: refuse a conflicting op BEFORE the caller moves the alias (Codex) --------
+
+def test_assert_no_conflict_refuses_a_different_in_flight_target():
+    """The promote route calls this BEFORE registry.promote() moves the @serving alias, so a
+    conflict 409s without leaving the registry naming a version that was never activated."""
+    act, svc, store, reg, srv = _happy()
+    svc.submit(name="ops-bot", version="1")                       # a non-terminal op is now in flight
+    with pytest.raises(act.ActivationError):
+        svc.assert_no_conflict("other-llm", "5")                  # a DIFFERENT target → refuse early
+
+
+def test_assert_no_conflict_allows_same_target_and_clear_field():
+    act, svc, store, reg, srv = _happy()
+    svc.assert_no_conflict("ops-bot", "2")                        # nothing in flight → fine
+    op = svc.submit(name="ops-bot", version="2")
+    svc.assert_no_conflict("ops-bot", "2")                        # SAME target → submit converges it
+    svc.run(op["operation_id"])                                   # drive it terminal
+    svc.assert_no_conflict("ops-bot", "2")                        # terminal → no longer a conflict
+
+
 # --- the full success path ---------------------------------------------------------------------------
 
 def test_submit_run_reaches_active_with_ordered_evidence():

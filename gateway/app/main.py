@@ -176,11 +176,16 @@ _reconcile_stop = None
 _reconcile_task = None  # strong reference — a bare ensure_future task can be GC'd mid-flight
 
 
-@app.get("/serving/llm/activation")
+@app.get("/serving/llm/activation", dependencies=_protected)
 def serving_llm_activation():
     """The desired/resident/activation read model (023 US5 — contracts/promotion-activation.md
     §Read): `desired` is the pointer, `resident` is agent-reported, `consistent` only when they
-    agree in a terminal-success state. Additive; no secret/path/exception internals."""
+    agree in a terminal-success state. Additive; no secret/path/exception internals.
+
+    Protected with the gateway API key (review, Codex): as a bare `@app.get` it otherwise bypassed
+    the `_protected` dependency its `/serving/state`+`/serving/tasks` siblings (infer.router) carry,
+    leaking desired/resident identities, operation ids, and activation errors to unauthenticated
+    callers when gateway auth is enabled."""
     REQUESTS.labels(route="/serving/llm/activation").inc()
     from . import activation
     return activation.service().read_model()

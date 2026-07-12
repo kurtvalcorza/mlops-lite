@@ -129,6 +129,30 @@ class ActivationService:
         finally:
             conn.close()
 
+    def assert_no_conflict(self, name: str, version) -> None:
+        """Pre-flight for the promote route (review, Codex — models.py alias order): raise
+        ActivationError if a non-terminal activation for a DIFFERENT target is already in flight, so
+        the caller refuses the promote BEFORE moving the MLflow `@serving` alias. Otherwise a
+        conflict is only discovered at submit() — AFTER the alias moved — leaving the registry
+        naming a version that was never activated (inconsistent with the pointer/resident). A
+        concurrent op for the SAME target is fine (submit converges it). Store-unavailable is a
+        no-op here: activate() falls back to the untracked single-shot path anyway. A tiny TOCTOU
+        window remains (an op created between this check and submit), but submit()'s atomic
+        one-non-terminal index still refuses it — this just makes the common case clean."""
+        try:
+            conn = self._conn()
+            try:
+                cur = self._store.current_activation(conn)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — store down: the durable path is unavailable regardless
+            return
+        if (cur and cur["state"] in self._store.ACTIVATION_NONTERMINAL
+                and (cur["target_model"], cur["target_version"]) != (name, str(version))):
+            raise ActivationError(
+                f"another activation is in progress ({cur['operation_id']} -> "
+                f"{cur['target_model']}@{cur['target_version']}) — retry when it completes")
+
     # -- drive ----------------------------------------------------------------------------------------
 
     def run(self, operation_id: str, *, preempt: bool = False) -> dict:

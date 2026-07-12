@@ -111,6 +111,15 @@ def promote(name: str, req: PromoteRequest):
     if llm_target and llm_target.get("error"):
         REGISTRY_OPS.labels(op="promote", status="refused").inc()
         raise HTTPException(status_code=409, detail=f"promotion refused: {llm_target['error']}")
+    if llm_target:
+        # review (Codex, alias order): refuse a conflicting in-flight activation BEFORE promote
+        # moves the @serving alias — otherwise the conflict surfaces only at activate()/submit(),
+        # after the alias moved, leaving the registry naming a version we never activated.
+        try:
+            activation.service().assert_no_conflict(name, req.version)
+        except activation.ActivationError as e:
+            REGISTRY_OPS.labels(op="promote", status="conflict").inc()
+            raise HTTPException(status_code=409, detail=f"activation refused: {e}")
     try:
         res = registry.promote(name, req.version, override=req.override)
     except registry.RegistryError as e:
