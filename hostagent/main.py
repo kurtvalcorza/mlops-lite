@@ -8,15 +8,12 @@ passthrough (`/engines/<id>/<verb>`, + the byte-compatible legacy paths, FR-177)
 surface (`/jobs` + the legacy trainer aliases). T364 retired the last legacy daemon and the
 lockfile interop shim: admission is the single in-process authority for the one GPU tenant.
 
-020 T413 (FR-205/206): the route table lives in the transport-neutral `handle_get`/`handle_post`
-routers below, served by EITHER the stdlib `ThreadingHTTPServer` (default) or uvicorn-ASGI
-(`AGENT_RUNTIME=uvicorn`, `hostagent/asgi.py`) — the handler logic does not fork; only the
-transport does. `AGENT_BIND`, the control secret, SSE framing, and the 008–017 error vocabulary
-are identical on both. The switch exists for the on-hardware runtime drill; the losing runtime is
-deleted the following increment (research R7).
-
-Stdlib-only by default (the agent carries no pip deps); uvicorn is imported lazily ONLY when
-selected.
+020 T413 (FR-205/206) put the route table in the transport-neutral `handle_get`/`handle_post`
+routers below and ran a dual-runtime drill (stdlib vs uvicorn-ASGI); the verdict was keep-stdlib
+(docs/on-hardware-validation.md), so 023 US6 (T535, FR-315) deleted `hostagent/asgi.py` and the
+`AGENT_RUNTIME` switch: ONE transport, the stdlib `BoundedAgentServer` below — authenticated
+(023 US2), with deterministic worker/queue/body/timeout/shutdown bounds (FR-316..320). The agent
+stays pip-dep-free.
 """
 import json
 import os
@@ -45,6 +42,17 @@ VRAM_GB = vram_budget_gb()  # 020 US4 (FR-207): single shared resolver, no dupli
 # injected WSL IP — a loopback-only bind would make AGENT_URL unreachable from the containers the
 # moment a fold-in flips traffic here. Default matches the legacy daemons; override to tighten.
 AGENT_BIND = os.getenv("AGENT_BIND", "0.0.0.0")
+
+# --- 023 US6 (T531..T533, FR-316..320): deterministic transport bounds ------------------------------
+# Safe defaults for the single-operator workload (contracts/agent-security.md §Request bounds);
+# every knob is env-overridable, and the [HW] drill (T536) validates/lowers them on the target box.
+AGENT_MAX_WORKERS = int(os.getenv("AGENT_MAX_WORKERS", "8"))          # concurrent handlers
+AGENT_QUEUE_SIZE = int(os.getenv("AGENT_QUEUE_SIZE", "8"))            # admitted-but-waiting bound
+AGENT_QUEUE_WAIT_S = float(os.getenv("AGENT_QUEUE_WAIT_S", "5"))      # max wait for a worker slot
+AGENT_IO_TIMEOUT_S = float(os.getenv("AGENT_IO_TIMEOUT_S", "30"))     # per-socket read/write
+AGENT_SHUTDOWN_TIMEOUT_S = float(os.getenv("AGENT_SHUTDOWN_TIMEOUT_S", "10"))  # drain budget
+AGENT_MAX_JSON_BYTES = int(os.getenv("AGENT_MAX_JSON_BYTES", str(1 << 20)))         # 1 MiB
+AGENT_MAX_MULTIPART_BYTES = int(os.getenv("AGENT_MAX_MULTIPART_BYTES", str(32 << 20)))  # 32 MiB
 # `SWAP_CONTROL_SECRET` is still accepted as a fallback (a deployment that set it pre-018 keeps
 # working) but the agent's state-changing routes standardize on the agent-control secret.
 CONTROL_SECRET = os.getenv("AGENT_CONTROL_SECRET") or os.getenv("SWAP_CONTROL_SECRET", "")
@@ -476,6 +484,92 @@ def handle_post(path: str, query: str, content_type: str, control_header: str, r
     return "json", 404, {"error": "unknown path"}
 
 
+class BoundedAgentServer(ThreadingHTTPServer):
+    """023 US6 (T531, FR-316/318/320): `ThreadingHTTPServer` with deterministic bounds — the raw
+    mixin spawns an unbounded thread per connection, so a burst (or a slow-reading client swarm)
+    could grow threads/memory without limit on the box that also holds the GPU.
+
+    Two-level admission: at most `max_workers + queue_size` connections are ACCEPTED at once (the
+    rest get an immediate minimal 503, before any read); of those, at most `max_workers` execute
+    concurrently — the queued remainder wait up to `queue_wait_s` for a worker slot, then 503.
+    `graceful_shutdown()` stops accepting, drains in-flight handlers within a budget, and
+    best-effort unloads resident engine children (no orphaned llama-server pinning VRAM) — job
+    subprocesses are deliberately untouched so the journal's interrupted-marking semantics at next
+    start stay exactly as they were (FR-318)."""
+    daemon_threads = True
+
+    def __init__(self, addr, handler_cls, *, max_workers=None, queue_size=None,
+                 queue_wait_s=None):
+        super().__init__(addr, handler_cls)
+        workers = max_workers or AGENT_MAX_WORKERS
+        self._exec_slots = threading.BoundedSemaphore(workers)
+        self._conn_slots = threading.BoundedSemaphore(workers + (queue_size or AGENT_QUEUE_SIZE))
+        self._queue_wait_s = AGENT_QUEUE_WAIT_S if queue_wait_s is None else queue_wait_s
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        if not self._conn_slots.acquire(blocking=False):
+            REGISTRY.inc("hostagent_requests_rejected_total", labels={"reason": "saturated"})
+            self._reject(request)  # bounded queue full: refuse before reading a byte (FR-316)
+            return
+        super().process_request(request, client_address)  # spawns process_request_thread
+
+    def process_request_thread(self, request, client_address):
+        try:
+            if not self._exec_slots.acquire(timeout=self._queue_wait_s):
+                REGISTRY.inc("hostagent_requests_rejected_total",
+                             labels={"reason": "queue_timeout"})
+                self._reject(request)
+                return
+            with self._inflight_lock:
+                self._inflight += 1
+            try:
+                self.finish_request(request, client_address)
+            finally:
+                with self._inflight_lock:
+                    self._inflight -= 1
+                self._exec_slots.release()
+        except Exception:  # noqa: BLE001 — parity with ThreadingMixIn's containment
+            self.handle_error(request, client_address)
+        finally:
+            self._conn_slots.release()
+            self.shutdown_request(request)
+
+    def _reject(self, request):
+        body = b'{"error":"agent saturated - bounded worker/queue capacity reached (FR-316)"}'
+        try:
+            request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
+                            b"Content-Type: application/json\r\n"
+                            b"Content-Length: " + str(len(body)).encode() +
+                            b"\r\nConnection: close\r\n\r\n" + body)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
+
+    def graceful_shutdown(self, manager=None, timeout_s=None, log=print):
+        """Accept-stop → drain → child-cleanup (FR-318). Runs AFTER serve_forever returns."""
+        deadline = time.time() + (AGENT_SHUTDOWN_TIMEOUT_S if timeout_s is None else timeout_s)
+        while time.time() < deadline:
+            with self._inflight_lock:
+                if self._inflight == 0:
+                    break
+            time.sleep(0.05)
+        with self._inflight_lock:
+            leftover = self._inflight
+        if leftover:
+            log(f"hostagent shutdown: {leftover} request(s) still in flight after the drain "
+                f"budget — closing anyway", flush=True)
+        if manager is not None:
+            for eid, rt in manager.runtimes.items():
+                try:
+                    if rt._resident():  # unload children so no orphan pins VRAM after exit
+                        rt.unload(drain_timeout_s=2.0)
+                except Exception:  # noqa: BLE001 — best-effort; the reaper semantics own the rest
+                    pass
+
+
 def make_handler(admission, journal, manager, jobs, policy=None):
     """The stdlib transport — a thin shell over the shared routers (T413).
 
@@ -485,6 +579,11 @@ def make_handler(admission, journal, manager, jobs, policy=None):
     policy = policy or agent_auth.AgentAuthPolicy()
 
     class Handler(BaseHTTPRequestHandler):
+        # Explicit per-socket read/write timeout (023 US6, FR-318): a stalled client can neither
+        # park a worker on a half-sent request nor wedge a response write forever. setup() applies
+        # it to the connection, so it covers request reads AND response/stream writes.
+        timeout = AGENT_IO_TIMEOUT_S
+
         def log_message(self, *a):  # quiet — health polling would spam stdout
             pass
 
@@ -507,13 +606,19 @@ def make_handler(admission, journal, manager, jobs, policy=None):
             return True
 
         def do_GET(self):
-            url = urlparse(self.path)
-            if self._deny(url):
-                return
-            code, payload, ctype = handle_get(url.path, url.query, admission=admission,
-                                              journal=journal, manager=manager, jobs=jobs,
-                                              policy=policy)
-            self._send(code, payload, content_type=ctype)
+            t0 = time.monotonic()
+            REGISTRY.inc("hostagent_requests_total", labels={"method": "GET"})
+            try:
+                url = urlparse(self.path)
+                if self._deny(url):
+                    return
+                code, payload, ctype = handle_get(url.path, url.query, admission=admission,
+                                                  journal=journal, manager=manager, jobs=jobs,
+                                                  policy=policy)
+                self._send(code, payload, content_type=ctype)
+            finally:
+                REGISTRY.inc("hostagent_request_seconds_sum", by=time.monotonic() - t0)
+                REGISTRY.inc("hostagent_request_seconds_count")
 
         def _stream(self, gen):
             """SSE response. Pull the first frame before sending headers so a pre-stream failure
@@ -538,15 +643,67 @@ def make_handler(admission, journal, manager, jobs, policy=None):
                     self.wfile.write(chunk)
                     self.wfile.flush()
             except Exception:
-                pass  # client disconnected mid-stream
+                REGISTRY.inc("hostagent_client_disconnects_total")  # mid-stream drop (T534)
             finally:
                 gen.close()
 
+        def _body_limit(self) -> int:
+            """Per-route-class body cap (023 US6 T532, FR-317): multipart (vision classify, the
+            only binary surface) gets the large bound; everything else is JSON-sized."""
+            ctype = (self.headers.get("Content-Type") or "").lower()
+            return AGENT_MAX_MULTIPART_BYTES if ctype.startswith("multipart/") \
+                else AGENT_MAX_JSON_BYTES
+
+        def _read_chunked(self, limit: int):
+            """Counted chunked-transfer read (FR-317): aborts at `limit` — an unknown-length body
+            cannot buffer unbounded. Returns bytes, or None once the limit is exceeded."""
+            total, parts = 0, []
+            while True:
+                size_line = self.rfile.readline(64).strip()
+                try:
+                    size = int(size_line.split(b";")[0] or b"0", 16)
+                except ValueError:
+                    return None
+                if size == 0:
+                    self.rfile.readline(4)  # trailing CRLF
+                    return b"".join(parts)
+                total += size
+                if total > limit:
+                    return None
+                parts.append(self.rfile.read(size))
+                self.rfile.readline(4)  # chunk-terminating CRLF
+
+        def _read_body(self):
+            """(raw_bytes | None-when-too-large). Declared Content-Length above the limit is
+            refused BEFORE any body byte is read; chunked/unknown length is counted as it
+            streams (FR-317)."""
+            limit = self._body_limit()
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                return self._read_chunked(limit)
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > limit:
+                return None
+            return self.rfile.read(length)
+
         def do_POST(self):
+            t0 = time.monotonic()
+            REGISTRY.inc("hostagent_requests_total", labels={"method": "POST"})
+            try:
+                self._do_post()
+            finally:
+                REGISTRY.inc("hostagent_request_seconds_sum", by=time.monotonic() - t0)
+                REGISTRY.inc("hostagent_request_seconds_count")
+
+        def _do_post(self):
             url = urlparse(self.path)
-            if self._deny(url):  # auth BEFORE the body is buffered (FR-282; US6 keeps this order)
+            if self._deny(url):  # auth BEFORE the body is buffered (FR-282/317: gate, then read)
                 return
-            raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            raw = self._read_body()
+            if raw is None:
+                REGISTRY.inc("hostagent_requests_rejected_total", labels={"reason": "too_large"})
+                return self._send(413, {"error": f"request body exceeds the "
+                                                 f"{self._body_limit()}-byte limit for this "
+                                                 f"route class (FR-317)"})
             result = handle_post(url.path, url.query, self.headers.get("Content-Type", ""),
                                  self.headers.get("X-Agent-Control", ""), raw,
                                  admission=admission, journal=journal, manager=manager, jobs=jobs)
@@ -560,9 +717,12 @@ def make_handler(admission, journal, manager, jobs, policy=None):
 
 def main() -> None:
     global _interrupted_at_start, _ready_check
-    runtime = os.getenv("AGENT_RUNTIME", "stdlib")
-    if runtime not in ("stdlib", "uvicorn"):
-        raise SystemExit(f"AGENT_RUNTIME must be 'stdlib' or 'uvicorn', got {runtime!r}")
+    if os.getenv("AGENT_RUNTIME") not in (None, "", "stdlib"):
+        # 023 US6 (T535, FR-315): the dual-runtime drill concluded keep-stdlib
+        # (docs/on-hardware-validation.md); the uvicorn transport + AGENT_RUNTIME switch are
+        # deleted. Fail loud, not silently-different, for a stale environment.
+        raise SystemExit("AGENT_RUNTIME was retired in 023 (stdlib is the one transport) — "
+                         "unset it")
     # 023 US2 (FR-284): resolve the credential policy BEFORE building components or binding the
     # socket — a mis-configured agent never comes up half-open. The error names the fix, never a
     # secret value.
@@ -578,19 +738,27 @@ def main() -> None:
         print(f"!! {_interrupted_at_start} job(s) interrupted by restart — marked failed "
               f"(FR-173)", flush=True)
     threading.Thread(target=manager.run_reaper, daemon=True).start()
-    print(f"hostagent :{AGENT_PORT} | runtime={runtime} | state={STATE_DIR} "
+    server = BoundedAgentServer((AGENT_BIND, AGENT_PORT),
+                                make_handler(admission, journal, manager, jobs, policy=policy))
+    print(f"hostagent :{AGENT_PORT} | state={STATE_DIR} "
           f"| engines={list(manager.runtimes)} | jobs=on | vram_budget={VRAM_GB:.0f}GB "
-          f"| security={policy.security_mode}", flush=True)
-    if runtime == "uvicorn":
-        import uvicorn  # lazy — the stdlib default keeps the agent pip-dep-free (T413)
+          f"| security={policy.security_mode} "
+          f"| workers={AGENT_MAX_WORKERS}+{AGENT_QUEUE_SIZE} io_timeout={AGENT_IO_TIMEOUT_S:.0f}s",
+          flush=True)
 
-        from hostagent.asgi import build_asgi_app
-        app = build_asgi_app(admission, journal, manager, jobs)
-        uvicorn.run(app, host=AGENT_BIND, port=AGENT_PORT, log_level="warning", lifespan="off")
-        return
-    ThreadingHTTPServer((AGENT_BIND, AGENT_PORT),
-                        make_handler(admission, journal, manager, jobs,
-                                     policy=policy)).serve_forever()
+    # Graceful stop (023 US6 T533, FR-318): SIGTERM/SIGINT → accept-stop, bounded drain, engine
+    # children unloaded (no VRAM orphan). Jobs are untouched — still-running jobs are marked
+    # interrupted at the NEXT start, the journal semantics that predate this (FR-173).
+    import signal
+
+    def _stop(signum, frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()  # never from this thread
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    server.serve_forever()
+    server.graceful_shutdown(manager)
+    print("hostagent: stopped (drained + children unloaded)", flush=True)
 
 
 if __name__ == "__main__":

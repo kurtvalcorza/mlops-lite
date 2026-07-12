@@ -10,11 +10,10 @@ RuntimeBaselineRecord (data-model.md) per run:
   * preempt-during-stream: a `?preempt=true` swap arriving mid-stream — records the observed
     409-vs-drain behavior (must match the documented lease semantics on both runtimes)
 
-Run once per runtime (`AGENT_RUNTIME=stdlib` then `=uvicorn` on the agent side; pass
-`--runtime <label>` so the record names what was measured):
+023 US6 retired the dual-runtime switch (keep-stdlib verdict) — `--runtime` survives as a plain
+record label (default `stdlib`):
 
-  python scripts/agent_stream_drill.py --runtime stdlib --report
-  python scripts/agent_stream_drill.py --runtime uvicorn --report
+  python scripts/agent_stream_drill.py --report
 
 `--report` appends a markdown RuntimeBaselineRecord to the runbook doc; without it the record
 prints as JSON. Baselines (the 017/018 runbook stream numbers) come in as flags; a missing

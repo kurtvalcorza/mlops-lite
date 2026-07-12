@@ -65,3 +65,13 @@ REGISTRY.describe("hostagent_jobs_interrupted_total", "counter",
                   "Jobs marked interrupted by an agent restart (FR-173 alert)")
 REGISTRY.describe("hostagent_wedged", "gauge",
                   "1 if a tenant is wedged (kill failed) and holds the GPU slot")
+# 023 US6 (T534, FR-321): bounded-cardinality transport/operation signals — labels are a fixed
+# vocabulary (method GET|POST; reason saturated|queue_timeout|too_large), never request-derived.
+REGISTRY.describe("hostagent_requests_total", "counter", "HTTP requests, by method")
+REGISTRY.describe("hostagent_requests_rejected_total", "counter",
+                  "Requests refused at the transport bound (saturated/queue_timeout/too_large)")
+REGISTRY.describe("hostagent_request_seconds_sum", "counter",
+                  "Total request handling seconds (with _count: average latency)")
+REGISTRY.describe("hostagent_request_seconds_count", "counter", "Requests measured for latency")
+REGISTRY.describe("hostagent_client_disconnects_total", "counter",
+                  "Streams dropped by the client mid-generation")
