@@ -34,6 +34,33 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNBOOK = os.path.join(REPO, "docs", "on-hardware-validation.md")
 
 
+def _agent_key():
+    """The internal agent credential (023 US2). The engine/stream routes are behind the
+    fail-closed `X-Agent-Key` boundary now, so every request the drill makes must carry it — env
+    first, then the repo `.env` (never committed)."""
+    key = os.getenv("AGENT_API_KEY")
+    if key:
+        return key
+    try:
+        for line in open(os.path.join(REPO, ".env"), encoding="utf-8"):
+            if line.startswith("AGENT_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+AGENT_KEY = _agent_key()
+
+
+def _h(base=None):
+    """Merge the X-Agent-Key header (023 US2) into a per-request header dict."""
+    h = dict(base or {})
+    if AGENT_KEY:
+        h["X-Agent-Key"] = AGENT_KEY
+    return h
+
+
 def _conn(agent_url: str, timeout: float):
     u = urlparse(agent_url)
     return http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
@@ -45,7 +72,7 @@ def _poller(agent_url: str, stop: threading.Event, results: list, hz: float):
         t0 = time.perf_counter()
         try:
             c = _conn(agent_url, timeout=5)
-            c.request("GET", "/health")
+            c.request("GET", "/health", headers=_h())
             ok = c.getresponse().status == 200
             c.close()
         except OSError:
@@ -63,7 +90,7 @@ def stream_once(agent_url: str, engine: str, verb: str, body: dict, *, stall_gap
     payload = json.dumps(body)
     t0 = time.perf_counter()
     c.request("POST", f"/engines/{engine}/{verb}/stream", body=payload,
-              headers={"Content-Type": "application/json"})
+              headers=_h({"Content-Type": "application/json"}))
     resp = c.getresponse()
     if resp.status != 200:
         raise SystemExit(f"stream request failed: HTTP {resp.status} "
@@ -154,7 +181,7 @@ def measure_multipart(agent_url: str, *, runs: int, timeout: float, preempt: boo
         c = _conn(agent_url, timeout=timeout)
         t0 = time.perf_counter()
         c.request("POST", path, body=body,
-                  headers={"Content-Type": ctype})
+                  headers=_h({"Content-Type": ctype}))
         resp = c.getresponse()
         data = resp.read()
         c.close()
@@ -191,7 +218,7 @@ def measure_preempt_during_stream(agent_url: str, engine: str, verb: str, body: 
         try:
             c = _conn(agent_url, timeout=timeout)
             c.request("POST", contender_path, body=contender_body,
-                      headers={"Content-Type": contender_ctype})
+                      headers=_h({"Content-Type": contender_ctype}))
             resp = c.getresponse()
             result["status"] = resp.status
             result["body"] = resp.read(300).decode(errors="replace")

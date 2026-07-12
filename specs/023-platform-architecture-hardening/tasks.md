@@ -11,12 +11,13 @@ description: "Implementation task list for post-021 architecture hardening and d
 
 **Numbering**: Continues after 022's T489.
 
-**Status (2026-07-12, implementation PR)**: the OFFLINE slice is built and checked off with
-evidence in `quickstart.md` §Evidence. Still open: `[HW]`/populated-store drills (T517, T528,
-T536, T555, T556 — and T557, which gates on them), the external branch-protection setting half of
-T509 (the workflow + jobs exist; an admin marks them required), and the US7 module extractions
-(T539, T543–T545) + their completion gate T549 — independent, contract-preserving refactors
-deferred to land separately without conflict churn (see the US7 commit).
+**Status (2026-07-12)**: the OFFLINE slice is built and checked off with evidence in
+`quickstart.md` §Evidence. The **`[HW]`/populated-store drills now PASS on the RTX 5070 Ti**
+(T517, T528, T536, T555, T556 — evidence in `docs/on-hardware-validation.md`), and the external
+**branch-protection half of T509** is applied (master requires `backend`/`ui`/`compose`/`specs`).
+Still open: the US7 module extractions (T539, T543–T545) + their completion gate T549 — independent,
+contract-preserving refactors landing as a separate PR — and T557 (the final implementation-complete
+status flip), which gates on T550–T556 (all now passing) and lands with the US7 close-out.
 
 **Tests**: Required. Correctness, security, migration, activation, and transport tests are written
 before their implementation tasks. `[HW]` tasks require target-machine evidence and cannot be
@@ -134,7 +135,7 @@ stack, or secrets.
 - [x] **T508** [US3] Add a `make test`, `make lint`, `make ui-check`, `make compose-check`, and
   `make spec-check` interface or cross-platform documented equivalents in `Makefile`/README, ensuring
   local commands match CI behavior (contracts/delivery-gates.md).
-- [ ] **T509** [US3] Run all workflow commands from a clean checkout, open a validation PR, configure
+- [x] **T509** [US3] Run all workflow commands from a clean checkout, open a validation PR, configure
   the stable job names as required branch checks in GitHub, and record SC-154/155 evidence (repository
   workflow plus external branch-protection setting).
 
@@ -173,7 +174,7 @@ newer-schema cases satisfy `contracts/schema-migrations.md` with no fixture data
   `pg_dump`/restore helper or exact platform commands; no destructive automatic rollback (FR-303/304).
 - [x] **T516** [P] [US4] Export migration version/pending/outcome/duration metrics through gateway
   monitoring code and add a failure status to platform health without DSN/SQL exposure.
-- [ ] **T517** [US4] On a copy of populated target state, perform backup+restore verification, apply
+- [x] **T517** [US4] On a copy of populated target state, perform backup+restore verification, apply
   baseline adoption twice, compare data counts/constraints, and record SC-156/157 evidence `[HW/store]`.
 
 **Checkpoint**: All future relational changes use one ordered, verifiable source of truth.
@@ -230,7 +231,7 @@ the durable `ActivationOperation`; extend them, do not re-derive (see contract �
   degraded activation rule/runbook in Prometheus configuration (FR-314/321..323).
 - [x] **T527** [US5] Run the full failure matrix and existing promotion/gate/shadow/policy suite;
   demonstrate automated policy cannot live-switch LLM and record SC-158.
-- [ ] **T528** [US5] [HW] Execute 100 accepted rapid switches, client-timeout idempotency, and
+- [x] **T528** [US5] [HW] Execute 100 accepted rapid switches, client-timeout idempotency, and
   job-holder refusal on the target GPU; capture agent identity + `nvidia-smi` evidence for SC-159.
 
 **Checkpoint**: 022 may be declared correctness-complete only when activation recovery and honest
@@ -268,7 +269,7 @@ remain within bounds and preserve domain contracts.
 - [x] **T535** [US6] Run all parity/limit tests and `scripts/agent_stream_drill.py`; after parity,
   delete `hostagent/asgi.py`, the `AGENT_RUNTIME=uvicorn` branch, uvicorn-only runtime docs/deps, and
   duplicate-only tests while retaining shared behavior tests (FR-315).
-- [ ] **T536** [US6] [HW] Repeat REST/stream/disconnect/saturation drills on the target host, measure
+- [x] **T536** [US6] [HW] Repeat REST/stream/disconnect/saturation drills on the target host, measure
   peak threads/memory, verify no admission leak, and record SC-160/161 evidence.
 
 **Checkpoint**: The execution plane has one authenticated, bounded, tested transport.
@@ -340,9 +341,9 @@ new services or behavior drift.
   non-secret CI values.
 - [x] **T554** Perform a focused security review of agent bind/auth/redirect/header/body-limit/logging
   behavior and a repository secret scan; verify all unauthorized paths are side-effect free.
-- [ ] **T555** Perform migration backup/restore/adoption/concurrency evidence on a populated database
+- [x] **T555** Perform migration backup/restore/adoption/concurrency evidence on a populated database
   copy and verify gateway/agent compatibility failure modes.
-- [ ] **T556** [HW] Run the complete 023 target-hardware sequence: auth gateway flow, LLM/vision eval,
+- [x] **T556** [HW] Run the complete 023 target-hardware sequence: auth gateway flow, LLM/vision eval,
   activation rapid-switch/job refusal, retained transport stream/saturation, metrics/alerts, and
   resource budget; attach timestamps, commit, hardware profile, and observed one-tenant invariant.
 - [ ] **T557** Update `README.md`, `docs/architecture-review-2026-07-11.md`, quickstart evidence, and

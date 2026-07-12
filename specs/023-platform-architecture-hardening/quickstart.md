@@ -241,7 +241,8 @@ Postgres 16 for the migration suite; the pinned CI environment is Python 3.12 + 
   `pytest` → **green** (594+ passed at US2 checkpoint, grown since; 0 failed; live/hw skips are
   reasoned); `npm ci && npm run lint && npm run build` → clean;
   `docker compose config --quiet` (both files, `.env.ci.example` values) → exit 0;
-  `scripts/check_specs.py` → OK. Branch protection (T509's external half) awaits the repo admin.
+  `scripts/check_specs.py` → OK. Branch protection (T509's external half) is APPLIED: `master`
+  requires `backend`/`ui`/`compose`/`specs` (strict, force-push/deletion off).
 - **SC-156/157 (US4 migrations)**: `tests/test_migrations.py` — 10/10 pass against real Postgres:
   fresh apply + exact shape, legacy adoption with row preservation, no-op repeat, 4-way
   concurrent apply-once, mid-file rollback, checksum refusal, newer-schema refusal,
@@ -259,6 +260,15 @@ Postgres 16 for the migration suite; the pinned CI environment is Python 3.12 + 
   against exported metrics, runbook anchors verified); README/current-architecture/constitution
   v1.5.2 updated. The extraction-parity and resource-comparison halves ride the deferred
   T539/T543–T545 + T549.
+- **Target-hardware drills (RTX 5070 Ti, 2026-07-12 — full transcripts in
+  `docs/on-hardware-validation.md`)**: **T528/SC-159** — 100/100 accepted `qwen2.5-0.5b-instruct`
+  v1↔v2 switches, 0 identity mismatches, one tenant throughout (peak 1.89 GB), client-timeout retry
+  = exactly 1 physical reload, job-holder refusal both directions. **T517+T555/SC-156/157** —
+  `pg_dump`/`pg_restore` of the populated `gateway` DB (10 tables, counts + 71 constraints
+  identical), legacy baseline adoption with no data loss, 2-way concurrent apply-once, newer-schema
+  refusal. **T536/SC-160/161** — stream/disconnect/preempt/multipart clean, 24× burst bounded
+  (threads 27→28), no admission leak. **T556** — full sequence green (auth flow, LLM `PONG` + vision
+  eval via US1 routing, 10 alert rules loaded + all scrape targets up, one-model-in-VRAM invariant).
 - **T554 security review (offline scope)**: `scripts/check_secrets.sh` → no committed
   credentials; no `follow_redirects=True` anywhere agent-directed (also pinned by test); key
   values never printed by gen_secrets (written to .env only) and never serialized in
