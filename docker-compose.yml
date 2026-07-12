@@ -169,6 +169,8 @@ services:
       # 018 FR-174: file_sd target for the native host agent — up_all.ps1 writes the injected WSL IP
       # here so the DIRECT agent scrape works cross-distro; Prometheus hot-reloads it (no restart).
       - ./infra/prometheus/targets:/etc/prometheus/targets:ro
+      # 023 US7 (FR-322): local alert rules (no Alertmanager — Prometheus UI + Grafana surface them)
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
     extra_hosts:
       # 018 (FR-174): direct scrape of the native host agent (:8100) — same host-gateway mapping
       # the gateway uses to reach the native daemons.

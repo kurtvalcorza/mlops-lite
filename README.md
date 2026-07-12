@@ -5,23 +5,30 @@ register → serve → monitor → retrain — built around a single GPU that ho
 a time under a race-free, in-process admission lock**. A spec-driven (GitHub Spec Kit) reimagining of
 a heavier reference platform, sized to a laptop.
 
-> Status: **merged through increment 020.** Five served modalities (LLM text-generation, vision
-> image-classification, embeddings, ASR, tabular), a multimodal trainer (LLM + vision + embeddings +
-> ASR fine-tuning with lineage/adapter-chaining), a **gated promotion** path (offline eval harness +
-> champion-challenger), **Optuna hyperparameter optimization**, **model-quality monitoring** with
-> ground-truth labels, **offline batch inference + data-validation gates**, **score-at-registration**,
-> **advisory shadow-replay**, **operator-confirmed preemptive swap**, and — since **018** — a
-> consolidated **GPU host agent** with in-process admission, shared typed contracts, a closed
-> **declarative policy loop** (drift → retrain → gate → promote), and (**018 US4**) durable
-> **relational monitoring/job state on Postgres** — predictions·labels·capture·jobs·policies·suggestions
-> as indexed table reads, replacing the O(N) object scans (a 12k-prediction window resolves in ~40 ms).
-> **020 stack-remediation** landed on top: the archived-upstream object store exited to **Garage**
-> (migrated + decommissioned), the serving framework left the children ("Bento-ectomy", byte-identical
-> golden gates), and the agent's HTTP runtime was measured on hardware (verdict: keep-stdlib).
-> **021** added the loop-native operator console; **022** makes the LLM **registry-driven** like the
-> other engines (promote → serve, base + LoRA-adapter resolution, honest served identity — offline
-> slice; the on-hardware switch drills are the [HW] tail).
-> Constitution `v1.5.1`. Reference stack on MLflow `3.14.0`.
+> Status: **merged through increment 022; 023 built (offline slice — its [HW] drills are the tail).**
+> Five served modalities (LLM text-generation, vision image-classification, embeddings, ASR,
+> tabular), a multimodal trainer (LLM + vision + embeddings + ASR fine-tuning with
+> lineage/adapter-chaining), a **gated promotion** path (offline eval harness + champion-challenger),
+> **Optuna hyperparameter optimization**, **model-quality monitoring** with ground-truth labels,
+> **offline batch inference + data-validation gates**, **score-at-registration**, **advisory
+> shadow-replay**, **operator-confirmed preemptive swap**, and — since **018** — a consolidated
+> **GPU host agent** with in-process admission, shared typed contracts, a closed **declarative
+> policy loop** (drift → retrain → gate → promote), and durable **relational monitoring/job state on
+> Postgres** (predictions·labels·capture·jobs·policies·suggestions as indexed table reads; landed at
+> 018 US4). **020** exited the archived object store to **Garage** and slimmed the serving children;
+> **021** added the loop-native operator console; **022** made the LLM **registry-driven** (promote
+> = go-live, base + LoRA-adapter resolution, honest served identity). **023
+> platform-architecture-hardening** hardens the whole: repaired live-eval routing, a **fail-closed
+> internal agent credential** (`X-Agent-Key`), **required CI quality gates**
+> (backend·ui·compose·specs), **ordered SQL schema migrations** with a checksummed ledger, a
+> **durable/recoverable LLM activation saga** with startup reconciliation, one **bounded stdlib
+> agent transport** (worker/queue/body/timeout/shutdown bounds; the dual-runtime switch deleted),
+> and **local Prometheus alert rules with runbooks**.
+> Constitution `v1.5.2`. Reference stack on MLflow `3.14.0`.
+> Architecture ground truth: [current-architecture checklist](docs/current-architecture.md) ·
+> [2026-07-11 review](docs/architecture-review-2026-07-11.md) (the
+> [2026-07 review](docs/architecture-review-2026-07.md) is historical — its findings are addressed
+> through 020–023).
 >
 > Per-increment detail lives under [`specs/`](specs/) (each has `spec.md` / `plan.md` / `tasks.md`);
 > [`specs/001-mlops-platform/quickstart.md`](specs/001-mlops-platform/quickstart.md) is the run guide.
@@ -181,11 +188,15 @@ only `AGENT_URL`.
 
 </details>
 
-> **Auth (002/US1 + 005/US2 fail-closed).** The lifecycle endpoints require an `X-API-Key` header once
-> `GATEWAY_API_KEYS` is set (`gen_secrets` provisions one); `/healthz` and `/metrics` stay open.
-> **Fail-closed by default (005):** with no key configured protected routes return `401` — set
-> `GATEWAY_ALLOW_OPEN=1` for the documented dev escape hatch. **Key rotation needs a gateway restart**
-> (FR-046).
+> **Auth (002/US1 + 005/US2 fail-closed; 023/US2 at the agent).** The lifecycle endpoints require an
+> `X-API-Key` header once `GATEWAY_API_KEYS` is set (`gen_secrets` provisions one); `/healthz` and
+> `/metrics` stay open. **Fail-closed by default (005):** with no key configured protected routes
+> return `401` — set `GATEWAY_ALLOW_OPEN=1` for the documented dev escape hatch. **Key rotation needs
+> a gateway restart** (FR-046). **The host agent requires its own internal credential (023):**
+> `AGENT_API_KEY` (generated by `gen_secrets`; existing installs: `--ensure-agent-key`) — the gateway
+> sends it as `X-Agent-Key`, the agent **refuses to start without one** (`AGENT_ALLOW_OPEN=1` is a
+> loudly-warned dev-only override), and only the minimal `GET /healthz|/readyz|/metrics` probes stay
+> public.
 >
 > **Network exposure (005/US1).** Every published Compose port and the agent bind to **loopback
 > (`127.0.0.1` / `BIND_ADDR`)** by default — nothing answers on the LAN. Set `BIND_ADDR=0.0.0.0` only
@@ -203,6 +214,8 @@ only `AGENT_URL`.
 > restarts (exponential backoff) the **two** remaining native daemons — the **agent** and the **UI**.
 > It no longer arbitrates the GPU: admission inside the agent is the sole authority. State is at
 > `:8099/status`; the gateway aggregates reachability at `/platform/health` (ASR marked `optional`).
+> Since 023 it probes the agent's **public minimal `/readyz`** — the rich `/health` is behind the
+> internal key.
 
 ## Operator console (003 + 004, loop-native since 021)
 
@@ -256,12 +269,11 @@ torch-free `gpu-host-agent`** — and closed the drift→retrain loop into a dec
   forks); NVML replaces per-call `nvidia-smi`.
 
 New deps are minimal: `pynvml` (in-process NVML, host-only) and `psycopg` (the relational client, in
-the gateway + agent images). **Relational monitoring store (US4, in progress).** The high-churn state
-(predictions, labels, captured-input index) is moving off O(N) object-store scans onto the already-resident
-`gateway` Postgres DB: T373 landed `platformlib.store`'s relational client + additive-only schema (the
-predictions⋈labels `window()` that replaces the object scan, write-once labels), with the write-path
-cutovers (quality/labels, jobs/policies/suggestions) following in T374–T376. No broker, no scheduler
-framework, no ORM/migration tool. The frozen GPU stack is untouched.
+the gateway + agent images). **Relational monitoring store (018 US4, landed).** The high-churn state
+(predictions, labels, captured-input index, jobs, policies, suggestions) lives on the already-resident
+`gateway` Postgres DB as indexed table reads (`platformlib.store`); since **023 US4** its schema is
+owned by **ordered, checksummed SQL migrations** (`platformlib/migrations/`, applied by the gateway at
+startup — see below). No broker, no scheduler framework, no ORM. The frozen GPU stack is untouched.
 
 ## 018 review remediation (019)
 
@@ -419,6 +431,42 @@ the three approved items all landed, validated on hardware (runbook records in `
 No new capability, no new resident service, no new data shape; every externally observable behavior
 was preserved (goldens, suite, and golden flows pass unchanged).
 
+## Platform architecture hardening & delivery integrity (023 — BUILT, offline slice)
+
+023 turned the [2026-07-11 architecture review](docs/architecture-review-2026-07-11.md) into seven
+independently testable hardening stories — no new resident service, no new GPU tenant:
+
+- **Routing integrity (US1).** The last executable pre-018 endpoints (live-eval's `:8090`/`:8092`
+  defaults) now derive from the consolidated agent topology; a repo guard
+  (`scripts/check_specs.py`) fails CI if a retired daemon port re-enters executable routing.
+- **Agent trust boundary (US2).** Network locality is not authorization: every inference/job/
+  control route on the agent requires the generated internal `AGENT_API_KEY` (constant-time
+  compare, auth before any body read or side effect, stable 401/403). Public = exactly
+  `GET /healthz|/readyz|/metrics`.
+- **Required delivery gates (US3).** `.github/workflows/quality.yml` runs `backend` (Ruff + full
+  offline pytest + an ephemeral-Postgres migration suite), `ui` (`npm ci` + ESLint + production
+  build), `compose` (config render with non-secret CI values), and `specs` (artifact/ID/
+  placeholder/story consistency + the retired-port guard) on every PR. Locally: `make lint test
+  ui-check compose-check spec-check` — the same commands.
+- **One migration history (US4).** `platformlib/migrations/*.sql` (ordered, immutable, SHA-256
+  checksummed) is the only schema authority; the gateway applies at startup under a Postgres
+  advisory lock and fails readiness on error; agents/tools verify compatibility and never evolve;
+  legacy databases are adopted idempotently with exact shape verification.
+  `python scripts/migrate_db.py status|apply` is the operator surface.
+- **Recoverable LLM activation (US5).** A promote's pointer-write → keyed agent reload →
+  verify/rollback runs as ONE durable `ActivationOperation` (compare-and-set transitions, one
+  non-terminal op platform-wide, agent-side idempotent replay by `operation_id`). A crash at any
+  step reconciles from gateway startup; `GET /serving/llm/activation` (and the serving page) shows
+  desired vs resident honestly — incomplete desired state is never labeled serving.
+- **Bounded agent transport (US6).** One stdlib transport (the 020 drill's keep-stdlib verdict
+  executed — `hostagent/asgi.py` deleted): bounded workers + queue (minimal 503 beyond), 1 MiB
+  JSON / 32 MiB multipart body caps enforced before buffering (counted chunked reads), per-socket
+  IO timeouts, graceful drain + child-unload on SIGTERM.
+- **Actionable operations (US7).** Fixed-cardinality outcome/latency metrics on both planes and
+  [local Prometheus alert rules](infra/prometheus/rules/mlops-lite.yml) (wedged engine, degraded
+  activation, failed migration, saturation, low disk, …) — each with a runbook in
+  [monitoring/README.md](monitoring/README.md). No Alertmanager.
+
 ## Default stack (each stage swappable — Principle V)
 
 Garage (storage) · MLflow `3.14.0` (tracking + registry + traces) · `llama.cpp` (LLM serving) · slim
@@ -426,8 +474,7 @@ FastAPI children / torch (vision) · sentence-transformers (embeddings, CPU) · 
 whisper.cpp (ASR serving) · PyTorch + PEFT/LoRA (training, Prefect-structured) · Optuna (hyperparameter
 search) · pure-Python PSI (input drift) + pure-Python eval/quality metrics + hand-rolled data validation ·
 Prometheus + Grafana (observability) · a stdlib-only host agent (`pynvml` for NVML). Postgres backs
-MLflow and, since T373, hosts the relational monitoring store the high-churn state is migrating onto
-(018 US4, in progress).
+MLflow and hosts the relational monitoring/job store (018 US4) under ordered SQL migrations (023 US4).
 
 Three components diverge from the plan's first-choice tools, each justified by **Lightweight Footprint**
 (III) and **OSS & Swappable** (V):
@@ -538,3 +585,5 @@ and served live at `http://localhost:8080/docs`.
 | 019 | review-remediation-018 | Ten verified fixes to the 018 fold-in: journal durability, admission self-recovery, swap target-probe, idempotent retrains, lifecycle race, single-flight swap, contract conformance, per-engine budgets, deterministic verdict selection |
 | 020 | stack-remediation | **Built + [HW]-validated** — object-store exit (→ Garage; decommissioned), "Bento-ectomy" (byte-identical golden gates; venv 216→195), agent-runtime verdict keep-stdlib; no new capability |
 | 021 | loop-native-console | Front-end-only IA rebuild: the nav IS the loop (`data → training → models → serving → monitoring → retraining ⟲`) with live stage badges + GPU-lease pill; monitoring read-side, retraining stage (policies/cycle board/suggestions), promote-gate centerpiece, LLM stream/trace split; 13 allow-list additions, zero backend change |
+| 022 | registry-driven-llm-serving | Promote = go-live for the LLM: ActiveServingLLM pointer, base + LoRA-adapter resolution from registry lineage, controlled reload under admission, honest agent-reported served identity (offline slice + two on-HW fixes; the switch drills are the [HW] tail) |
+| 023 | platform-architecture-hardening | **Built (offline slice)** — live-eval routing repair + retired-port guard, fail-closed internal agent credential, required CI gates (backend·ui·compose·specs) + Makefile parity, ordered checksummed SQL migrations (gateway-owned apply, legacy adoption), durable LLM activation saga + startup reconciliation + desired/resident read model, bounded stdlib agent transport (asgi deleted), fixed-cardinality metrics + local alert rules with runbooks, constitution v1.5.2 wording amendment; [HW] drills (T517/T528/T536/T555-T557) are the tail |

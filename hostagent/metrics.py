@@ -75,3 +75,8 @@ REGISTRY.describe("hostagent_request_seconds_sum", "counter",
 REGISTRY.describe("hostagent_request_seconds_count", "counter", "Requests measured for latency")
 REGISTRY.describe("hostagent_client_disconnects_total", "counter",
                   "Streams dropped by the client mid-generation")
+REGISTRY.describe("hostagent_reload_outcomes_total", "counter",
+                  "Serving-LLM reload outcomes (loaded|reloaded|swapped|noop|verify_failed|"
+                  "unresolvable|refused)")
+REGISTRY.describe("hostagent_disk_free_gb", "gauge",
+                  "Free disk on the volume backing the agent state dir (FR-322 low-disk signal)")

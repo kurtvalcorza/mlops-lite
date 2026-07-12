@@ -229,6 +229,12 @@ def _refresh_metrics(admission, journal, manager) -> None:
     free = admission.free_gb()
     if free is not None:
         REGISTRY.set_gauge("hostagent_gpu_free_gb", round(free, 2))
+    try:  # 023 US7 (FR-322): host disk backing the state dir/models — the LowDiskSpace signal
+        import shutil
+        REGISTRY.set_gauge("hostagent_disk_free_gb",
+                           round(shutil.disk_usage(os.path.expanduser(STATE_DIR)).free / 2**30, 2))
+    except OSError:
+        pass
     holder = admission.holder()
     REGISTRY.set_gauge("hostagent_slot_held", 1 if holder else 0)
     REGISTRY.set_gauge("hostagent_jobs_active", journal.active_count())
@@ -402,10 +408,15 @@ def handle_post(path: str, query: str, content_type: str, control_header: str, r
             # FR-265: an unloadable target is distinct from a retryable job-holder/confirm deferral —
             # tag it so the gateway rolls the active-serving-LLM pointer back (a persisted pointer to
             # this target would 503 the next cold load). Still 409 (the preserved vocabulary).
+            REGISTRY.inc("hostagent_reload_outcomes_total", labels={"status": "unresolvable"})
             return "json", 409, {"error": str(e), "unresolvable": True}
         except Exception as e:  # noqa: BLE001 — mapped to the preserved status vocabulary
+            REGISTRY.inc("hostagent_reload_outcomes_total", labels={"status": "refused"})
             code, payload = error_response(e)
             return "json", code, payload
+        # bounded vocabulary (T534/FR-321): loaded|reloaded|swapped|noop|verify_failed
+        REGISTRY.inc("hostagent_reload_outcomes_total",
+                     labels={"status": result.get("status", "unknown")})
         return "json", 200, result
     # Jobs surface (018 T362, contracts/agent-api.md) + the legacy trainer aliases the
     # gateway still calls (byte-compat, FR-177 — retired from the gateway at US4/cleanup).

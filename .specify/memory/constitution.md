@@ -48,8 +48,9 @@ Prometheus/Grafana (monitoring). Replacements are allowed; lock-in is not.
 
 ### VI. Reproducibility & Observability
 Every experiment and model version MUST be tracked in MLflow; every dataset version recorded
-via DVC; every service must expose health and metrics. A run must be reproducible from its
-recorded configuration. If it isn't tracked, it didn't happen.
+in the content-addressed dataset registry on the object store; every service must expose
+health and metrics. A run must be reproducible from its recorded configuration. If it isn't
+tracked, it didn't happen.
 
 ### VII. Incremental, Phase-Gated Delivery
 Work ships in independently-runnable phases — (1) infra + registry, (2) serving, (3)
@@ -98,7 +99,7 @@ lifecycle stage — requires a documented amendment with explicit justification 
 implementation. Complexity must always be justified against Principles II and III. All plans
 and task lists are reviewed for compliance with these principles.
 
-**Version**: 1.5.1 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-05
+**Version**: 1.5.2 | **Ratified**: 2026-06-27 | **Last Amended**: 2026-07-12
 
 <!-- v1.1.0: genericized — machine-specific values extracted to hardware-profile.md; constraints
      now expressed relative to VRAM_GB / RAM_GB / FREE_DISK_GB.
@@ -130,5 +131,11 @@ and task lists are reviewed for compliance with these principles.
      T404–T406); BentoML retired for slim FastAPI children behind the GPU host agent (T407–T412);
      DVC/Ollama/Evidently were long since realized by content-addressed datasets, llama.cpp, and the
      hand-rolled PSI/quality monitors. PATCH: wording-only — the rule ("behind a clear interface …
-     Replacements are allowed; lock-in is not") is unchanged; 020 exercised it twice. -->
+     Replacements are allowed; lock-in is not") is unchanged; 020 exercised it twice.
+     v1.5.2 (023-platform-architecture-hardening, T548): Principle VI's stale "recorded via DVC" sentence
+     corrected to the IMPLEMENTED authority — the content-addressed dataset registry on the object store —
+     which Principle V has described since v1.5.1 (DVC was rejected at 001; see README §Default stack).
+     PATCH: wording-only — the RULE (every dataset version recorded; if it isn't tracked, it didn't happen)
+     is unchanged. Observed by 023's plan (§Constitution errata), processed as its own amendment rather than
+     silently folded into a feature change. -->
 
