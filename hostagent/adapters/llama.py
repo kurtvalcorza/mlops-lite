@@ -27,9 +27,8 @@ import subprocess
 import time
 import urllib.request
 
-from platformlib.topology import vram_budget_gb
-
 from hostagent.adapters._common import engine_health, free_port
+from platformlib.topology import vram_budget_gb
 
 DEFAULT_MODEL = "~/models/gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
 DEFAULT_ALIAS = "qwen2.5-7b-instruct-q4_k_m"

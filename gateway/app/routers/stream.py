@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import platform_health, quality, registry, serving, tracing
+from ..settings import agent_headers
 from .runs import TRAINER_URL
 
 router = APIRouter()
@@ -96,7 +97,7 @@ async def infer_stream(req: StreamRequest):
             # Hold the GPU lock for the whole generation — serializes with the non-streaming path.
             async with serving._gpu_lock:
                 try:
-                    async with httpx.AsyncClient(timeout=300) as client:
+                    async with httpx.AsyncClient(headers=agent_headers(), timeout=300) as client:
                         async with client.stream(
                             "POST", infer_stream_url,
                             json={"prompt": req.prompt, "max_tokens": req.max_tokens,
@@ -217,7 +218,7 @@ async def platform_events():
     async def gen():
         interval = float(os.getenv("STATE_POLL_INTERVAL", "2"))
         last = None
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(headers=agent_headers(), timeout=5) as client:
             while True:
                 try:
                     snap = await _state_snapshot(client)
@@ -241,7 +242,7 @@ async def run_events(run_id: str):
     async def gen():
         terminal = {"completed", "failed"}
         last = None
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(headers=agent_headers(), timeout=10) as client:
             while True:
                 try:
                     r = await client.get(f"{TRAINER_URL}/train/{run_id}")

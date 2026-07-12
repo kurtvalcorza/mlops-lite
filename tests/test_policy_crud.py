@@ -135,7 +135,6 @@ def test_output_name_must_match_the_policy_model():
 # --- the store, against a fake S3 -------------------------------------------------------------------
 
 from _quality import install_policy_store  # noqa: E402 — the shared in-memory relational-store fake
-
 from app import policies  # noqa: E402
 
 

@@ -8,7 +8,14 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _shadow import FakeS3Del, load_shadow, make_quality, seed_input, seed_label, seed_prediction  # noqa: E402
+from _shadow import (  # noqa: E402
+    FakeS3Del,
+    load_shadow,
+    make_quality,
+    seed_input,
+    seed_label,
+    seed_prediction,
+)
 
 LLM = "text-generation"
 

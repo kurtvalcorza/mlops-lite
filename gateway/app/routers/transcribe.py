@@ -17,7 +17,7 @@ from prometheus_client import Counter
 from pydantic import BaseModel
 
 from .. import background, quality, registry
-from ..settings import ASR_URL
+from ..settings import ASR_URL, agent_headers
 
 router = APIRouter()
 
@@ -61,7 +61,7 @@ async def transcribe(req: TranscribeRequest):
     # replay. `_resolve_asr_version` is a quick registry lookup (never raises); a multi-second transcription
     # dominates, so this adds negligible latency while pinning the correct champion.
     asr_name, asr_version = await run_in_threadpool(_resolve_asr_version)
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=300) as client:
         try:
             r = await client.post(url, json={
                 "audio_b64": req.audio_b64, "filename": req.filename, "language": req.language})
@@ -100,7 +100,7 @@ async def transcribe(req: TranscribeRequest):
 
 @router.get("/transcribe/health")
 async def transcribe_health():
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{ASR_URL}/health")
             return {"backend": "whisper.cpp (native WSL CUDA, GPU-lease tenant)",

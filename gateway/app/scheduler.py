@@ -31,6 +31,7 @@ from prometheus_client import Counter
 from platformlib.topology import agent_url
 
 from . import policies, quality
+from .settings import agent_headers
 
 TICK_S = float(os.getenv("POLICY_TICK_S", "30"))
 BACKOFF_BASE_S = float(os.getenv("POLICY_RETRY_BASE_S", "60"))
@@ -456,7 +457,7 @@ def _default_launch(policy: dict, dataset_name: str, dataset_version: str) -> di
     # the key and keep today's no-dedup behavior.
     body["idempotency_key"] = _idempotency_key(policy["model_name"], policy["modality"],
                                                dataset_name, dataset_version)
-    with httpx.Client(timeout=15) as client:
+    with httpx.Client(headers=agent_headers(), timeout=15) as client:
         r = client.post(f"{agent_url()}/train", json=body)
     if r.status_code == 409:
         raise Busy(r.text[:200])
@@ -473,7 +474,7 @@ def _default_watch(run_id: str) -> dict:
     # bound entirely, so a trainer outage pinned the watch (and deferred every future breach)
     # until a gateway restart.
     try:
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(headers=agent_headers(), timeout=10) as client:
             r = client.get(f"{agent_url()}/train/{run_id}")
         return r.json() if r.status_code == 200 else {"status": "unknown"}
     except Exception:

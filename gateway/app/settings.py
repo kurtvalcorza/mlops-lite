@@ -36,6 +36,20 @@ import os as _os  # noqa: E402 — the non-topology settings
 
 SERVING_MODEL = _os.getenv("SERVING_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 MLFLOW_TRACKING_URI = _os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+
+# 023 US2 (FR-286): the internal agent credential. Server-side ONLY — never surfaces through the
+# BFF/browser, error payloads, logs, or metrics. Every gateway HTTP client that targets the agent
+# sends it as X-Agent-Key via agent_headers() below.
+AGENT_API_KEY = _os.getenv("AGENT_API_KEY", "")
+
+
+def agent_headers() -> dict:
+    """Default headers for an agent-directed httpx client. Read at CALL time (module attribute)
+    so a monkeypatched `settings.AGENT_API_KEY` in tests — and a rotated key after a gateway
+    restart — take effect without touching every call site. httpx does not follow redirects by
+    default, so this header is never forwarded to a different origin (FR-286); no gateway client
+    may enable follow_redirects toward the agent."""
+    return {"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {}
 # 022 (FR-255): the gated promote requests the agent's /control/reload so the newly selected
 # serving-LLM goes live. Same secret vocabulary as the agent (sent as X-Agent-Control; the SWAP_
 # name survives as the deprecated pre-018 alias).

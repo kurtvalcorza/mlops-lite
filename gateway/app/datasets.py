@@ -17,7 +17,6 @@ Layout:
 """
 import hashlib
 import json
-import os
 import time
 
 from botocore.exceptions import BotoCoreError, ClientError

@@ -90,7 +90,8 @@ class _FakeClient:
     def __init__(self, calls, payload):
         self._calls, self._payload = calls, payload
 
-    def __call__(self, timeout=None):  # httpx.Client(timeout=...)
+    def __call__(self, timeout=None, headers=None):  # httpx.Client(headers=..., timeout=...)
+        self.headers = headers or {}
         return self
 
     def __enter__(self):

@@ -11,7 +11,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
-from ..settings import EMBED_URL
+
+from ..settings import EMBED_URL, agent_headers
 
 router = APIRouter()
 
@@ -27,7 +28,7 @@ async def embed(req: EmbedRequest):
     """Embed a batch of texts → a list of equal-dimension float vectors (CPU, off-lease)."""
     if not req.texts:
         raise HTTPException(status_code=400, detail="texts must be a non-empty list of strings")
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=120) as client:
         try:
             r = await client.post(f"{EMBED_URL}/embed", json={"texts": req.texts})
         except httpx.HTTPError as e:
@@ -45,7 +46,7 @@ async def embed(req: EmbedRequest):
 
 @router.get("/embed/health")
 async def embed_health():
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{EMBED_URL}/readyz")
             return {"backend": "bentoml embeddings (native WSL, CPU, off-lease)",

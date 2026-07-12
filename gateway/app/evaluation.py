@@ -601,6 +601,14 @@ def _engine_base(engine: str, override_env: str) -> str:
     return f"{agent_url()}/engines/{engine}"
 
 
+def _agent_headers() -> dict:
+    """The internal agent credential for the live predictors (023 US2, FR-286). Read from the env
+    at CALL time — this module stays standalone-loadable (no gateway settings import, FR-279) and
+    every runtime that runs a live evaluation (gateway, trainer flows) carries AGENT_API_KEY."""
+    key = os.getenv("AGENT_API_KEY", "")
+    return {"X-Agent-Key": key} if key else {}
+
+
 def _predict_llm(rows, _modality, _version) -> list:
     """Greedy single-shot generations for each QA prompt via the host agent's llm engine (the GPU
     admission tenant). Scores the model the agent currently serves for text-generation; wiring an
@@ -609,7 +617,7 @@ def _predict_llm(rows, _modality, _version) -> list:
 
     url = _engine_base("llm", "SERVING_URL")  # → <agent>/engines/llm/infer (FR-278)
     out = []
-    with httpx.Client(timeout=300) as client:
+    with httpx.Client(headers=_agent_headers(), timeout=300) as client:
         for r in rows:
             resp = client.post(f"{url}/infer", json={
                 "prompt": r["prompt"], "max_tokens": int(r.get("max_tokens", 32)), "temperature": 0.0,
@@ -627,7 +635,7 @@ def _predict_vision(rows, _modality, _version) -> list:
 
     url = _engine_base("vision", "BENTO_URL")  # → <agent>/engines/vision/classify (FR-278)
     out = []
-    with httpx.Client(timeout=120) as client:
+    with httpx.Client(headers=_agent_headers(), timeout=120) as client:
         for r in rows:
             raw = base64.b64decode(r["image_b64"], validate=True)
             resp = client.post(f"{url}/classify", files={"image": ("image.png", raw, "image/png")})

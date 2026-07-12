@@ -45,7 +45,10 @@ def _load(mod_name):
     for k in ("AGENT_URL", "SERVING_URL", "TRAINER_URL", "BENTO_URL", "EMBED_URL", "TABULAR_URL",
               "ASR_URL"):
         setattr(stub, k, "http://agent.test" if k == "AGENT_URL" else f"http://{k.lower()}.test")
+    stub.AGENT_API_KEY = ""
+    stub.agent_headers = lambda: {}  # 023 US2: the real settings injects X-Agent-Key here
     sys.modules["app.settings"] = stub
+    sys.modules["app"].settings = stub  # attribute too — `from . import settings` prefers it
     spec = importlib.util.spec_from_file_location(
         f"app.{mod_name}", os.path.join(REPO, "gateway", "app", f"{mod_name}.py"))
     mod = importlib.util.module_from_spec(spec)

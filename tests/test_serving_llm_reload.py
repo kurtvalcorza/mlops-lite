@@ -19,9 +19,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from test_agent_lifecycle import FakeEngine  # noqa: E402 — the shared fake adapter
+
 from hostagent import admission as adm  # noqa: E402
 from hostagent import lifecycle, swap  # noqa: E402
-from test_agent_lifecycle import FakeEngine  # noqa: E402 — the shared fake adapter
 
 
 class FakeLlm(FakeEngine):

@@ -19,6 +19,7 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from _agentstore import FakeJobStore  # noqa: E402
+
 from hostagent.journal import Journal  # noqa: E402
 from platformlib.store import StoreError  # noqa: E402
 

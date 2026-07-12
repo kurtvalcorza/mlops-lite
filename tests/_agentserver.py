@@ -34,10 +34,13 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def start_agent(admission, journal, manager, jobs, runtime: str) -> AgentServer:
+def start_agent(admission, journal, manager, jobs, runtime: str, policy=None) -> AgentServer:
+    """`policy` (023 US2): an explicit AgentAuthPolicy for the auth suites. None = open (the
+    pre-023 test default, so domain suites exercise routing without minting keys)."""
     if runtime == "stdlib":
         server = ThreadingHTTPServer(
-            ("127.0.0.1", 0), agent_main.make_handler(admission, journal, manager, jobs))
+            ("127.0.0.1", 0), agent_main.make_handler(admission, journal, manager, jobs,
+                                                      policy=policy))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return AgentServer(f"http://127.0.0.1:{server.server_address[1]}", server.shutdown)
 

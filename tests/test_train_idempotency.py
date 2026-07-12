@@ -15,10 +15,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from _agentstore import FakeJobStore  # noqa: E402
+
 from hostagent import admission as adm  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
-from _agentstore import FakeJobStore  # noqa: E402
 
 WINDOW = 900.0
 FT_REQ = {"dataset_name": "d", "dataset_version": "1", "output_name": "o"}

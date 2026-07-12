@@ -10,7 +10,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
-from ..settings import TRAINER_URL
+
+from ..settings import TRAINER_URL, agent_headers
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ async def launch_batch(req: BatchRequest):
     scores every row through the existing serving tenant (the one-model-in-VRAM lease for GPU modalities;
     off-lease for tabular) and writes a content-addressed result to Garage. The daemon's `_active` gate
     serializes the batch against train/study; it does not acquire its own lease — serving owns VRAM."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.post(f"{TRAINER_URL}/batch", json=req.model_dump(exclude_none=True))
         except httpx.HTTPError as e:
@@ -54,7 +55,7 @@ async def launch_batch(req: BatchRequest):
 @router.get("/batch/{batch_id}")
 async def get_batch(batch_id: str):
     """Status + result for a batch job (counts in/out/failed + the content-addressed result URI)."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.get(f"{TRAINER_URL}/batch/{batch_id}")
         except httpx.HTTPError as e:

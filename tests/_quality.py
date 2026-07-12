@@ -14,6 +14,7 @@ for the real backends so the join / label / capture / compute paths test without
 import os
 
 from _pkgload import fresh_package, load_in_package
+
 from platformlib import store as _platform_store  # for the real StoreError/LabelExists classes
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -4,8 +4,8 @@ Verifies the foundational stack is up and reachable on the host ports. Run after
 (or `docker compose up -d --build`). Exits non-zero if any service is unhealthy.
 """
 import os
-import sys
 import socket
+import sys
 import urllib.request
 
 CHECKS = {

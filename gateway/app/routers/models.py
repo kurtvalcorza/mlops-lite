@@ -14,7 +14,7 @@ from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
 from .. import evaluation, quality, registry, serving, shadow
-from ..settings import TRAINER_URL
+from ..settings import TRAINER_URL, agent_headers
 
 router = APIRouter()
 
@@ -269,7 +269,7 @@ async def shadow_replay(name: str, req: ShadowReplayRequest):
     payload = {"shadow_id": prep["shadow_id"], "name": name, "challenger": req.challenger,
                "champion_version": prep["champion_version"], "modality": prep["modality"],
                "window_n": prep["n_pairs"]}
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.post(f"{TRAINER_URL}/shadow-replay", json=payload)
         except httpx.HTTPError as e:
@@ -294,7 +294,7 @@ async def get_shadow_replay(name: str, shadow_id: str):
     verdict = await run_in_threadpool(shadow.read_verdict, shadow_id)
     if verdict is not None:
         return verdict
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=15) as client:
         try:
             r = await client.get(f"{TRAINER_URL}/shadow-replay/{shadow_id}")
         except httpx.HTTPError as e:

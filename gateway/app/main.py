@@ -23,13 +23,15 @@ from .routers import (
     infer,
     models,
     monitor,
-    policies as policies_router,
     runs,
     stream,
     tabular,
     transcribe,
     validation,
     vision,
+)
+from .routers import (
+    policies as policies_router,
 )
 
 app = FastAPI(title="MLOps-Lite Gateway", version="1.2.0")

@@ -76,9 +76,26 @@ record_garage() {
   echo "Recorded Garage key pair ($key) into $ENV_PATH."
 }
 
+ensure_agent_key() {
+  # 023 US2 (T502, FR-284): the internal agent credential for an EXISTING .env — idempotent, so an
+  # upgraded install gains the key without rotating everything. Never echoed to stdout/logs.
+  [[ -f "$ENV_PATH" ]] || { echo "no .env at $ENV_PATH — run scripts/gen_secrets.sh first." >&2; exit 1; }
+  if [[ -n "$(env_get AGENT_API_KEY)" ]]; then
+    echo "AGENT_API_KEY already present — unchanged."
+    return 0
+  fi
+  {
+    printf '\n# Host-agent internal credential (023 US2) — the gateway sends it as X-Agent-Key;\n'
+    printf '# the agent refuses to start without it (AGENT_ALLOW_OPEN=1 is dev-only). DO NOT COMMIT.\n'
+    printf 'AGENT_API_KEY=%s\n' "agk_$(gen 24)"
+  } >> "$ENV_PATH"
+  echo "AGENT_API_KEY ensured in $ENV_PATH (restart the gateway + host agent to pick it up)."
+}
+
 case "$MODE" in
   --ensure-garage-secrets) ensure_garage_secrets; exit 0 ;;
   --record-garage)         record_garage;         exit 0 ;;
+  --ensure-agent-key)      ensure_agent_key;      exit 0 ;;
 esac
 
 if [[ -f "$ENV_PATH" && "$MODE" != "--force" ]]; then
@@ -89,6 +106,7 @@ fi
 PG_PASS="$(gen 24)"
 GRAF_PASS="$(gen 18)"
 API_KEY="mll_$(gen 24)"
+AGENT_KEY="agk_$(gen 24)"
 GARAGE_RPC="$(gen_hex32)"
 GARAGE_TOKEN="$(gen 24)"
 
@@ -115,6 +133,11 @@ MLFLOW_PORT=5500
 # Gateway (FastAPI) + API-key auth (US1). Comma-separated to allow a small key set.
 GATEWAY_PORT=8080
 GATEWAY_API_KEYS=$API_KEY
+
+# Host-agent internal credential (023 US2, FR-284) — distinct from the operator API key above.
+# The gateway sends it as X-Agent-Key; the agent refuses to start without one (AGENT_ALLOW_OPEN=1
+# is a dev-only override that must never ship).
+AGENT_API_KEY=$AGENT_KEY
 
 # Observability — Grafana admin password is a generated secret.
 PROMETHEUS_PORT=9090

@@ -7,9 +7,18 @@ requires-python = ">=3.11"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Notebooks are exploratory captures, not gated code (023 T504).
+extend-exclude = ["notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+# 023 US3 (T504/T551): Ruff becomes a REQUIRED CI gate. 100 stays the target width, but the repo's
+# settled prose style (docstrings/comments written before enforcement) peaks at 117 — so the E501
+# failure threshold is 120: the gate is green on day one without rewriting ~1200 historical prose
+# lines, while genuinely long new lines still fail. Tighten toward 100 opportunistically.
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

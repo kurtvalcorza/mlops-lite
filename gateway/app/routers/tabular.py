@@ -10,7 +10,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from prometheus_client import Counter
 from pydantic import BaseModel
-from ..settings import TABULAR_URL
+
+from ..settings import TABULAR_URL, agent_headers
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ async def predict(req: PredictRequest):
     """One prediction per input row from the LightGBM joblib artifact (CPU, off-lease)."""
     if not req.rows:
         raise HTTPException(status_code=400, detail="rows must be a non-empty list of objects")
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=60) as client:
         try:
             r = await client.post(f"{TABULAR_URL}/predict", json={"rows": req.rows})
         except httpx.HTTPError as e:
@@ -41,7 +42,7 @@ async def predict(req: PredictRequest):
 
 @router.get("/predict/health")
 async def predict_health():
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{TABULAR_URL}/readyz")
             return {"backend": "bentoml tabular (native WSL, CPU, off-lease)",

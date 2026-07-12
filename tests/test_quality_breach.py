@@ -132,9 +132,9 @@ def test_evaluate_quality_breach_flag_drives_the_trigger():
 # ("asymmetric by design"), so two concurrent breaches (PSI+PSI or PSI+quality) could both launch.
 # These drive the real router handler with the drift compute + trainer launch mocked.
 
-import asyncio
-import os as _os
-import time as _time
+import asyncio  # noqa: E402
+import os as _os  # noqa: E402
+import time as _time  # noqa: E402
 
 _REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 for _p in (_REPO, _os.path.join(_REPO, "gateway")):

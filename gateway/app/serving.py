@@ -44,7 +44,7 @@ class ServingBusyError(ServingError):
 
 
 async def health() -> bool:
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{SERVING_URL}/health")
             return r.status_code == 200 and r.json().get("ok", False)
@@ -80,7 +80,7 @@ async def gpu_state() -> dict:
     BFF contract is unchanged (no key reaches the browser). holder=None when unreadable.
     """
     holder, resident, ident = None, False, dict(_UNKNOWN_IDENTITY)
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{SERVING_URL}/health")
             if r.status_code in (200, 503):  # 503 = engine unavailable, but the payload is honest
@@ -98,7 +98,7 @@ async def llm_identity() -> dict:
     what prediction logging attributes each served prediction to (022 US2, FR-261: the quality
     window must key on the model+version that actually produced the output). `unknown`/None when
     the agent is unreachable — a prediction is never logged under a config guess."""
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=5) as client:
         try:
             r = await client.get(f"{SERVING_URL}/health")
             if r.status_code in (200, 503):
@@ -119,7 +119,7 @@ def request_llm_reload(preempt: bool = False) -> dict:
     if settings.AGENT_CONTROL_SECRET:
         headers["X-Agent-Control"] = settings.AGENT_CONTROL_SECRET
     try:
-        with httpx.Client(timeout=300) as client:
+        with httpx.Client(headers=settings.agent_headers(), timeout=300) as client:
             r = client.post(f"{settings.AGENT_URL}/control/reload",
                             json={"preempt": preempt}, headers=headers)
     except httpx.HTTPError as e:
@@ -146,7 +146,7 @@ async def run_inference(prompt: str, max_tokens: int = 256, temperature: float =
     holder, refuse a `kind="job"` holder) — the gateway no longer brokers it."""
     url = f"{SERVING_URL}/infer" + ("?preempt=true" if preempt else "")
     async with _gpu_lock:
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=300) as client:
             try:
                 r = await client.post(
                     url,

@@ -26,7 +26,7 @@ def refresh() -> None:
     signals both come from the ONE agent `/health` now (serving supervisor + training daemon folded
     in), so a single read backs the (retained) Prometheus gauge names."""
     try:
-        with httpx.Client(timeout=2) as client:
+        with httpx.Client(headers=settings.agent_headers(), timeout=2) as client:
             h = client.get(f"{AGENT_URL}/health").json()
     except Exception:
         SERVING_UP.set(0)

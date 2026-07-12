@@ -14,13 +14,11 @@ A small base (default Qwen2.5-0.5B-Instruct) keeps the demo fast and within the 
 without 4-bit/bitsandbytes (which lacks reliable Blackwell sm_120 kernels). The loop is identical
 at any size.
 """
-import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # so the shared lineage helper imports
 from lineage import lineage_tags  # noqa: E402  (010 US4 — shared lineage tags across all flows)
@@ -133,8 +131,13 @@ def train_lora(base_model: str, rows: list, out_dir: str, steps: int, lora_r: in
     import torch
     from datasets import Dataset
     from peft import LoraConfig, get_peft_model
-    from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                              DataCollatorForLanguageModeling, Trainer, TrainingArguments)
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        DataCollatorForLanguageModeling,
+        Trainer,
+        TrainingArguments,
+    )
 
     torch.manual_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"

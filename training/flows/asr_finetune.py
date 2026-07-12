@@ -21,9 +21,17 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # _common/lineage import as module or script
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
-from _common import MLFLOW_URI, MODELS_BUCKET, _log, fetch_jsonl, flow, free_cuda, s3_client  # noqa: E402
-from lineage import lineage_tags  # noqa: E402  (ASR records lineage; it can't chain — see the flow)
+from _common import (  # noqa: E402
+    MLFLOW_URI,
+    MODELS_BUCKET,
+    _log,
+    fetch_jsonl,
+    flow,
+    free_cuda,
+    s3_client,
+)
 from convert_whisper_to_ggml import convert_whisper_to_ggml  # noqa: E402  (the new HF→ggml tool)
+from lineage import lineage_tags  # noqa: E402  (ASR records lineage; it can't chain — see the flow)
 
 TASK = "asr"
 DEFAULT_BASE = os.getenv("ASR_BASE_MODEL", "openai/whisper-small")

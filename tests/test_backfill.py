@@ -24,8 +24,8 @@ if os.path.join(REPO, "scripts") not in sys.path:
 
 import backfill_store as bf  # noqa: E402
 from _quality import FakeS3  # noqa: E402
-from platformlib import store  # noqa: E402
 
+from platformlib import store  # noqa: E402
 
 # -- offline: the journal fold ---------------------------------------------------------------------
 

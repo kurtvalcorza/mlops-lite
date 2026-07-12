@@ -137,6 +137,9 @@ services:
       # SWAP_CONTROL_SECRET must reach the gateway too — else every reload is refused with 403.
       AGENT_CONTROL_SECRET: ${AGENT_CONTROL_SECRET:-}
       SWAP_CONTROL_SECRET: ${SWAP_CONTROL_SECRET:-}
+      # 023 US2 (FR-286): the internal agent credential — every gateway->agent call sends it as
+      # X-Agent-Key. Server-side only; the BFF/browser never sees it.
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
       # Garage/S3 for the dataset registry (US3) — the store-minted pair (T406 cutover).
       MLFLOW_S3_ENDPOINT_URL: http://garage:3900
       AWS_ACCESS_KEY_ID: "${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env (scripts/gen_secrets --record-garage)}"

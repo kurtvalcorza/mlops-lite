@@ -22,7 +22,7 @@
   ./scripts/gen_secrets.ps1 -EnsureGarageSecrets
   ./scripts/gen_secrets.ps1 -RecordGarage
 #>
-param([switch]$Force, [switch]$EnsureGarageSecrets, [switch]$RecordGarage)
+param([switch]$Force, [switch]$EnsureGarageSecrets, [switch]$RecordGarage, [switch]$EnsureAgentKey)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -62,6 +62,19 @@ if ($EnsureGarageSecrets) {
     }
     if ($added) { Write-Host "Garage secrets ensured in $envPath." -ForegroundColor Green }
     else { Write-Host "Garage secrets already present — unchanged." }
+    exit 0
+}
+
+if ($EnsureAgentKey) {
+    # 023 US2 (T502, FR-284): the internal agent credential for an EXISTING .env — idempotent, so
+    # an upgraded install gains the key without rotating everything. Never echoed to the console.
+    if (-not (Test-Path $envPath)) { Write-Error "no .env at $envPath — run scripts/gen_secrets.ps1 first." }
+    if (Get-EnvValue 'AGENT_API_KEY') {
+        Write-Host "AGENT_API_KEY already present — unchanged."
+    } else {
+        Add-Content -Path $envPath -Value "`n# Host-agent internal credential (023 US2) — the gateway sends it as X-Agent-Key;`n# the agent refuses to start without it (AGENT_ALLOW_OPEN=1 is dev-only). DO NOT COMMIT.`nAGENT_API_KEY=agk_$(New-Secret 24)"
+        Write-Host "AGENT_API_KEY ensured in $envPath (restart the gateway + host agent to pick it up)." -ForegroundColor Green
+    }
     exit 0
 }
 
@@ -106,6 +119,7 @@ if ((Test-Path $envPath) -and -not $Force) {
 $pgPass     = New-Secret 24
 $grafPass   = New-Secret 18
 $apiKey     = "mll_" + (New-Secret 24)
+$agentKey   = "agk_" + (New-Secret 24)
 $garageRpc  = New-HexSecret 32
 $garageTok  = New-Secret 24
 
@@ -132,6 +146,11 @@ MLFLOW_PORT=5500
 # Gateway (FastAPI) + API-key auth (US1). Comma-separated to allow a small key set.
 GATEWAY_PORT=8080
 GATEWAY_API_KEYS=$apiKey
+
+# Host-agent internal credential (023 US2, FR-284) — distinct from the operator API key above.
+# The gateway sends it as X-Agent-Key; the agent refuses to start without one (AGENT_ALLOW_OPEN=1
+# is a dev-only override that must never ship).
+AGENT_API_KEY=$agentKey
 
 # Observability — Grafana admin password is a generated secret.
 PROMETHEUS_PORT=9090

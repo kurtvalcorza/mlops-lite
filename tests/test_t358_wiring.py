@@ -49,12 +49,13 @@ def test_supervise_default_set_includes_agent_not_serving(monkeypatch):
     assert "agent" in mod._SELECTED and "serving" not in mod._SELECTED
 
 
-def test_supervise_probes_the_llm_engine_health(monkeypatch):
-    # Codex round 8: the agent replaces the LLM serving daemon, so its supervisor health probe must
-    # hit the LLM ENGINE health (503 when unavailable/wedged), not just the process's /health.
+def test_supervise_probes_the_public_readyz(monkeypatch):
+    # 023 US2 (FR-283): /engines/llm/health is behind the internal key now — an unauthenticated
+    # supervisor probe would read 401 as "dead" and restart-loop a healthy agent. The probe target
+    # is the PUBLIC minimal /readyz (process liveness + readiness), which needs no key.
     monkeypatch.delenv("AGENT_HEALTH", raising=False)
     mod = _load("supervise_under_test4", "supervisor", "supervise.py")
-    assert mod._ALL["agent"]["health_url"].endswith("/engines/llm/health")
+    assert mod._ALL["agent"]["health_url"].endswith(":8100/readyz")
 
 
 if __name__ == "__main__":

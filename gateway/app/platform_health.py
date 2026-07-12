@@ -52,7 +52,7 @@ async def _agent_health():
     """One read of the agent's root /health; None if unreachable / non-200 / unparseable. Broadly
     best-effort — a health aggregator must never itself 500 on a probe failure."""
     try:
-        async with httpx.AsyncClient(timeout=_AGENT_HEALTH_TIMEOUT_S) as client:
+        async with httpx.AsyncClient(headers=settings.agent_headers(), timeout=_AGENT_HEALTH_TIMEOUT_S) as client:
             r = await client.get(f"{AGENT_URL}/health")
         return r.json() if r.status_code == 200 else None
     except Exception:  # noqa: BLE001 — probe, never propagate

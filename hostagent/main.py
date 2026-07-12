@@ -31,6 +31,7 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from hostagent import admission as adm  # noqa: E402
+from hostagent import auth as agent_auth  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import lifecycle  # noqa: E402
 from hostagent import swap as swap_mod  # noqa: E402
@@ -170,6 +171,23 @@ def stream_frames(manager, rt, engine_id: str, verb: str, body: dict, *, preempt
             gen.close()
 
 
+#: US4 (FR-301) plugs the store schema-compatibility probe in at startup; None = no extra check.
+#: Kept a module hook (not a build_agent field) so `/readyz` stays answerable by both the wired
+#: agent and the bare test handlers.
+_ready_check = None
+
+
+def _readiness():
+    """(ready, reason) for the public minimal `/readyz` (023 FR-283). Never leaks internals: the
+    reason is a short operator hint (e.g. the US4 schema-compatibility verdict), not a stack."""
+    if _ready_check is None:
+        return True, None
+    try:
+        return _ready_check()
+    except Exception as e:  # noqa: BLE001 — a broken probe reads as not-ready, never a 500
+        return False, f"readiness probe failed: {e.__class__.__name__}"
+
+
 def _refresh_metrics(admission, journal, manager) -> None:
     free = admission.free_gb()
     if free is not None:
@@ -211,11 +229,22 @@ def _legacy_job_get(path: str, jobs):
     return 200, jobs_mod.legacy_view(rec)
 
 
-def handle_get(path: str, query: str, *, admission, journal, manager, jobs):
+def handle_get(path: str, query: str, *, admission, journal, manager, jobs, policy=None):
     """(status, payload, content_type) for every GET route. Routed on the PARSED path (Codex
     round 4, 018): the raw request path carries the query string, so `/jobs?kind=train` failed
     the exact match and a stray `/jobsxyz` fell into the jobs listing instead of 404."""
-    if path in ("/health", "/healthz"):
+    if path == "/healthz":
+        # 023 US2 (FR-283): the PUBLIC liveness probe is minimal — process-up only. The rich
+        # operational view (holder/engines/jobs — real state an attacker can enumerate) moved
+        # behind the key on `/health`; pre-023 the two paths shared one payload.
+        return 200, {"ok": True, "service": "hostagent"}, "application/json"
+    if path == "/readyz":
+        # Public minimal readiness (FR-283): can this agent take work? Extended by US4 with the
+        # store schema-compatibility verdict (an incompatible schema fails readiness, FR-301).
+        ready, reason = _readiness()
+        return (200 if ready else 503), {"ready": ready, **({"reason": reason} if reason else {})}, \
+            "application/json"
+    if path == "/health":
         holder = admission.holder()
         # The agent's own health PLUS the trainer's `/health` fields (018 T362): TRAINER_URL
         # now points here, so swap (gpu_batch_active), platform_metrics (busy/free_mib/
@@ -237,6 +266,10 @@ def handle_get(path: str, query: str, *, admission, journal, manager, jobs):
             "jobs_active": journal.active_count(),
             "interrupted_since_start": _interrupted_at_start,
             "started_at": _started_at,
+            # 023 US2 (contracts/agent-security.md §Open-development): the mode is visible on the
+            # (now protected) operational health — never any secret material. Additive; contract
+            # consumers ignore unknown fields (platformlib.contracts).
+            **({"security_mode": policy.security_mode} if policy is not None else {}),
             **jobs.health_fields(),
         }, "application/json"
     if path == "/metrics":
@@ -409,8 +442,14 @@ def handle_post(path: str, query: str, content_type: str, control_header: str, r
     return "json", 404, {"error": "unknown path"}
 
 
-def make_handler(admission, journal, manager, jobs):
-    """The stdlib transport — a thin shell over the shared routers (T413)."""
+def make_handler(admission, journal, manager, jobs, policy=None):
+    """The stdlib transport — a thin shell over the shared routers (T413).
+
+    `policy` (023 US2, FR-281/282): the internal-credential gate, checked BEFORE any body read or
+    domain call. Defaults to an OPEN policy so bare test handlers keep working; the production
+    entry point (`main()`) always wires `auth.from_env()`, which fail-closes without a key."""
+    policy = policy or agent_auth.AgentAuthPolicy()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet — health polling would spam stdout
             pass
@@ -423,10 +462,23 @@ def make_handler(admission, journal, manager, jobs):
             self.end_headers()
             self.wfile.write(data)
 
+        def _deny(self, url) -> bool:
+            """True when the request was refused (and answered) by the auth gate — evaluated on
+            the PARSED path against the exact public allow-list (FR-283), before any body byte is
+            read (FR-282: an unauthorized request produces no admission/journal/store effect)."""
+            deny = policy.authorize(self.command, url.path, self.headers.get("X-Agent-Key", ""))
+            if deny is None:
+                return False
+            self._send(*deny)
+            return True
+
         def do_GET(self):
             url = urlparse(self.path)
+            if self._deny(url):
+                return
             code, payload, ctype = handle_get(url.path, url.query, admission=admission,
-                                              journal=journal, manager=manager, jobs=jobs)
+                                              journal=journal, manager=manager, jobs=jobs,
+                                              policy=policy)
             self._send(code, payload, content_type=ctype)
 
         def _stream(self, gen):
@@ -458,6 +510,8 @@ def make_handler(admission, journal, manager, jobs):
 
         def do_POST(self):
             url = urlparse(self.path)
+            if self._deny(url):  # auth BEFORE the body is buffered (FR-282; US6 keeps this order)
+                return
             raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
             result = handle_post(url.path, url.query, self.headers.get("Content-Type", ""),
                                  self.headers.get("X-Agent-Control", ""), raw,
@@ -475,6 +529,13 @@ def main() -> None:
     runtime = os.getenv("AGENT_RUNTIME", "stdlib")
     if runtime not in ("stdlib", "uvicorn"):
         raise SystemExit(f"AGENT_RUNTIME must be 'stdlib' or 'uvicorn', got {runtime!r}")
+    # 023 US2 (FR-284): resolve the credential policy BEFORE building components or binding the
+    # socket — a mis-configured agent never comes up half-open. The error names the fix, never a
+    # secret value.
+    try:
+        policy = agent_auth.from_env()
+    except agent_auth.AgentAuthConfigError as e:
+        raise SystemExit(f"hostagent refused to start: {e}")
     admission, journal, manager, jobs = build_agent()
     _interrupted_at_start = journal.mark_interrupted("agent restart")
     if _interrupted_at_start:
@@ -483,7 +544,8 @@ def main() -> None:
               f"(FR-173)", flush=True)
     threading.Thread(target=manager.run_reaper, daemon=True).start()
     print(f"hostagent :{AGENT_PORT} | runtime={runtime} | state={STATE_DIR} "
-          f"| engines={list(manager.runtimes)} | jobs=on | vram_budget={VRAM_GB:.0f}GB", flush=True)
+          f"| engines={list(manager.runtimes)} | jobs=on | vram_budget={VRAM_GB:.0f}GB "
+          f"| security={policy.security_mode}", flush=True)
     if runtime == "uvicorn":
         import uvicorn  # lazy — the stdlib default keeps the agent pip-dep-free (T413)
 
@@ -492,7 +554,8 @@ def main() -> None:
         uvicorn.run(app, host=AGENT_BIND, port=AGENT_PORT, log_level="warning", lifespan="off")
         return
     ThreadingHTTPServer((AGENT_BIND, AGENT_PORT),
-                        make_handler(admission, journal, manager, jobs)).serve_forever()
+                        make_handler(admission, journal, manager, jobs,
+                                     policy=policy)).serve_forever()
 
 
 if __name__ == "__main__":
