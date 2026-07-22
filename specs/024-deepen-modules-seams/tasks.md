@@ -89,6 +89,7 @@ mapping byte-identical (contracts/preservation.md §C2).
 - [ ] T017 [US2] Create `gateway/app/promotion.py` (no `fastapi`/`httpx` import): `GoLiveOutcome` enum + `GoLiveResult` + `go_live(name, version, *, override, preempt, registry, activation)` encoding the ordering invariants.
 - [ ] T018 [US2] Refactor `gateway/app/routers/models.py:promote` to call `promotion.go_live(...)` and map `GoLiveResult` → HTTP status + `REGISTRY_OPS` label; response contract unchanged (depends on T017).
 - [ ] T019 [US2] Verify `gateway/app/scheduler.py` (`_default_promote`) and `routers/policies.py` still call `registry.promote` directly and cannot reach `go_live()` — the single-live-switch invariant (FR-008/FR-275/307/313, SC-006).
+- [ ] T019a [US2] Relocate the serving-LLM **pointer** wrappers (`get_serving_llm`/`set_serving_llm`/`restore_serving_llm`/`active_serving_llm_name`, `gateway/app/registry.py:147-235`) out of the MLflow adapter into a dedicated relational repository (near the US1 store decomposition) — they are Postgres state, not MLflow state; call sites and the go-live capture/restore stay behavior-identical. Rationale recorded in `docs/adr/0005-serving-llm-pointer-not-mlflow-alias.md`.
 - [ ] T020 [US2] Run offline suite + `test_promotion_gate.py`/`test_promotion_modes.py` unchanged (SC-001); run `test_promote_ordering.py` on `make up` (SC-003).
 
 **Checkpoint**: promote handler is translate→call→map only; US2 ships as its own PR.
@@ -105,6 +106,7 @@ mapping byte-identical (contracts/preservation.md §C2).
 - [ ] T022 [P] [US4] `docs/adr/0002-go-live-paths-not-merged.md` (**Rejected** alternative) — record why unifying the three promote callers was rejected (endangers the single live-switch invariant, FR-275/307/313).
 - [ ] T023 [P] [US4] `docs/adr/0003-agent-stays-framework-free.md` (Accepted) — stdlib route table over introducing a web framework in the agent.
 - [ ] T024 [P] [US4] `docs/adr/0004-behavior-preserving-test-parity-gate.md` (Accepted) — refactors gated by unchanged offline suite + web-free seam tests + live leg.
+- [x] T024a [P] [US4] `docs/adr/0005-serving-llm-pointer-not-mlflow-alias.md` (Accepted) — record why the platform serving-LLM selection is a Postgres pointer, not an MLflow `@serving` alias (aliases are per-registered-model; the selection is cross-model). Delivered in this PR since it documents the pre-existing spec-022 decision, and it names the T019a relocation follow-up.
 
 **Checkpoint**: ADRs land alongside the code they document (SC-008).
 

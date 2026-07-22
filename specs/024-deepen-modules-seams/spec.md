@@ -85,6 +85,7 @@ The review produced decisions worth preserving — most importantly a *rejected*
 
 1. **Given** the go-live extraction, **When** a reader consults the ADRs, **Then** they find the recorded rejection of merging the go-live paths (with FR-275 rationale).
 2. **Given** the agent route-table work, **When** a reader consults the ADRs, **Then** they find the recorded decision to keep the agent framework-free.
+3. **Given** the question "why isn't the serving-LLM selection an MLflow alias?", **When** a reader consults the ADRs, **Then** they find the recorded decision (Postgres pointer, because aliases are per-registered-model and the selection is cross-model) and the rejected "collapse into an alias" alternative — and the note that the pointer wrappers should move out of the MLflow adapter (US1/US2).
 
 ---
 
@@ -122,7 +123,7 @@ The review produced decisions worth preserving — most importantly a *rejected*
 
 **Decision records (US4)**
 
-- **FR-013**: Each accepted decision AND each rejected alternative MUST be recorded as an ADR, including the rejection of merging the go-live paths (endangers FR-275) and the decision to keep the agent framework-free.
+- **FR-013**: Each accepted decision AND each rejected alternative MUST be recorded as an ADR, including the rejection of merging the go-live paths (endangers FR-275), the decision to keep the agent framework-free, and the decision that the platform serving-LLM selection is a Postgres pointer rather than an MLflow `@serving` alias (with "collapse it into an alias" recorded as the rejected alternative).
 
 **Cross-cutting constraints (all stories)**
 
