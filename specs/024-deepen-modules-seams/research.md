@@ -33,10 +33,12 @@ a module that imports **no** fastapi/httpx (like `activation.py`/`evaluation.py`
 `GoLiveOutcome` result object; `routers/models.py:promote` maps the outcome to HTTP status + `REGISTRY_OPS`
 labels with no response-contract change.
 
-**Rationale**: The offline suite has no fastapi/httpx, so the ordering — which carries real invariants
-(refuse *before* the alias moves, FR-265; capture prior *before* overwrite) — is currently only reachable
-through the live HTTP stack. Putting it on the web-free side of the dependency line makes it unit-test like
-the other domain cores, with `tests/_activation.py`-style fakes.
+**Rationale**: The ordering — which carries real invariants (refuse *before* the alias moves, FR-265;
+capture prior *before* overwrite) — is currently buried in a FastAPI handler, so exercising it means
+constructing the app / driving it through HTTP. Extracting it into a web-free module (importing no
+fastapi/httpx, like `activation.py`/`evaluation.py`) makes it unit-testable in isolation with
+`tests/_activation.py`-style fakes. (Correction: `fastapi`/`httpx` ARE in the offline env via
+`requirements-dev.txt`; the value is per-module import isolation, not dependency absence.)
 
 **Rejected alternative (the important one)**: **Do NOT merge the go-live paths.** An earlier framing
 proposed a single shared promotion use-case for all three callers (operator route, one-click policy accept,
@@ -47,9 +49,10 @@ path. The extracted `promotion.go_live()` therefore has **exactly one caller** a
 enforced structurally. This is recorded as ADR-002.
 
 **Alternatives considered**:
-- *Test the router handler directly with monkeypatched modules* — rejected: impossible offline (importing
-  the router requires fastapi/httpx); it would force those deps into the offline suite, breaking the
-  dependency-light CI stance.
+- *Test the router handler directly with monkeypatched modules* — weaker: the router imports fine offline
+  (`fastapi` is in `requirements-dev.txt`), but testing the ordering through the handler still needs the
+  FastAPI app / TestClient context and couples the test to HTTP mechanics; a web-free use-case tests the
+  ordering as a pure unit.
 - *Leave it router-resident, cover only via live tests* — rejected: the ordering invariants deserve fast,
   isolated coverage; `tests/test_promote_ordering.py` (already on this branch) stays as the live leg (SC-167)
   but is not a substitute for offline ordering tests.

@@ -7,7 +7,7 @@ lives here — see tasks.md (after `/speckit-tasks`) for the work items.
 ## Prerequisites
 
 - Repo checked out on the working branch; Python env for the offline suite (stdlib + pytest).
-- **Offline suite has no `fastapi`/`httpx`** — that is intentional and is the property US2 relies on.
+- The offline suite **installs** `-r gateway/requirements.txt`, so `fastapi`/`httpx` ARE present. The property US2 relies on is **per-module import isolation** (the new seam imports without constructing the app), NOT a fastapi-free suite.
 - For the live leg only: the stack up (`make up`) with a gateway API key.
 
 ## 1. Offline suite stays green (SC-165, SC-166)
@@ -16,8 +16,9 @@ lives here — see tasks.md (after `/speckit-tasks`) for the work items.
 make test            # or: pytest -q
 ```
 
-Expected: all existing tests pass unchanged, and the suite runs to green **without** fastapi/httpx installed.
-No existing test is deleted or weakened.
+Expected: all existing tests pass unchanged (SC-165); no existing test is deleted or weakened. (The suite
+runs WITH `fastapi`/`httpx` present — they're in `requirements-dev.txt`; SC-166 is a per-seam
+import-isolation check, not a fastapi-free run.)
 
 ## 2. Store decomposition seam (US1 → C1)
 
