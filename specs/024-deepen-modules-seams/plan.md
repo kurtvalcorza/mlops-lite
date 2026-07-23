@@ -38,8 +38,8 @@ No schema change is planned; if one becomes genuinely necessary it lands as a NE
 **Performance Goals**: no runtime performance change intended; the store decomposition must not add import
 cost (drivers stay lazy) or extra queries (the predictions⋈labels window join is preserved).
 
-**Constraints**: dependency-light (Principle III); stdlib-only agent; fail-open on prediction/label/capture
-WRITES and fail-loud on window/policy/job READS preserved (FR-343); public agent surface byte-preserved
+**Constraints**: dependency-light (Principle III); stdlib-only agent; fail-open on prediction/capture
+WRITES and fail-loud on label attach + window/policy/job READS preserved (FR-343); public agent surface byte-preserved
 (FR-340); exactly one gated promotion choke-point and one live-switch caller (FR-336/SC-170).
 
 **Scale/Scope**: ~28 `from platformlib import store` call sites (must stay unchanged); `store.py` ~630 LOC →

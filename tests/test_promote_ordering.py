@@ -14,6 +14,12 @@ Note (on-HW operator): each run registers a fresh `promote-order-adapter` versio
 delete it, so repeated live runs accumulate junk versions in the registry. This is expected for a
 smoke test — prune them out-of-band (or set `PROMOTE_ORDER_MODEL` to an isolated throwaway name) if
 the accumulation is a concern.
+
+Coverage boundary: `_serving_version()` reads only the model-local `@serving` MLflow alias, NOT the
+platform-global `serving_llm` Postgres pointer. A regression that wrote the global pointer during a
+refused promote while leaving the alias + response shape unchanged would pass this test. A complete
+check should also assert the desired-LLM pointer is unchanged (via the activation / serving-LLM read
+surface) — worth adding when this leg is next revisited on hardware.
 """
 import json
 import os

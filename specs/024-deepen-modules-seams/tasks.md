@@ -53,7 +53,7 @@ every call site and driver-laziness unchanged.
 
 ### Tests for User Story 1
 
-- [ ] **T562** [P] [US1] Write `tests/test_store_decomposition.py` — web-free per-aggregate repository tests (predictions insert+window join, write-once `labels`→`LabelExists`, capture insert/list, jobs upsert/get, policies CRUD, suggestions create/resolve/get), using fakes/temp seams in the house `tests/_activation.py` style; assert fail-open WRITE / fail-loud READ postures (FR-343).
+- [ ] **T562** [P] [US1] Write `tests/test_store_decomposition.py` — web-free per-aggregate repository tests (predictions insert+window join, write-once `labels`→`LabelExists`, capture insert/list, jobs upsert/get, policies CRUD, suggestions create/resolve/get), using fakes/temp seams in the house `tests/_activation.py` style; assert the exact postures — fail-open on prediction/capture WRITES, **fail-loud** on label attach + window/policy/job READS (FR-343).
 - [ ] **T563** [P] [US1] Add an import-laziness assertion: importing `platformlib.objectstore` triggers no psycopg import and importing the relational path triggers no boto3 import (FR-332).
 
 ### Implementation for User Story 1
@@ -65,7 +65,7 @@ every call site and driver-laziness unchanged.
 - [ ] **T568** [P] [US1] Create `platformlib/storeimpl/jobs.py` — move the jobs-state access.
 - [ ] **T569** [P] [US1] Create `platformlib/storeimpl/policies.py` — move the policy rows/status access.
 - [ ] **T570** [P] [US1] Create `platformlib/storeimpl/suggestions.py` — move the promotion-suggestions access.
-- [ ] **T571** [US1] Reduce `platformlib/store.py` to a facade: re-export every moved symbol (+ `objectstore`) so all ~28 `from platformlib import store` call sites resolve unchanged; keep psycopg/boto3 lazy (depends on T564–T570).
+- [ ] **T571** [US1] Reduce `platformlib/store.py` to a facade: re-export every moved symbol (+ `objectstore`) so all ~28 `from platformlib import store` call sites resolve unchanged; keep psycopg/boto3 lazy (depends on T564–T570). **Scope note (Codex):** this MUST also relocate the `serving_llm` pointer SQL (`store.py:485-510` — `set`/`get`/`clear_serving_llm`) into a storeimpl repository — it is aggregate-specific SQL still in `store.py`, so the import-only facade + SC-168 cannot be met while it remains. (US2's T577 relocates the `registry.py` *wrappers* on top of this US1 move, so sequence T577 after T571.)
 - [ ] **T572** [US1] Run the full offline suite + `test_store_facade.py`; confirm zero call-site edits and green (SC-165/SC-168).
 
 **Checkpoint**: store.py is a facade with no aggregate SQL inline; US1 ships as its own PR.

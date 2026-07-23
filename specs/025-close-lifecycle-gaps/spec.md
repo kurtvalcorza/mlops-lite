@@ -133,7 +133,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 **Tabular full modality (US2)**
 
 - **FR-351**: A tabular fine-tune flow MUST exist, registering a version with tabular task/engine tags and its logged eval metric, with failure cleanup (no partial version), mirroring the existing modality flows.
-- **FR-352**: A committed held-out tabular eval fixture + AUC scorer MUST exist so tabular promotion is gated on a real metric (AUC is no longer a stub).
+- **FR-352**: A committed held-out tabular eval fixture + a tabular **prediction factory** (`predict_fn`) MUST exist so the **existing** pure-Python `auc` metric (`evaluation.py:153-173`, already in `METRICS`) can gate tabular promotion — the metric is *promoted from stub*, not re-implemented.
 - **FR-353**: Tabular MUST be integrated into quality monitoring where a per-request ground-truth label is available, so it can drive the existing breach→retrain policy; any intentional exclusion MUST be documented with rationale.
 - **FR-354**: Tabular training MUST remain CPU/off-lease and add no heavy dependency beyond tabular serving's existing footprint (Principles II and III).
 

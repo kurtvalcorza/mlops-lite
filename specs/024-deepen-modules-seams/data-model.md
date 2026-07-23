@@ -11,7 +11,7 @@ live `conn`). Shared error/seam helpers stay in `storeimpl/_base.py`.
 | Repository module | Owns (table[s]) | Representative operations | Failure posture |
 |---|---|---|---|
 | `predictions.py` | `predictions` | insert prediction row; window join with labels | WRITE fail-open (drop-counter); READ fail-loud |
-| `labels.py` | `labels` | write-once insert (PK-enforced) → `LabelExists` | WRITE fail-open; duplicate ⇒ `LabelExists` |
+| `labels.py` | `labels` | write-once insert (PK-enforced) → `LabelExists` | **WRITE fail-loud** (`QualityStoreError`→502 — operator-facing label attach); duplicate ⇒ `LabelExists` |
 | `capture.py` | `capture_index` | insert capture row; list by window | WRITE fail-open; READ fail-loud |
 | `jobs.py` | jobs state | upsert/get job status | READ fail-loud |
 | `policies.py` | policy rows | CRUD policy + status | READ fail-loud |
@@ -57,7 +57,7 @@ go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResu
 | CONFLICT | 409 | `conflict` |
 | BLOCKED | 200 (`promoted:false`) | `blocked` |
 | PROMOTED | 200 (`promoted:true`) | `ok`, THEN `unresolvable` on rollback — **two** emits in order (not one) |
-| ERROR | 502 | `error` |
+| ERROR | 502 | `error` on a **promote-time** failure; **empty (no emit)** on a **pre-check** failure — version-list / `llm_target_info` `RegistryError` return 502 *before* any `REGISTRY_OPS` increment (`models.py:101-110`) |
 
 **Not-found ordering**: version existence is checked first; a missing version ⇒ `NOT_FOUND` ⇒ 404 with **no** `REGISTRY_OPS` emit (matching today's route, which raises the 404 before any metric increment). The web-free use-case returns this outcome; it never raises an HTTP-specific exception.
 

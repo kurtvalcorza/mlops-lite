@@ -45,7 +45,7 @@ The go-live ordering in `gateway/app/routers/models.py:promote` (version existen
 
 **Why this priority**: Concrete testability + locality win, but smaller than US1 — the heavy pieces (the gated alias move, the durable activation) are already deep, tested modules. The value is moving the *ordering* onto the web-free side of the dependency line so it tests like the rest of the domain cores.
 
-**Independent Test**: The extracted ordering module is imported and exercised in the offline suite with fake `registry`/`activation` collaborators (house `test_activation.py`-style fakes), asserting each outcome and that a refusal returns before `registry.promote` is ever called — with no `fastapi`/`httpx` installed.
+**Independent Test**: The extracted ordering module is imported and exercised in the offline suite with fake `registry`/`activation` collaborators (house `test_activation.py`-style fakes), asserting each outcome and that a refusal returns before `registry.promote` is ever called — the module imports and runs without constructing the FastAPI app (import-isolated; `fastapi`/`httpx` are present in the offline env but are not needed to exercise it).
 
 **Acceptance Scenarios**:
 

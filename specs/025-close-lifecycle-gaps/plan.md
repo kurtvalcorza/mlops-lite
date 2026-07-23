@@ -64,7 +64,7 @@ training/flows/
 └── tabular_finetune.py       # US2: NEW — tabular fine-tune flow (mirrors vision_finetune.py)
 
 training/scoring/
-└── tabular.py                # US2: NEW — AUC scorer over a held-out fixture
+└── tabular.py                # US2: NEW — tabular prediction factory (predict_fn); NOT a new AUC impl
 
 benchmarks/tabular/
 └── auc_smoke.jsonl           # US2: NEW — committed held-out tabular eval fixture
@@ -80,7 +80,7 @@ ui/app/models/ (+ existing shadow endpoints)              # US6: shadow-replay d
 tests/
 ├── test_batch_version_assert.py   # US1 (offline ordering + injected predict_fn)
 ├── test_tabular_finetune.py       # US2 (seams; full run CPU/live-gated)
-├── test_tabular_eval.py           # US2 (AUC scorer + gate, web-free)
+├── test_tabular_eval.py           # US2 (prediction factory + existing auc metric + gate, web-free)
 ├── test_stream_capture.py         # US4 (fail-open capture, web-free seam)
 └── test_ui_*.py                   # US3/US5/US6 console surfaces
 ```

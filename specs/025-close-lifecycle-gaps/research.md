@@ -22,11 +22,15 @@ refuse," so load-under-lease is preferred, assert-and-refuse is the minimum.
 
 ## D2 — ASR batch path (US1): add vs remove
 
-**Decision**: Resolve the inconsistency (jobs admit `asr` but the flow raises) by **either** adding a
-real ASR batch path **or** removing `asr` from `GPU_BATCH_MODALITIES`. Prefer *add* if batched
-transcription is genuinely wanted; otherwise *remove* so submission is rejected up front.
+**Decision** (corrected): There is **no** accepted-then-failed bug — `hostagent/jobs.py` validates
+submissions against `BATCH_MODALITIES`, which already **excludes** `asr` (`GPU_BATCH_MODALITIES`, which
+lists `asr`, is only consulted *post*-validation to protect an active GPU batch's serving holder;
+removing `asr` there would change no submission behavior and discard that protection). So this is
+**net-new-only**: add `asr` to `BATCH_MODALITIES` + a real ASR path in `batch_infer.py` **if** batched
+transcription is wanted; otherwise **no action** — asr is already rejected up front.
 
-**Rationale**: An accepted-then-failed job is the worst outcome. Either direction eliminates it.
+**Rationale**: Base the decision on the submission validator (`BATCH_MODALITIES`), not the
+lease-protection set (`GPU_BATCH_MODALITIES`).
 
 ## D3 — Tabular training library (US2): reuse shipped LightGBM, pure-Python AUC
 

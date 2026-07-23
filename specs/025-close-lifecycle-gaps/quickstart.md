@@ -39,7 +39,7 @@ make up && <launch a batch for a non-resident version>   # scores that version u
 pytest -q tests/test_tabular_eval.py tests/test_tabular_finetune.py
 ```
 
-Expected (CPU, web-free/seam-level): AUC scorer + gate run over `benchmarks/tabular/auc_smoke.jsonl`
+Expected (CPU, web-free/seam-level): the tabular prediction factory + the existing `auc` metric + gate run over `benchmarks/tabular/auc_smoke.jsonl`
 (AUC no longer a stub); the tabular fine-tune flow registers a version with its logged metric and cleans
 up on failure. End-to-end train→gate→promote→serve runs CPU/off-lease with no new heavy dependency; a
 tabular quality window is scorable where labels exist.
