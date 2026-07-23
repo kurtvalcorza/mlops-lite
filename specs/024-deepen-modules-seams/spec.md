@@ -41,7 +41,7 @@ A read-only architecture review (following the improve-codebase-architecture met
 
 ### User Story 2 - Extract the LLM go-live ordering into a testable seam (Priority: P2)
 
-The go-live ordering in `gateway/app/routers/models.py:promote` (version existence → resolve/refuse an unresolvable adapter (FR-265) → assert no activation conflict → gated promote → capture prior pointer → durable activation) is domain sequencing trapped in a FastAPI+httpx module. Because the offline suite has no `fastapi`/`httpx`, this ordering is only reachable through the live HTTP stack. The sequencing carries real invariants (refuse **before** the alias moves; capture the prior pointer **before** it is overwritten) that deserve isolated tests.
+The go-live ordering in `gateway/app/routers/models.py:promote` (version existence → resolve/refuse an unresolvable adapter (FR-265) → assert no activation conflict → gated promote → capture prior pointer → durable activation) is domain sequencing buried in a FastAPI handler. Exercising it today means constructing the app / driving it through the HTTP stack, so it's only covered through the live path. The sequencing carries real invariants (refuse **before** the alias moves; capture the prior pointer **before** it is overwritten) that deserve isolated tests — which a web-free use-case (importing no fastapi/httpx, like `activation.py`) makes possible.
 
 **Why this priority**: Concrete testability + locality win, but smaller than US1 — the heavy pieces (the gated alias move, the durable activation) are already deep, tested modules. The value is moving the *ordering* onto the web-free side of the dependency line so it tests like the rest of the domain cores.
 

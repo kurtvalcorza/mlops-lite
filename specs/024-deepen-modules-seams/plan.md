@@ -27,7 +27,7 @@ passes on a brought-up stack.
 No schema change is planned; if one becomes genuinely necessary it lands as a NEW numbered
 `platformlib/migrations/*.sql` (FR-344).
 
-**Testing**: pytest offline suite (no fastapi/httpx installed — the dependency line this feature respects),
+**Testing**: pytest offline suite (installs `-r gateway/requirements.txt`, so fastapi/httpx ARE present; the extracted seams stay web-free/import-isolated regardless),
 `test_*.py` house pattern with in-memory fakes (`tests/_activation.py` style); live legs gated by
 `conftest` guard fixtures.
 
@@ -131,7 +131,7 @@ decisions were resolved during `/speckit-specify` clarifications — no open NEE
   and result object, and the agent route-table entry shape.
 - [contracts/preservation.md](./contracts/preservation.md): the surfaces that MUST NOT regress — the store
   facade symbol set, the promote request/response + status/metric mapping, and the agent public route set.
-- [quickstart.md](./quickstart.md): the validation recipe (offline suite green without fastapi/httpx →
+- [quickstart.md](./quickstart.md): the validation recipe (offline suite green → per-seam import-isolation tests →
   web-free seam tests → live ordering leg on `make up`).
 
 ### Phase 2 — Tasks
