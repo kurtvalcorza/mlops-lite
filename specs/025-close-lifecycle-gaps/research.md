@@ -7,7 +7,10 @@ was fixed in the `/speckit-specify` clarifications (spec.md §Clarifications) �
 
 **Decision**: In `batch_infer.py`, resolve the requested `model`/`registry_version`, and load/assert it
 **once per batch** through the agent's admission lease before scoring; if a training/HPO job holds the
-GPU, **refuse cleanly** (never preempt). This closes SC-068 while preserving Principle II.
+GPU, **refuse cleanly** (never preempt). This closes the explicit-`registry_version`-honoring gap while
+preserving Principle II. Note: 015 deliberately scoped batch OUT of SC-068 (`015/research.md:70-71` —
+batch scoring the resident `@serving` model is correct production behavior); 025 does not overturn that,
+it only makes a batch that names a *specific* non-resident version score that version instead of the resident one.
 
 **Rationale**: The current flow scores whatever is resident — a silent wrong-answer. Loading through
 admission (not a side channel) keeps the single-tenant invariant; refusing (vs. preempting) respects

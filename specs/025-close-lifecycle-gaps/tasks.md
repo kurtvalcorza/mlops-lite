@@ -42,7 +42,7 @@ description: "Task list for feature 025 — close lifecycle gaps"
 **Independent Test**: a batch for a non-resident version scores that version (offline ordering + injected predict_fn); an ASR batch completes or is rejected at submission.
 
 - [ ] **T596** [P] [US1] Write `tests/test_batch_version_assert.py` — offline: a batch requesting version A while B is "resident" asserts/loads A before scoring (injected predict_fn + fake admission), never scores B; refuses cleanly if a job holds the GPU (FR-348/FR-350).
-- [ ] **T597** [US1] In `training/flows/batch_infer.py`, load/assert the requested `model`/`registry_version` under admission before scoring (once per batch, not per record); refuse without preempting a running job (FR-348/FR-350, closes SC-068).
+- [ ] **T597** [US1] In `training/flows/batch_infer.py`, load/assert the requested `model`/`registry_version` under admission before scoring (once per batch, not per record); refuse without preempting a running job (FR-348/FR-350; closes the explicit-`registry_version`-honoring gap — NOT 015's SC-068, which kept batch-vs-`@serving` scoring correct).
 - [ ] **T598** [US1] Resolve the ASR batch inconsistency: either add a real ASR batch path in `batch_infer.py` OR remove `asr` from `GPU_BATCH_MODALITIES` in `hostagent/jobs.py` so it is rejected at submission — no admitted modality raises at runtime (FR-349/SC-176).
 - [ ] **T599** [HW] [US1] On the RTX 5070 Ti box: validate the load-under-lease leg — a batch for a non-resident version scores it correctly while preserving one-GPU-tenant (SC-175).
 

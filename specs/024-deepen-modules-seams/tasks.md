@@ -20,7 +20,7 @@ unit test for every extracted seam plus the existing live ordering leg, so test 
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: can run in parallel (different files, no dependency on an incomplete task)
-- **[Story]**: US1 (store), US2 (go-live), US3 (agent), US4 (ADRs)
+- **[Story]**: US1 (store), US2 (go-live), US3 (agent), US4 (ADRs), US5 (behavior-preserving gap closures)
 
 ---
 
@@ -165,7 +165,7 @@ contradicts `specs/*/tasks.md` or the shipped code.
 ### Phase dependencies
 
 - **Setup (P1)** → **Foundational (P2)** blocks all stories.
-- **US1 (P1)**, **US2 (P2)**, **US4 (P2)**, **US3 (P3)** each depend only on Foundational; they are otherwise independent and each is its own PR.
+- **US1 (P1)**, **US2 (P2)**, **US4 (P2)**, **US5 (P3)**, **US3 (P3)** each depend only on Foundational; they are otherwise independent and each is its own PR.
 - **Polish (P7)** after the stories being shipped are complete.
 
 ### Within each story
@@ -178,7 +178,8 @@ contradicts `specs/*/tasks.md` or the shipped code.
 
 - T565–T570 (per-aggregate moves) are parallel — distinct files.
 - T579–T582 (ADRs) are parallel — distinct files.
-- The four stories can proceed in parallel once Foundational is done, but ship in priority order.
+- T588–T590 (US5 PSI test + doc reconciliations) are parallel — distinct files.
+- The five stories can proceed in parallel once Foundational is done, but ship in priority order.
 
 ---
 
@@ -191,8 +192,10 @@ contradicts `specs/*/tasks.md` or the shipped code.
 
 ### Incremental delivery
 
-US1 (store) → US2 (go-live) + US4 (ADRs for the rejected-merge decision) → US3 (agent) — each a separate,
-individually-revertable PR gated by its web-free test and the preservation contracts.
+US1 (store) → US2 (go-live) + US4 (ADRs for the rejected-merge decision) → US5 (PSI test + doc reconcile) →
+US3 (agent) — each a separate, individually-revertable PR gated by its web-free test and the preservation
+contracts. US5 is behavior-preserving and can land any time after Foundational; it's sequenced late only
+because it's lowest-leverage, not because anything blocks it.
 
 ---
 

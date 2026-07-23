@@ -25,11 +25,11 @@ Priorities: **US1 (batch correctness) and US2 (tabular) are the committed core.*
 
 ### User Story 1 - Batch inference scores the right model, for every admitted modality (Priority: P1)
 
-Batch inference has two correctness gaps. (a) The job layer admits `asr` as a batch modality, but the batch flow has no ASR path and raises `ValueError` at runtime — an accepted job that always fails. (b) The flow scores whichever model version the serving tenant currently *happens* to hold; it does not load/assert the requested `model`/`registry_version` first (the inherited SC-068 gap), so a batch launched while serving holds a different version silently scores the wrong model.
+Batch inference has two correctness gaps. (a) The job layer admits `asr` as a batch modality, but the batch flow has no ASR path and raises `ValueError` at runtime — an accepted job that always fails. (b) The flow scores whichever model version the serving tenant currently *happens* to hold; it does not load/assert the requested `model`/`registry_version` first, so a batch launched while serving holds a different version silently scores the wrong model. This is the *explicit-version-honoring* gap 015 left open — **distinct from 015's SC-068**, which deliberately scoped batch OUT (`015/research.md:70-71`: "batch-inferring a dataset with the `@serving` model is correct production behavior, not a mislabel"). 025 does NOT overturn that: a batch against `@serving` stays correct; the fix only addresses a batch that names a *specific* non-resident version.
 
 **Why this priority**: These are correctness bugs in a shipped feature — an accepted job that fails, and a silent wrong-answer. Highest value, smallest change.
 
-**Independent Test**: A batch submitted for a version that is not currently resident scores *that* version (asserted), and an ASR batch runs to completion instead of raising. Offline via injected predict_fn for the ordering/assertion logic; the real load-under-lease leg validated on hardware (SC-068 is a hardware SC).
+**Independent Test**: A batch submitted for a version that is not currently resident scores *that* version (asserted), and an ASR batch runs to completion instead of raising. Offline via injected predict_fn for the ordering/assertion logic; the real load-under-lease leg is a hardware SC.
 
 **Acceptance Scenarios**:
 
@@ -126,7 +126,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 **Batch correctness (US1)**
 
-- **FR-348**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident (closes SC-068).
+- **FR-348**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident. (This closes the explicit-`registry_version`-honoring gap batch never got — NOT 015's SC-068, which correctly kept batch-vs-`@serving` scoring as production-correct; a batch that requests `@serving` is unchanged.)
 - **FR-349**: Every modality admitted as a batch modality MUST have a working batch path; ASR MUST either gain a real batch path or be removed from the admitted set so it is rejected at submission, never accepted-then-failed at runtime.
 - **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted.
 
@@ -160,7 +160,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 ### Measurable Outcomes
 
-- **SC-175**: A batch for a non-resident version scores that exact version (or refuses) — never the resident one — proven offline for the ordering and on hardware for the load-under-lease leg (SC-068 closed).
+- **SC-175**: A batch for an *explicitly requested* non-resident version scores that exact version (or refuses) — never the resident one — proven offline for the ordering and on hardware for the load-under-lease leg (the explicit-version-honoring gap; 015's SC-068 batch exclusion stays intact).
 - **SC-176**: An ASR batch job completes successfully, OR ASR batch submissions are rejected at submission time; no admitted batch modality raises at runtime.
 - **SC-177**: A tabular dataset can be fine-tuned → registered-with-metric → gate-compared on a committed AUC fixture → promoted → served, with no GPU lease held and no new heavy dependency.
 - **SC-178**: Tabular predictions with labels produce a quality window that can trip the existing breach→retrain policy (or the exclusion is documented).
