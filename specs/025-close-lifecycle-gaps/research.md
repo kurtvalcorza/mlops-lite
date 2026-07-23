@@ -1,0 +1,72 @@
+# Phase 0 Research — Close Lifecycle Gaps
+
+Decisions to confirm during implementation, with rationale and rejected alternatives. Spec-level scope
+was fixed in the `/speckit-specify` clarifications (spec.md §Clarifications) — no open NEEDS CLARIFICATION.
+
+## D1 — Batch version-assertion (US1): load-and-assert under the lease, refuse if a job holds the GPU
+
+**Decision**: In `batch_infer.py`, resolve the requested `model`/`registry_version`, and load/assert it
+**once per batch** through the agent's admission lease before scoring; if a training/HPO job holds the
+GPU, **refuse cleanly** (never preempt). This closes SC-068 while preserving Principle II.
+
+**Rationale**: The current flow scores whatever is resident — a silent wrong-answer. Loading through
+admission (not a side channel) keeps the single-tenant invariant; refusing (vs. preempting) respects
+"running jobs are never preempted."
+
+**Alternatives considered**: *Preempt to load the batch target* — rejected (violates non-preemptable
+jobs). *Assert-only, error if not resident* — weaker but acceptable fallback; the spec allows "load or
+refuse," so load-under-lease is preferred, assert-and-refuse is the minimum.
+
+## D2 — ASR batch path (US1): add vs remove
+
+**Decision**: Resolve the inconsistency (jobs admit `asr` but the flow raises) by **either** adding a
+real ASR batch path **or** removing `asr` from `GPU_BATCH_MODALITIES`. Prefer *add* if batched
+transcription is genuinely wanted; otherwise *remove* so submission is rejected up front.
+
+**Rationale**: An accepted-then-failed job is the worst outcome. Either direction eliminates it.
+
+## D3 — Tabular training library (US2): reuse shipped LightGBM, pure-Python AUC
+
+**Decision**: The tabular fine-tune flow uses the **LightGBM already shipped for tabular serving**;
+AUC stays **pure-Python** (already implemented as a metric). Flow mirrors `vision_finetune.py`.
+
+**Rationale**: No new heavy dependency (Principle III); tabular is CPU/off-lease (Principle II).
+Mirroring the vision flow inherits the modality contract (dispatch, subprocess isolation,
+register-with-metric, failure cleanup).
+
+**Alternatives considered**: sklearn/xgboost — rejected (new heavy dep, footprint).
+
+## D4 — Tabular quality label source (US2)
+
+**Decision**: Wire tabular into quality where a clean per-request ground-truth label exists (tabular
+classification has real labels, unlike the earlier embeddings/tabular exclusion note). If a subset has
+no clean label, **document the exclusion with rationale** rather than fabricate labels.
+
+**Rationale**: Reuses the existing predictions/labels/window machinery; honest about any gap.
+
+## D5 — Streamed-prediction capture (US4): reuse the fail-open seam
+
+**Decision**: Capture `/infer/stream` predictions via the **existing fail-open capture seam** used by
+the non-streamed path, off the response path, keyed by prediction id.
+
+**Rationale**: Matches the non-streamed contract exactly; never blocks/alters the stream (the fire-and-
+forget discipline already proven for tracing/quality).
+
+## D6 — HPO progress (US5): in-process stream, no external dashboard
+
+**Decision**: Surface trial progress via an **in-process progress stream** the console reads; no
+`optuna-dashboard` service.
+
+**Rationale**: Dependency-light, single-machine (Principle III); optuna-dashboard would add a resident
+service against the ~3 GB idle budget.
+
+## D7 — Scope discipline for US3–US6
+
+**Decision**: US3–US6 ship as independent slices in priority order; any that proves larger than a slice
+**spins into its own feature (026+)** rather than bloating 025 — honoring Principle VII (no big-bang).
+
+## D8 — On-hardware validation
+
+**Decision**: US1's load-under-lease leg (SC-001) and any GPU-touching SC are validated on the RTX 5070
+Ti box (constitution gate zero); they are `[HW]` tasks, marked done only after real validation — not
+closable from the offline environment.
