@@ -42,8 +42,8 @@ description: "Task list for feature 025 — close lifecycle gaps"
 **Independent Test**: a batch for a non-resident version scores that version (offline ordering + injected predict_fn); an ASR batch completes or is rejected at submission.
 
 - [ ] **T596** [P] [US1] Write `tests/test_batch_version_assert.py` — offline: a batch requesting version A while B is "resident" asserts/loads A before scoring (injected predict_fn + fake admission), never scores B; refuses cleanly if a job holds the GPU (FR-348/FR-350).
-- [ ] **T597** [US1] In `training/flows/batch_infer.py`, load/assert the requested `model`/`registry_version` under admission before scoring (once per batch, not per record); refuse without preempting a running job (FR-348/FR-350; closes the explicit-`registry_version`-honoring gap — NOT 015's SC-068, which kept batch-vs-`@serving` scoring correct).
-- [ ] **T598** [US1] Resolve the ASR batch inconsistency: either add a real ASR batch path in `batch_infer.py` OR remove `asr` from `GPU_BATCH_MODALITIES` in `hostagent/jobs.py` so it is rejected at submission — no admitted modality raises at runtime (FR-349/SC-176).
+- [ ] **T597** [US1] In `training/flows/batch_infer.py`, load/assert the requested `model`/`registry_version` under admission before scoring (once per batch, not per record); refuse without preempting a running job (FR-348/FR-350; closes the explicit-`registry_version`-honoring gap — NOT 015's SC-068, which kept batch-vs-`@serving` scoring correct). **Scope note (Codex):** this CANNOT be done in `batch_infer.py` alone — the engine endpoints accept no requested model/version and the only targeted reload (serving-LLM pointer) is refused once `_gpu_batch_active`. The substantive work is an **agent-side target-version load/assert seam** (host agent + engine wiring) called before scoring; `batch_infer.py` only drives it.
+- [ ] **T598** [US1] ASR batch (**corrected, Codex**): ASR is ALREADY rejected at submission — `hostagent/jobs.py` validates against `BATCH_MODALITIES` (which excludes `asr`); `GPU_BATCH_MODALITIES` (which lists `asr`) is only serving-holder protection, consulted *after* validation. So there is **no accepted-then-failed bug** to fix. This task is therefore net-new-only: **if** batched ASR is wanted, add `asr` to `BATCH_MODALITIES` + a real ASR path in `batch_infer.py`; **otherwise drop this task** — no action needed (FR-349/SC-176 revised accordingly, or descoped).
 - [ ] **T599** [HW] [US1] On the RTX 5070 Ti box: validate the load-under-lease leg — a batch for a non-resident version scores it correctly while preserving one-GPU-tenant (SC-175).
 
 **Checkpoint**: batch is correct for every admitted modality; ships as its own PR.
@@ -59,9 +59,9 @@ description: "Task list for feature 025 — close lifecycle gaps"
 - [ ] **T600** [P] [US2] Add `benchmarks/tabular/auc_smoke.jsonl` — a committed held-out tabular eval fixture.
 - [ ] **T601** [P] [US2] Write `tests/test_tabular_eval.py` — web-free: the AUC scorer + gate over the fixture (AUC promoted from stub to committed metric) (FR-352).
 - [ ] **T602** [US2] Add `training/scoring/tabular.py` — AUC scorer over the held-out fixture (pure-Python metric); wire into `training/scoring/__init__` score-at-registration (FR-352).
-- [ ] **T603** [US2] Add `training/flows/tabular_finetune.py` — CPU LightGBM fine-tune mirroring `vision_finetune.py`: train → register version with tabular task/engine tags + logged metric → failure cleanup (no partial version) (FR-351/FR-354); register in `flow_dispatch`.
+- [ ] **T603** [US2] Add `training/flows/tabular_finetune.py` — CPU LightGBM fine-tune mirroring `vision_finetune.py`: train → register version with tabular task/engine tags + logged metric → failure cleanup (no partial version) (FR-351/FR-354); register in `flow_dispatch`. **Scope note (Codex):** registering in `flow_dispatch` is NOT sufficient — `platformlib.topology.TRAINABLE_MODALITIES` excludes tabular and the `finetune` job kind is `gpu=True`, so admission work is needed to admit tabular training as **CPU/off-lease** (no GPU acquisition, FR-354). ALSO the tabular child serves the single configured `TABULAR_MODEL` name via `@serving`, so a version trained under any other output name won't be served — constrain/validate the output name to the served name (or add dynamic tabular serving-selection + reload) before claiming train→promote→serve parity.
 - [ ] **T604** [US2] Promote tabular AUC from stub to a committed metric in `gateway/app/evaluation.py` (METRICS + live serving predictor path) (FR-352).
-- [ ] **T605** [US2] Wire tabular into quality monitoring (`gateway/app/quality.py`) where a per-request label exists so it can drive breach→retrain; if excluded, document the rationale in the module + `current-architecture.md` (FR-353).
+- [ ] **T605** [US2] Wire tabular into quality monitoring (`gateway/app/quality.py`) where a per-request label exists so it can drive breach→retrain; if excluded, document the rationale in the module + `current-architecture.md` (FR-353). **Scope note (Codex):** editing `quality.py` alone is insufficient — the tabular `/predict` router never calls `quality.log_prediction`, returns no per-row prediction IDs, and the tabular child reports no registry version, so there are no version-scoped prediction rows for `quality.window()`. This task MUST also add the tabular serving/router **prediction-logging + identity contract** (per-row prediction IDs + the actually-served version) first.
 - [ ] **T606** [P] [US2] Write `tests/test_tabular_finetune.py` — seam-level (dispatch, register-with-metric, failure cleanup); full CPU run live-gated.
 - [ ] **T607** [US2] Confirm no heavy dependency entered the gateway/agent images and tabular holds no GPU lease (FR-354/FR-360).
 
@@ -71,7 +71,7 @@ description: "Task list for feature 025 — close lifecycle gaps"
 
 ## Phase 5: User Story 3 — Dataset byte-download in the console (Priority: P3)
 
-- [ ] **T608** [US3] Add a BFF-proxied/presigned dataset-byte download path (`gateway/app/routers/datasets.py` + `ui/app/data`) so an operator downloads bytes without object-store creds reaching the browser (FR-355/SC-179).
+- [ ] **T608** [US3] Add a BFF-proxied/presigned dataset-byte download path (`gateway/app/routers/datasets.py` + `ui/app/data`) so an operator downloads bytes without object-store creds reaching the browser (FR-355/SC-179). **Scope note (Codex):** MUST also add the exact download route to `ui/lib/gw-allowlist.ts` — the BFF rejects any unmatched route before injecting the key (current dataset entries allow only the manifest GET), so without the allowlist entry the browser gets a BFF 404 even when the gateway endpoint works.
 - [ ] **T609** [P] [US3] Test the download path (credential never in the browser payload; correct bytes/manifest).
 
 **Checkpoint**: data stage is fully operable from the console.
@@ -89,7 +89,7 @@ description: "Task list for feature 025 — close lifecycle gaps"
 
 ## Phase 7: User Story 5 — Live HPO progress (Priority: P4)
 
-- [ ] **T612** [US5] Surface live per-trial HPO progress (completed trials + objective values) in `ui/app/training` via an in-process progress stream — no external Optuna dashboard service (FR-357/SC-181).
+- [ ] **T612** [US5] Surface live per-trial HPO progress (completed trials + objective values) in `ui/app/training` (FR-357/SC-181). **Scope note (Codex):** there is no live trial state to read today — `run_study` keeps `trials_log` local and returns it only after `optimize` finishes; `JobManager` writes only the final summary. So this task MUST FIRST add a **backend progress sink** — an injected trial-completion callback exposed through the agent + gateway — and only then consume it from the console (still dependency-light; no external Optuna dashboard service).
 - [ ] **T613** [P] [US5] Test the progress surface (trials appear/update; dependency-light).
 
 **Checkpoint**: operators can watch a study run.
@@ -98,7 +98,7 @@ description: "Task list for feature 025 — close lifecycle gaps"
 
 ## Phase 8: User Story 6 — Shadow-replay console UI (Priority: P4)
 
-- [ ] **T614** [US6] Add a console surface (`ui/app/models`) to dispatch shadow-replay and read its advisory verdict via the existing `POST /models/{name}/shadow-replay` + verdict endpoints; mark verdicts clearly advisory/never-gating (FR-358/SC-182).
+- [ ] **T614** [US6] Add a console surface (`ui/app/models`) to dispatch shadow-replay and read its advisory verdict via the existing `POST /models/{name}/shadow-replay` + verdict endpoints; mark verdicts clearly advisory/never-gating (FR-358/SC-182). **Scope note (Codex):** MUST also add both `POST /models/{name}/shadow-replay` and `GET /models/{name}/shadow-replay/{id}` to `ui/lib/gw-allowlist.ts` — neither is currently allowlisted, so the BFF returns 404 before key injection; test through the real allowlist.
 - [ ] **T615** [P] [US6] Test the shadow-replay UI surface (dispatch calls the existing endpoint; verdict rendered as advisory).
 
 **Checkpoint**: the shadow-replay backend is now operator-reachable.

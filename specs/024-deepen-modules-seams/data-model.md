@@ -29,12 +29,15 @@ No relational import path is triggered by importing it, and vice-versa.
 `gateway/app/promotion.py` (web-free) exposes one entry point returning an explicit outcome.
 
 ```
-GoLiveOutcome (enum): REFUSED | CONFLICT | BLOCKED | PROMOTED | ERROR
+GoLiveOutcome (enum): NOT_FOUND | REFUSED | CONFLICT | BLOCKED | PROMOTED | ERROR
 
 GoLiveResult:
   outcome: GoLiveOutcome
   body: dict                 # the response payload the router returns as-is
-  metric_status: str         # the REGISTRY_OPS label ("refused"|"conflict"|"blocked"|"ok"|"unresolvable"|"error")
+  metric_statuses: list[str] # REGISTRY_OPS label(s) to emit, IN ORDER — usually one, but a
+                             #   PROMOTED-then-rolled-back activation emits ["ok", "unresolvable"]
+                             #   (a singular field would drop one of the two existing increments)
+                             #   values: not_found|refused|conflict|blocked|ok|unresolvable|error
 
 go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResult
 ```
@@ -49,11 +52,14 @@ go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResu
 
 | outcome | HTTP status | REGISTRY_OPS status label |
 |---|---|---|
+| NOT_FOUND | 404 | (none — preserves the current pre-metric 404 at `routers/models.py:105-106` for a missing version) |
 | REFUSED | 409 | `refused` |
 | CONFLICT | 409 | `conflict` |
 | BLOCKED | 200 (`promoted:false`) | `blocked` |
-| PROMOTED | 200 (`promoted:true`) | `ok` (+ `unresolvable` on rollback) |
+| PROMOTED | 200 (`promoted:true`) | `ok`, THEN `unresolvable` on rollback — **two** emits in order (not one) |
 | ERROR | 502 | `error` |
+
+**Not-found ordering**: version existence is checked first; a missing version ⇒ `NOT_FOUND` ⇒ 404 with **no** `REGISTRY_OPS` emit (matching today's route, which raises the 404 before any metric increment). The web-free use-case returns this outcome; it never raises an HTTP-specific exception.
 
 **Single-caller invariant**: `go_live()` is called **only** by the operator promote route. The scheduler
 and one-click policy paths keep calling `registry.promote` directly and cannot reach `go_live()`

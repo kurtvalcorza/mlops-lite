@@ -42,10 +42,13 @@ third, deliberately distinct fact.
 - **Rejected alternative — do NOT collapse the pointer into an MLflow alias.** It would lose
   cross-model selection and silently break base↔fine-tune switching. If someone proposes "just use an
   alias," this ADR is the answer.
-- **Module-locality follow-up (feature 024):** the `serving_llm` pointer wrappers currently live in
-  `gateway/app/registry.py` — the *MLflow adapter* — even though they are Postgres state. They should
-  be relocated into a dedicated relational repository as part of the 024 store decomposition / go-live
-  extraction (US1/US2), so the MLflow adapter stops carrying relational-store code.
+- **Module-locality follow-up (feature 024):** the `serving_llm` pointer **CRUD** primitives
+  (`get`/`set`/`restore`) currently live in `gateway/app/registry.py` — the *MLflow adapter* — even
+  though they are pure Postgres state. They should be relocated into a dedicated relational repository
+  as part of 024 (US1/US2). **`active_serving_llm_name` does NOT move into that repository**: it reads
+  the pointer AND resolves cross-authority (pointer-unset → `llmresolve.adopt_active_llm`, an MLflow
+  call, → configured default), so it stays a higher-level web-free selection policy — the relational
+  layer must not import MLflow.
 
 ## References
 

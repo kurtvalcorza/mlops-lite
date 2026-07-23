@@ -144,7 +144,7 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 **Cross-cutting constraints (all stories)**
 
 - **FR-342**: No new heavy dependency may be added to the gateway or agent images (no pandas/scipy/sklearn/Evidently).
-- **FR-343**: The fail-open posture on prediction/label/capture WRITES and the fail-loud posture on window/policy/job READS MUST be preserved.
+- **FR-343**: The exact failure postures MUST be preserved — **fail-open** (drop-counter) on background prediction/capture index WRITES; **fail-loud** (`QualityStoreError`→502) on operator-facing **label attach** AND on window/policy/job READS. (Correction: label attach is operator-facing and fail-loud — it MUST NOT be silently dropped; only background prediction/capture writes are fail-open.)
 - **FR-344**: Any external gateway/agent API or DB-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
 - **FR-345**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row changes.
 
@@ -167,7 +167,7 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 ### Measurable Outcomes
 
 - **SC-165**: After each candidate lands, the existing offline test suite passes unchanged — no test is deleted or weakened to make the refactor pass.
-- **SC-166**: The offline suite runs to green with neither `fastapi` nor `httpx` installed, and every newly extracted seam has at least one web-free unit test.
+- **SC-166**: Every newly extracted seam is **import-isolated** — it imports and unit-tests without constructing the FastAPI app or an HTTP client (verified by an isolated-import test), matching the web-free discipline of `activation.py`/`evaluation.py`. (Correction: the offline suite installs `-r gateway/requirements.txt`, so `fastapi`/`httpx` ARE present in it — the property is per-module import isolation, NOT a fastapi-free suite run.)
 - **SC-167**: The live ordering test(s) (e.g. `tests/test_promote_ordering.py`) pass on a brought-up stack (`make up`).
 - **SC-168**: `platformlib/store.py` retains no aggregate-specific SQL inline; each aggregate's queries live in its own repository module and the facade is import-only re-exports.
 - **SC-169**: The operator promote route handler contains no domain sequencing beyond outcome→HTTP/metric mapping (the ordering lives in the web-free use-case).
@@ -182,5 +182,5 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 - The three refactor candidates ship as **independent PRs** (each is independently testable and deployable), sequenced P1 → P2 → P3; US4 ADRs ship with the code they document.
 - ADRs live under `docs/adr/` (created if absent) as the reasonable default location.
 - "External API may change" is *permitted but rarely exercised*: each candidate prefers behavior preservation, and any intentional external-contract change is called out explicitly and gated by FR-344.
-- The git working branch is the existing `claude/codebase-architecture-improvements-udog5o`; the spec directory (`specs/024-deepen-modules-seams`, recorded in `.specify/feature.json`) is the source of truth for downstream `/speckit-plan` and `/speckit-tasks`, independent of the branch name.
+- The git working branch is the existing `claude/codebase-architecture-improvements-udog5o`; the spec directory `specs/024-deepen-modules-seams` is 024's source of truth. NOTE: `.specify/feature.json` is later repointed on this branch to `specs/025-close-lifecycle-gaps` (the newer in-flight feature), so downstream Spec-Kit commands select **025** by default — pass the 024 path explicitly when operating on this feature.
 - No behavioral change to the gate/shadow/activation decision logic, no new modalities/serving engines, and no retired-port/daemon resurrection (explicit non-goals).

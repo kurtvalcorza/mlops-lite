@@ -41,6 +41,6 @@ migration + contract update) and must be re-checked against the Constitution Che
 ## C4 — Cross-cutting
 
 - No new heavy dependency in the gateway or agent images (FR-342).
-- Fail-open on prediction/label/capture WRITES; fail-loud on window/policy/job READS (FR-343).
+- Fail-open (drop-counter) on background prediction/capture WRITES; **fail-loud** (`QualityStoreError`→502) on operator-facing label attach AND on window/policy/job READS (FR-343).
 - `docs/current-architecture.md` updated in the same increment if any Snapshot row changes (FR-345) — none
   expected, since topology/authority/trust-boundaries are unaffected by internal module moves.

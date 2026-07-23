@@ -26,7 +26,7 @@ unit test for every extracted seam plus the existing live ordering leg, so test 
 
 ## Phase 1: Setup (Shared)
 
-- [ ] **T558** Establish the green baseline: run `make test` and record that the offline suite passes **without** `fastapi`/`httpx` installed (the parity reference for SC-165/SC-166).
+- [ ] **T558** Establish the green baseline: run `make test` and record the current pass state as the parity reference for SC-165. (Correction: the offline suite installs `-r gateway/requirements.txt`, so `fastapi`/`httpx` ARE present — do NOT try to run it without them; SC-166 is a per-seam import-isolation test, not a fastapi-free suite run.)
 - [ ] **T559** [P] Create the ADR home `docs/adr/` with a short `docs/adr/README.md` (format: Context / Decision / Consequences; status values Accepted | Rejected).
 
 ---
@@ -91,7 +91,7 @@ mapping byte-identical (contracts/preservation.md §C2).
 - [ ] **T574** [US2] Create `gateway/app/promotion.py` (no `fastapi`/`httpx` import): `GoLiveOutcome` enum + `GoLiveResult` + `go_live(name, version, *, override, preempt, registry, activation)` encoding the ordering invariants.
 - [ ] **T575** [US2] Refactor `gateway/app/routers/models.py:promote` to call `promotion.go_live(...)` and map `GoLiveResult` → HTTP status + `REGISTRY_OPS` label; response contract unchanged (depends on T574).
 - [ ] **T576** [US2] Verify `gateway/app/scheduler.py` (`_default_promote`) and `routers/policies.py` still call `registry.promote` directly and cannot reach `go_live()` — the single-live-switch invariant (FR-336/FR-275/307/313, SC-170).
-- [ ] **T577** [US2] Relocate the serving-LLM **pointer** wrappers (`get_serving_llm`/`set_serving_llm`/`restore_serving_llm`/`active_serving_llm_name`, `gateway/app/registry.py:147-235`) out of the MLflow adapter into a dedicated relational repository (near the US1 store decomposition) — they are Postgres state, not MLflow state; call sites and the go-live capture/restore stay behavior-identical. Rationale recorded in `docs/adr/0005-serving-llm-pointer-not-mlflow-alias.md`.
+- [ ] **T577** [US2] Relocate ONLY the serving-LLM **pointer CRUD** primitives (`get_serving_llm`/`set_serving_llm`/`restore_serving_llm`, `gateway/app/registry.py`) into a dedicated relational repository — they are pure Postgres state. **Keep `active_serving_llm_name` OUT of the relational repository**: it reads the pointer AND calls `llmresolve.adopt_active_llm` (MLflow) for the pointer-unset adoption + configured-default fallback, so it stays a higher-level web-free selection policy — moving it into `storeimpl` would either drag MLflow into the relational layer or drop the adoption behavior (changing which LLM serves after upgrade). Call sites and go-live capture/restore stay behavior-identical. Rationale in `docs/adr/0005-serving-llm-pointer-not-mlflow-alias.md`.
 - [ ] **T578** [US2] Run offline suite + `test_promotion_gate.py`/`test_promotion_modes.py` unchanged (SC-165); run `test_promote_ordering.py` on `make up` (SC-167).
 
 **Checkpoint**: promote handler is translate→call→map only; US2 ships as its own PR.
