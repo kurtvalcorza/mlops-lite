@@ -89,6 +89,22 @@ The review produced decisions worth preserving — most importantly a *rejected*
 
 ---
 
+### User Story 5 - Close the behavior-preserving observability & doc gaps (Priority: P3)
+
+A full-loop review surfaced gaps that split by *nature*: most are net-new capability or behavior changes (batch correctness, tabular modality) and belong to a separate feature (025). But two are **behavior-preserving** and fit 024's testability/ground-truth charter: (a) the input-drift PSI math (`gateway/app/monitoring.py:psi`) has **no offline unit test** — its only coverage is the live `test_drift_loop.py`, which self-skips without a stack; (b) several docs/comments are stale — the README calls 023's on-hardware drills an unbuilt "tail" while `specs/023/tasks.md` marks them passing, and `gateway/app/evaluation.py` comments still say shadow-replay is "deferred" (it shipped as feature 016) and label WER/recall@k "guidance stubs" (their fixtures shipped in 015).
+
+**Why this priority**: Behavior-preserving and cheap, but genuinely improves testability and the accuracy of the ground-truth docs the platform relies on. Sequenced last (P3) so it never blocks US1–US3; it adds no production behavior change.
+
+**Independent Test**: `pytest tests/test_drift_psi.py` passes offline (no live stack), pinning the PSI math directly; and a reader of the README / `evaluation.py` / `current-architecture.md` finds no claim contradicted by `specs/*/tasks.md` or the shipped code.
+
+**Acceptance Scenarios**:
+
+1. **Given** the offline suite with no live stack, **When** it runs, **Then** a web-free unit test exercises `monitoring.psi` on known distributions (identical → ~0, shifted → expected bucketed PSI, empty/degenerate inputs handled) and passes.
+2. **Given** the stale doc comments, **When** a reader consults the README 023 status, `evaluation.py:17`, and the WER/recall@k metric docstrings, **Then** each matches the shipped reality (023 HW drills per `specs/023/tasks.md`; shadow-replay = feature 016; WER/recall@k fixtures shipped in 015).
+3. **Given** FR-017, **When** any doc-reconciliation touches a `docs/current-architecture.md` Snapshot row, **Then** that file is updated in the same increment.
+
+---
+
 ### Edge Cases
 
 - A store aggregate is referenced by a call site the facade did not re-export → caught by `test_store_facade.py` before merge; the facade surface must be extended, not the call site.
@@ -132,6 +148,11 @@ The review produced decisions worth preserving — most importantly a *rejected*
 - **FR-016**: Any external gateway/agent API or DB-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
 - **FR-017**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row changes.
 
+**Behavior-preserving gap closures (US5)**
+
+- **FR-018**: The input-drift PSI computation (`gateway/app/monitoring.py:psi`) MUST gain a web-free offline unit test that pins its math (identical distributions, shifted distributions, and degenerate/empty inputs) without a live stack.
+- **FR-019**: Stale docs/comments MUST be reconciled to shipped reality WITHOUT changing behavior: the README 023 on-hardware status (vs `specs/023/tasks.md`), the `evaluation.py` "shadow-replay deferred" comment (shipped as feature 016), and the WER/recall@k "guidance stub" docstrings (fixtures shipped in 015). Comment/doc edits only — no code path changes.
+
 ### Key Components *(architectural seams, not data entities)*
 
 - **Relational store facade** (`platformlib/store.py`): the thin re-export surface; owns no aggregate SQL after US1.
@@ -153,6 +174,8 @@ The review produced decisions worth preserving — most importantly a *rejected*
 - **SC-006**: The number of gated promotion choke-points remains exactly one; no new ungated go-live path exists, and only the operator route reaches the live-switch.
 - **SC-007**: Each agent handler is callable in a unit test without constructing the HTTP server or parsing a raw request path.
 - **SC-008**: An ADR exists for every accepted decision and every rejected alternative named in FR-013.
+- **SC-009**: `monitoring.psi` has a web-free offline unit test that passes with no live stack (drift math is no longer live-only).
+- **SC-010**: No doc/comment reconciled under FR-019 contradicts `specs/*/tasks.md` or the shipped code; no production code path changed to achieve it.
 
 ## Assumptions
 

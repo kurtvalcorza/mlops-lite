@@ -134,6 +134,22 @@ pass; agent imports with zero third-party packages.
 
 ---
 
+## Phase 6b: User Story 5 — Behavior-preserving gap closures (Priority: P3)
+
+**Goal**: give the input-drift PSI math a web-free offline test, and reconcile stale docs/comments to
+shipped reality — no production behavior change.
+
+**Independent Test**: `pytest tests/test_drift_psi.py` passes offline; no reconciled doc/comment
+contradicts `specs/*/tasks.md` or the shipped code.
+
+- [ ] T028a [P] [US5] Write `tests/test_drift_psi.py` — web-free unit test for `gateway/app/monitoring.py:psi` (identical distributions → ~0; shifted → expected bucketed PSI; empty/degenerate inputs handled), no live stack (FR-018/SC-009).
+- [ ] T028b [P] [US5] Reconcile the README 023 on-hardware status against `specs/023-platform-architecture-hardening/tasks.md` (drills marked passing on the RTX 5070 Ti) — comment/doc only, no code change (FR-019/SC-010).
+- [ ] T028c [P] [US5] Reconcile stale comments in `gateway/app/evaluation.py`: the `:17` "shadow-replay deferred" note (shipped as feature 016) and the WER/recall@k "guidance stub" docstrings (fixtures shipped in 015) — comment-only, no code-path change (FR-019/SC-010).
+
+**Checkpoint**: drift math is offline-tested and the ground-truth docs match reality; US5 ships as its own small PR.
+
+---
+
 ## Phase 7: Polish & Cross-Cutting
 
 - [ ] T029 [P] Review `docs/current-architecture.md` for Snapshot drift; update in-increment only if a row changed (FR-017 — none expected, since topology/authority/trust boundaries are untouched).
