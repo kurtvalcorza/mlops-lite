@@ -51,7 +51,7 @@ enforced structurally. This is recorded as ADR-002.
   the router requires fastapi/httpx); it would force those deps into the offline suite, breaking the
   dependency-light CI stance.
 - *Leave it router-resident, cover only via live tests* — rejected: the ordering invariants deserve fast,
-  isolated coverage; `tests/test_promote_ordering.py` (already on this branch) stays as the live leg (SC-003)
+  isolated coverage; `tests/test_promote_ordering.py` (already on this branch) stays as the live leg (SC-167)
   but is not a substitute for offline ordering tests.
 
 ## D3 — Agent dispatcher: stdlib route table, framework stays out
@@ -66,7 +66,7 @@ and handlers can only be tested through path parsing. A table isolates the match
 agent's stdlib-only, pip-dep-free transport is a deliberate, validated decision (the dual-runtime drill kept
 stdlib; `AGENT_RUNTIME`/`asgi.py` were deleted at 023 US6). The table is hand-rolled stdlib. Recorded as
 ADR-003. Lowest priority (P3) and sequenced last so it never blocks US1/US2; the public surface is
-byte-preserved (FR-012).
+byte-preserved (FR-340).
 
 ## D4 — ADR placement and format
 
@@ -85,5 +85,5 @@ decisions.md log (rejected — one-file-per-decision diffs cleaner and links fro
 seam has a web-free unit test, and (c) for US2, the live `test_promote_ordering.py` passes on `make up`.
 
 **Rationale**: For a refactor, "no behavior change" is the whole contract; test parity is how it is proven.
-No test may be weakened to make a refactor pass (SC-001). External-contract/schema changes are permitted
-but must be explicit and gated by FR-016 — none are anticipated.
+No test may be weakened to make a refactor pass (SC-165). External-contract/schema changes are permitted
+but must be explicit and gated by FR-344 — none are anticipated.

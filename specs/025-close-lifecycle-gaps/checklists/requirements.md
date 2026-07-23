@@ -36,4 +36,4 @@
   anchors to existing behavior/gaps, not prescribed implementation.
 - US3–US6 (previously-parked features) are lower priority and may phase into follow-on increments
   (026+) under Principle VII; the spec scopes them so they are tracked.
-- Items requiring the RTX 5070 Ti (SC-001 load-under-lease, any GPU SC) cannot be closed offline.
+- Items requiring the RTX 5070 Ti (SC-175 load-under-lease, any GPU SC) cannot be closed offline.

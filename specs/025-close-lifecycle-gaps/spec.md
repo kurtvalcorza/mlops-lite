@@ -126,29 +126,29 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 **Batch correctness (US1)**
 
-- **FR-001**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident (closes SC-068).
-- **FR-002**: Every modality admitted as a batch modality MUST have a working batch path; ASR MUST either gain a real batch path or be removed from the admitted set so it is rejected at submission, never accepted-then-failed at runtime.
-- **FR-003**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted.
+- **FR-348**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident (closes SC-068).
+- **FR-349**: Every modality admitted as a batch modality MUST have a working batch path; ASR MUST either gain a real batch path or be removed from the admitted set so it is rejected at submission, never accepted-then-failed at runtime.
+- **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted.
 
 **Tabular full modality (US2)**
 
-- **FR-004**: A tabular fine-tune flow MUST exist, registering a version with tabular task/engine tags and its logged eval metric, with failure cleanup (no partial version), mirroring the existing modality flows.
-- **FR-005**: A committed held-out tabular eval fixture + AUC scorer MUST exist so tabular promotion is gated on a real metric (AUC is no longer a stub).
-- **FR-006**: Tabular MUST be integrated into quality monitoring where a per-request ground-truth label is available, so it can drive the existing breach→retrain policy; any intentional exclusion MUST be documented with rationale.
-- **FR-007**: Tabular training MUST remain CPU/off-lease and add no heavy dependency beyond tabular serving's existing footprint (Principles II and III).
+- **FR-351**: A tabular fine-tune flow MUST exist, registering a version with tabular task/engine tags and its logged eval metric, with failure cleanup (no partial version), mirroring the existing modality flows.
+- **FR-352**: A committed held-out tabular eval fixture + AUC scorer MUST exist so tabular promotion is gated on a real metric (AUC is no longer a stub).
+- **FR-353**: Tabular MUST be integrated into quality monitoring where a per-request ground-truth label is available, so it can drive the existing breach→retrain policy; any intentional exclusion MUST be documented with rationale.
+- **FR-354**: Tabular training MUST remain CPU/off-lease and add no heavy dependency beyond tabular serving's existing footprint (Principles II and III).
 
 **Parked operator/data features (US3–US6)**
 
-- **FR-008**: The operator console MUST let an operator download a dataset version's bytes via the key-injecting BFF (presigned or proxied), with object-store credentials never reaching the browser (closes 021 FR-215).
-- **FR-009**: Predictions served over the SSE streaming path MUST be captured (prediction-log/capture rows) fail-open and off the response path, identifiable by prediction id, matching the non-streamed contract — so streamed predictions can be labeled and enter quality/shadow.
-- **FR-010**: The console MUST surface live per-trial HPO progress (completed trials + objective values, updating live) within the dependency-light, single-machine constraints (no external dashboard service).
-- **FR-011**: The console MUST let an operator dispatch shadow-replay and read its advisory verdict using the existing backend endpoints, with verdicts clearly marked advisory (never gating).
+- **FR-355**: The operator console MUST let an operator download a dataset version's bytes via the key-injecting BFF (presigned or proxied), with object-store credentials never reaching the browser (closes 021 FR-215).
+- **FR-356**: Predictions served over the SSE streaming path MUST be captured (prediction-log/capture rows) fail-open and off the response path, identifiable by prediction id, matching the non-streamed contract — so streamed predictions can be labeled and enter quality/shadow.
+- **FR-357**: The console MUST surface live per-trial HPO progress (completed trials + objective values, updating live) within the dependency-light, single-machine constraints (no external dashboard service).
+- **FR-358**: The console MUST let an operator dispatch shadow-replay and read its advisory verdict using the existing backend endpoints, with verdicts clearly marked advisory (never gating).
 
 **Cross-cutting**
 
-- **FR-012**: Any persisted-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
-- **FR-013**: No change may add a heavy dependency to the gateway or agent images, or introduce a second concurrent GPU tenant.
-- **FR-014**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row (topology, data authority, invariants) changes.
+- **FR-359**: Any persisted-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
+- **FR-360**: No change may add a heavy dependency to the gateway or agent images, or introduce a second concurrent GPU tenant.
+- **FR-361**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row (topology, data authority, invariants) changes.
 
 ### Key Entities *(capability surfaces, not new data model unless noted)*
 
@@ -160,20 +160,20 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 ### Measurable Outcomes
 
-- **SC-001**: A batch for a non-resident version scores that exact version (or refuses) — never the resident one — proven offline for the ordering and on hardware for the load-under-lease leg (SC-068 closed).
-- **SC-002**: An ASR batch job completes successfully, OR ASR batch submissions are rejected at submission time; no admitted batch modality raises at runtime.
-- **SC-003**: A tabular dataset can be fine-tuned → registered-with-metric → gate-compared on a committed AUC fixture → promoted → served, with no GPU lease held and no new heavy dependency.
-- **SC-004**: Tabular predictions with labels produce a quality window that can trip the existing breach→retrain policy (or the exclusion is documented).
-- **SC-005**: An operator downloads dataset bytes from the console with no object-store credential reaching the browser.
-- **SC-006**: A streamed LLM prediction yields the same log/capture rows as a non-streamed one and can be labeled.
-- **SC-007**: A running HPO study's trials are visible live in the console with no external dashboard service added.
-- **SC-008**: An operator dispatches shadow-replay and reads its advisory verdict entirely from the console.
-- **SC-009**: The existing offline suite stays green throughout; every new capability adds tests (web-free where the logic is web-free), and no on-GPU behavior violates the one-tenant lease.
+- **SC-175**: A batch for a non-resident version scores that exact version (or refuses) — never the resident one — proven offline for the ordering and on hardware for the load-under-lease leg (SC-068 closed).
+- **SC-176**: An ASR batch job completes successfully, OR ASR batch submissions are rejected at submission time; no admitted batch modality raises at runtime.
+- **SC-177**: A tabular dataset can be fine-tuned → registered-with-metric → gate-compared on a committed AUC fixture → promoted → served, with no GPU lease held and no new heavy dependency.
+- **SC-178**: Tabular predictions with labels produce a quality window that can trip the existing breach→retrain policy (or the exclusion is documented).
+- **SC-179**: An operator downloads dataset bytes from the console with no object-store credential reaching the browser.
+- **SC-180**: A streamed LLM prediction yields the same log/capture rows as a non-streamed one and can be labeled.
+- **SC-181**: A running HPO study's trials are visible live in the console with no external dashboard service added.
+- **SC-182**: An operator dispatches shadow-replay and reads its advisory verdict entirely from the console.
+- **SC-183**: The existing offline suite stays green throughout; every new capability adds tests (web-free where the logic is web-free), and no on-GPU behavior violates the one-tenant lease.
 
 ## Assumptions
 
 - **US1 and US2 are the committed core** (P1/P2); **US3–US6 (the parked features) are lower priority and expected to phase into follow-on increments (026+)** under Principle VII — 025's spec scopes them so they are tracked, not lost. If any US3–US6 story proves larger than a slice, it spins into its own feature rather than bloating 025.
-- Behavior change is expected and permitted here (unlike 024); each change is explicit, and any external-contract/schema change is gated by FR-012.
-- On-hardware validation (the RTX 5070 Ti box) is required to close SC-001's load-under-lease leg and any GPU-touching SC — those cannot be closed from the offline environment alone (constitution "gate zero").
+- Behavior change is expected and permitted here (unlike 024); each change is explicit, and any external-contract/schema change is gated by FR-359.
+- On-hardware validation (the RTX 5070 Ti box) is required to close SC-175's load-under-lease leg and any GPU-touching SC — those cannot be closed from the offline environment alone (constitution "gate zero").
 - The git working branch is the designated feature branch; the spec directory (`specs/025-close-lifecycle-gaps`) is the source of truth for downstream `/speckit-plan` and `/speckit-tasks`.
 - No change drops or bypasses an existing lifecycle stage, resurrects a retired port/daemon, or weakens the single gated promotion choke-point.

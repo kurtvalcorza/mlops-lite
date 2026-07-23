@@ -21,11 +21,11 @@ passes on a brought-up stack.
 **Language/Version**: Python 3.11 (gateway, host agent, platformlib); no new language.
 
 **Primary Dependencies**: unchanged. Gateway keeps FastAPI/httpx/pydantic; host agent stays **stdlib-only**;
-`platformlib` stays importable with boto3/psycopg lazily imported. **No new dependency is added** (FR-014).
+`platformlib` stays importable with boto3/psycopg lazily imported. **No new dependency is added** (FR-342).
 
 **Storage**: Postgres `gateway` DB (relational store) + Garage S3 (object store), both already present.
 No schema change is planned; if one becomes genuinely necessary it lands as a NEW numbered
-`platformlib/migrations/*.sql` (FR-016).
+`platformlib/migrations/*.sql` (FR-344).
 
 **Testing**: pytest offline suite (no fastapi/httpx installed — the dependency line this feature respects),
 `test_*.py` house pattern with in-memory fakes (`tests/_activation.py` style); live legs gated by
@@ -39,8 +39,8 @@ No schema change is planned; if one becomes genuinely necessary it lands as a NE
 cost (drivers stay lazy) or extra queries (the predictions⋈labels window join is preserved).
 
 **Constraints**: dependency-light (Principle III); stdlib-only agent; fail-open on prediction/label/capture
-WRITES and fail-loud on window/policy/job READS preserved (FR-015); public agent surface byte-preserved
-(FR-012); exactly one gated promotion choke-point and one live-switch caller (FR-008/SC-006).
+WRITES and fail-loud on window/policy/job READS preserved (FR-343); public agent surface byte-preserved
+(FR-340); exactly one gated promotion choke-point and one live-switch caller (FR-336/SC-170).
 
 **Scale/Scope**: ~28 `from platformlib import store` call sites (must stay unchanged); `store.py` ~630 LOC →
 facade; 6 relational aggregates to home; 1 router handler (~48 LOC) to thin; ~220 LOC of agent dispatch to
@@ -53,15 +53,15 @@ table-ize; ~4–6 ADRs.
 | Principle | Verdict | Notes |
 |---|---|---|
 | I. Local-First, Single-Machine | ✅ Pass | No new service, no cloud, no network surface. |
-| II. Single-GPU, On-Demand (NON-NEGOTIABLE) | ✅ Pass / reinforced | No admission or serving change. FR-008 keeps the LLM live-switch to a single caller — it *hardens* the one-tenant/one-go-live-path invariant (FR-275/307/313). |
-| III. Lightweight Footprint | ✅ Pass / reinforced | FR-014 forbids new heavy deps; drivers stay lazy so idle import cost is unchanged. |
+| II. Single-GPU, On-Demand (NON-NEGOTIABLE) | ✅ Pass / reinforced | No admission or serving change. FR-336 keeps the LLM live-switch to a single caller — it *hardens* the one-tenant/one-go-live-path invariant (FR-275/307/313). |
+| III. Lightweight Footprint | ✅ Pass / reinforced | FR-342 forbids new heavy deps; drivers stay lazy so idle import cost is unchanged. |
 | IV. Full Lifecycle Coverage | ✅ Pass | No lifecycle stage added or dropped. |
 | V. Open-Source & Swappable | ✅ Pass / reinforced | Extractions sharpen the interfaces (repository per aggregate; go-live use-case behind an outcome enum) — more swappable, not less. |
-| VI. Reproducibility & Observability | ✅ Pass | `REGISTRY_OPS` labels and health/metrics surfaces preserved byte-for-byte (FR-007/FR-012). |
+| VI. Reproducibility & Observability | ✅ Pass | `REGISTRY_OPS` labels and health/metrics surfaces preserved byte-for-byte (FR-335/FR-340). |
 | VII. Incremental, Phase-Gated | ✅ Pass | Three independently-testable/deployable PRs, sequenced P1→P2→P3; ADRs ship with their code. |
 
 **Result**: no violations; Complexity Tracking not required. Any external-contract or schema change that
-surfaces during implementation is an explicit, called-out deviation gated by FR-016 and must be re-checked
+surfaces during implementation is an explicit, called-out deviation gated by FR-344 and must be re-checked
 here before it lands.
 
 ## Project Structure
@@ -111,7 +111,7 @@ tests/
 ├── test_store_facade.py         # existing: pins the re-export surface (US1 guard)
 ├── test_store_decomposition.py  # US1: NEW — each aggregate repository, web-free
 ├── test_promotion_ordering.py   # US2: NEW — go-live outcomes + refuse-before-alias, web-free
-├── test_promote_ordering.py     # existing (this branch): live ordering leg (SC-003)
+├── test_promote_ordering.py     # existing (this branch): live ordering leg (SC-167)
 └── test_agent_routes.py         # US3: NEW — handlers callable without the HTTP server
 ```
 

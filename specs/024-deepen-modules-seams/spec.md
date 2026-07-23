@@ -101,7 +101,7 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 
 1. **Given** the offline suite with no live stack, **When** it runs, **Then** a web-free unit test exercises `monitoring.psi` on known distributions (identical → ~0, shifted → expected bucketed PSI, empty/degenerate inputs handled) and passes.
 2. **Given** the stale doc comments, **When** a reader consults the README 023 status, `evaluation.py:17`, and the WER/recall@k metric docstrings, **Then** each matches the shipped reality (023 HW drills per `specs/023/tasks.md`; shadow-replay = feature 016; WER/recall@k fixtures shipped in 015).
-3. **Given** FR-017, **When** any doc-reconciliation touches a `docs/current-architecture.md` Snapshot row, **Then** that file is updated in the same increment.
+3. **Given** FR-345, **When** any doc-reconciliation touches a `docs/current-architecture.md` Snapshot row, **Then** that file is updated in the same increment.
 
 ---
 
@@ -118,40 +118,40 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 
 **Store decomposition (US1)**
 
-- **FR-001**: The relational store MUST be decomposed so each aggregate (predictions, labels, capture index, jobs, policies, suggestions) owns a repository module under `platformlib/storeimpl/`, with `platformlib/store.py` reduced to a thin facade.
-- **FR-002**: The S3 object-store access MUST be separated from the relational store into its own module.
-- **FR-003**: Every existing `from platformlib import store` call site MUST keep working unchanged; the re-export facade surface pinned by `tests/test_store_facade.py` MUST NOT regress.
-- **FR-004**: Both drivers (boto3, psycopg) MUST remain lazily imported so the module stays importable in stdlib-only contexts.
+- **FR-329**: The relational store MUST be decomposed so each aggregate (predictions, labels, capture index, jobs, policies, suggestions) owns a repository module under `platformlib/storeimpl/`, with `platformlib/store.py` reduced to a thin facade.
+- **FR-330**: The S3 object-store access MUST be separated from the relational store into its own module.
+- **FR-331**: Every existing `from platformlib import store` call site MUST keep working unchanged; the re-export facade surface pinned by `tests/test_store_facade.py` MUST NOT regress.
+- **FR-332**: Both drivers (boto3, psycopg) MUST remain lazily imported so the module stays importable in stdlib-only contexts.
 
 **Go-live ordering extraction (US2)**
 
-- **FR-005**: The LLM go-live ordering MUST be extracted into a web-free module (no `fastapi`/`httpx` import) exposing a callable that returns an explicit outcome result object.
-- **FR-006**: The ordering invariants MUST be preserved — refuse an unresolvable target before the alias moves (FR-265); capture the prior serving pointer before it is overwritten.
-- **FR-007**: The operator promote route MUST become a thin adapter that maps the outcome to HTTP status + the existing `REGISTRY_OPS` metric labels, with no change to the response contract.
-- **FR-008**: The go-live use-case MUST remain reachable ONLY from the operator promote route; the scheduler and one-click policy paths MUST continue to call the gated promote choke-point directly and remain unable to live-switch the served LLM (FR-275/307/313).
-- **FR-009**: The extracted ordering MUST have web-free unit tests covering each outcome and the refuse-before-alias-moves ordering.
+- **FR-333**: The LLM go-live ordering MUST be extracted into a web-free module (no `fastapi`/`httpx` import) exposing a callable that returns an explicit outcome result object.
+- **FR-334**: The ordering invariants MUST be preserved — refuse an unresolvable target before the alias moves (FR-265); capture the prior serving pointer before it is overwritten.
+- **FR-335**: The operator promote route MUST become a thin adapter that maps the outcome to HTTP status + the existing `REGISTRY_OPS` metric labels, with no change to the response contract.
+- **FR-336**: The go-live use-case MUST remain reachable ONLY from the operator promote route; the scheduler and one-click policy paths MUST continue to call the gated promote choke-point directly and remain unable to live-switch the served LLM (FR-275/307/313).
+- **FR-337**: The extracted ordering MUST have web-free unit tests covering each outcome and the refuse-before-alias-moves ordering.
 
 **Agent dispatcher route-table (US3)**
 
-- **FR-010**: The agent's GET/POST dispatch MUST be refactored into an ordered route table separating path matching from handler bodies, with each handler independently testable.
-- **FR-011**: The agent MUST remain pip-dependency-free (stdlib-only transport).
-- **FR-012**: The public agent surface MUST be byte-preserved — the open probes stay open, `control/*` stays secret-gated, and the byte-compatible legacy paths still resolve.
+- **FR-338**: The agent's GET/POST dispatch MUST be refactored into an ordered route table separating path matching from handler bodies, with each handler independently testable.
+- **FR-339**: The agent MUST remain pip-dependency-free (stdlib-only transport).
+- **FR-340**: The public agent surface MUST be byte-preserved — the open probes stay open, `control/*` stays secret-gated, and the byte-compatible legacy paths still resolve.
 
 **Decision records (US4)**
 
-- **FR-013**: Each accepted decision AND each rejected alternative MUST be recorded as an ADR, including the rejection of merging the go-live paths (endangers FR-275), the decision to keep the agent framework-free, and the decision that the platform serving-LLM selection is a Postgres pointer rather than an MLflow `@serving` alias (with "collapse it into an alias" recorded as the rejected alternative).
+- **FR-341**: Each accepted decision AND each rejected alternative MUST be recorded as an ADR, including the rejection of merging the go-live paths (endangers FR-275), the decision to keep the agent framework-free, and the decision that the platform serving-LLM selection is a Postgres pointer rather than an MLflow `@serving` alias (with "collapse it into an alias" recorded as the rejected alternative).
 
 **Cross-cutting constraints (all stories)**
 
-- **FR-014**: No new heavy dependency may be added to the gateway or agent images (no pandas/scipy/sklearn/Evidently).
-- **FR-015**: The fail-open posture on prediction/label/capture WRITES and the fail-loud posture on window/policy/job READS MUST be preserved.
-- **FR-016**: Any external gateway/agent API or DB-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
-- **FR-017**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row changes.
+- **FR-342**: No new heavy dependency may be added to the gateway or agent images (no pandas/scipy/sklearn/Evidently).
+- **FR-343**: The fail-open posture on prediction/label/capture WRITES and the fail-loud posture on window/policy/job READS MUST be preserved.
+- **FR-344**: Any external gateway/agent API or DB-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
+- **FR-345**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row changes.
 
 **Behavior-preserving gap closures (US5)**
 
-- **FR-018**: The input-drift PSI computation (`gateway/app/monitoring.py:psi`) MUST gain a web-free offline unit test that pins its math (identical distributions, shifted distributions, and degenerate/empty inputs) without a live stack.
-- **FR-019**: Stale docs/comments MUST be reconciled to shipped reality WITHOUT changing behavior: the README 023 on-hardware status (vs `specs/023/tasks.md`), the `evaluation.py` "shadow-replay deferred" comment (shipped as feature 016), and the WER/recall@k "guidance stub" docstrings (fixtures shipped in 015). Comment/doc edits only — no code path changes.
+- **FR-346**: The input-drift PSI computation (`gateway/app/monitoring.py:psi`) MUST gain a web-free offline unit test that pins its math (identical distributions, shifted distributions, and degenerate/empty inputs) without a live stack.
+- **FR-347**: Stale docs/comments MUST be reconciled to shipped reality WITHOUT changing behavior: the README 023 on-hardware status (vs `specs/023/tasks.md`), the `evaluation.py` "shadow-replay deferred" comment (shipped as feature 016), and the WER/recall@k "guidance stub" docstrings (fixtures shipped in 015). Comment/doc edits only — no code path changes.
 
 ### Key Components *(architectural seams, not data entities)*
 
@@ -166,21 +166,21 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 
 ### Measurable Outcomes
 
-- **SC-001**: After each candidate lands, the existing offline test suite passes unchanged — no test is deleted or weakened to make the refactor pass.
-- **SC-002**: The offline suite runs to green with neither `fastapi` nor `httpx` installed, and every newly extracted seam has at least one web-free unit test.
-- **SC-003**: The live ordering test(s) (e.g. `tests/test_promote_ordering.py`) pass on a brought-up stack (`make up`).
-- **SC-004**: `platformlib/store.py` retains no aggregate-specific SQL inline; each aggregate's queries live in its own repository module and the facade is import-only re-exports.
-- **SC-005**: The operator promote route handler contains no domain sequencing beyond outcome→HTTP/metric mapping (the ordering lives in the web-free use-case).
-- **SC-006**: The number of gated promotion choke-points remains exactly one; no new ungated go-live path exists, and only the operator route reaches the live-switch.
-- **SC-007**: Each agent handler is callable in a unit test without constructing the HTTP server or parsing a raw request path.
-- **SC-008**: An ADR exists for every accepted decision and every rejected alternative named in FR-013.
-- **SC-009**: `monitoring.psi` has a web-free offline unit test that passes with no live stack (drift math is no longer live-only).
-- **SC-010**: No doc/comment reconciled under FR-019 contradicts `specs/*/tasks.md` or the shipped code; no production code path changed to achieve it.
+- **SC-165**: After each candidate lands, the existing offline test suite passes unchanged — no test is deleted or weakened to make the refactor pass.
+- **SC-166**: The offline suite runs to green with neither `fastapi` nor `httpx` installed, and every newly extracted seam has at least one web-free unit test.
+- **SC-167**: The live ordering test(s) (e.g. `tests/test_promote_ordering.py`) pass on a brought-up stack (`make up`).
+- **SC-168**: `platformlib/store.py` retains no aggregate-specific SQL inline; each aggregate's queries live in its own repository module and the facade is import-only re-exports.
+- **SC-169**: The operator promote route handler contains no domain sequencing beyond outcome→HTTP/metric mapping (the ordering lives in the web-free use-case).
+- **SC-170**: The number of gated promotion choke-points remains exactly one; no new ungated go-live path exists, and only the operator route reaches the live-switch.
+- **SC-171**: Each agent handler is callable in a unit test without constructing the HTTP server or parsing a raw request path.
+- **SC-172**: An ADR exists for every accepted decision and every rejected alternative named in FR-341.
+- **SC-173**: `monitoring.psi` has a web-free offline unit test that passes with no live stack (drift math is no longer live-only).
+- **SC-174**: No doc/comment reconciled under FR-347 contradicts `specs/*/tasks.md` or the shipped code; no production code path changed to achieve it.
 
 ## Assumptions
 
 - The three refactor candidates ship as **independent PRs** (each is independently testable and deployable), sequenced P1 → P2 → P3; US4 ADRs ship with the code they document.
 - ADRs live under `docs/adr/` (created if absent) as the reasonable default location.
-- "External API may change" is *permitted but rarely exercised*: each candidate prefers behavior preservation, and any intentional external-contract change is called out explicitly and gated by FR-016.
+- "External API may change" is *permitted but rarely exercised*: each candidate prefers behavior preservation, and any intentional external-contract change is called out explicitly and gated by FR-344.
 - The git working branch is the existing `claude/codebase-architecture-improvements-udog5o`; the spec directory (`specs/024-deepen-modules-seams`, recorded in `.specify/feature.json`) is the source of truth for downstream `/speckit-plan` and `/speckit-tasks`, independent of the branch name.
 - No behavioral change to the gate/shadow/activation decision logic, no new modalities/serving engines, and no retired-port/daemon resurrection (explicit non-goals).

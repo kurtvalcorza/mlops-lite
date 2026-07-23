@@ -12,9 +12,9 @@ Close the real gaps found in the full-loop review. Unlike 024 (behavior-preservi
 
 **Language/Version**: Python 3.11 (gateway/agent/training/platformlib); TypeScript/Next.js for `ui/` (console-only, per constitution).
 
-**Primary Dependencies**: unchanged where possible. Tabular training reuses the LightGBM already present for tabular serving; AUC stays pure-Python. **No heavy dependency added** (FR-013). HPO progress must avoid an external Optuna dashboard service.
+**Primary Dependencies**: unchanged where possible. Tabular training reuses the LightGBM already present for tabular serving; AUC stays pure-Python. **No heavy dependency added** (FR-360). HPO progress must avoid an external Optuna dashboard service.
 
-**Storage**: Postgres `gateway` DB + Garage S3, both present. No schema change is anticipated; tabular quality reuses existing `predictions`/`labels`/`capture` tables and streamed capture reuses the existing capture path. Any genuinely-needed change lands as a NEW numbered `platformlib/migrations/*.sql` (FR-012).
+**Storage**: Postgres `gateway` DB + Garage S3, both present. No schema change is anticipated; tabular quality reuses existing `predictions`/`labels`/`capture` tables and streamed capture reuses the existing capture path. Any genuinely-needed change lands as a NEW numbered `platformlib/migrations/*.sql` (FR-359).
 
 **Testing**: pytest offline suite (web-free where logic is web-free) + live/HW-gated legs via `conftest` guards. Batch load-under-lease and any GPU path are `[HW]` SCs (constitution gate zero).
 
@@ -35,8 +35,8 @@ Close the real gaps found in the full-loop review. Unlike 024 (behavior-preservi
 | Principle | Verdict | Notes |
 |---|---|---|
 | I. Local-First, Single-Machine | ✅ Pass | No cloud/cluster; all changes local. |
-| II. Single-GPU, On-Demand (NON-NEGOTIABLE) | ✅ Pass (requires HW validation) | US1 batch load goes through admission; jobs stay non-preemptable. The load-under-lease leg MUST be validated on the GPU box (SC-001). Tabular is CPU/off-lease. |
-| III. Lightweight Footprint | ✅ Pass | No heavy dep added; tabular reuses LightGBM; HPO progress avoids an external dashboard service (FR-013). |
+| II. Single-GPU, On-Demand (NON-NEGOTIABLE) | ✅ Pass (requires HW validation) | US1 batch load goes through admission; jobs stay non-preemptable. The load-under-lease leg MUST be validated on the GPU box (SC-175). Tabular is CPU/off-lease. |
+| III. Lightweight Footprint | ✅ Pass | No heavy dep added; tabular reuses LightGBM; HPO progress avoids an external dashboard service (FR-360). |
 | IV. Full Lifecycle Coverage | ✅ Pass / advances | US2 makes tabular a *full* modality (train→gate→serve→monitor), extending coverage rather than dropping a stage. |
 | V. Open-Source & Swappable | ✅ Pass | Tabular metric/scorer behind the existing metric interface. |
 | VI. Reproducibility & Observability | ✅ Pass | Tabular versions tracked with logged metric; streamed predictions become observable (US4). |
@@ -93,7 +93,7 @@ tests/
 Key decisions to confirm during implementation: (a) US1 — prefer *load-and-assert the requested version under admission* over *refuse*, but refuse cleanly if a job holds the GPU (never preempt); decide ASR-batch *add* vs *remove* by whether an ASR batch path is genuinely wanted. (b) US2 — tabular training library = the LightGBM already shipped for serving; AUC stays pure-Python; decide the tabular quality label source (and document any exclusion). (c) US4 — reuse the existing fail-open capture seam so the streamed path matches the non-streamed contract exactly. (d) US5 — an in-process progress stream, no external Optuna dashboard.
 
 ### Phase 1 — Contracts and models
-- No new persisted entities expected; if tabular quality needs a column, it is a NEW numbered migration (FR-012).
+- No new persisted entities expected; if tabular quality needs a column, it is a NEW numbered migration (FR-359).
 - Contract updates only where an endpoint is added (dataset download, HPO progress stream, shadow-replay is already contracted).
 
 ### Phase 2 — Tasks

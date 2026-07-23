@@ -67,6 +67,6 @@ service against the ~3 GB idle budget.
 
 ## D8 — On-hardware validation
 
-**Decision**: US1's load-under-lease leg (SC-001) and any GPU-touching SC are validated on the RTX 5070
+**Decision**: US1's load-under-lease leg (SC-175) and any GPU-touching SC are validated on the RTX 5070
 Ti box (constitution gate zero); they are `[HW]` tasks, marked done only after real validation — not
 closable from the offline environment.

@@ -9,6 +9,11 @@ ordering legs are covered off-HTTP already: `assert_no_conflict` ordering in tes
 the gate's block/warn/pass matrix in test_promotion_gate.py.
 
 Requires the stack up (`make up` / serve_up.ps1); conftest's live guard skips it offline.
+
+Note (on-HW operator): each run registers a fresh `promote-order-adapter` version and does not
+delete it, so repeated live runs accumulate junk versions in the registry. This is expected for a
+smoke test — prune them out-of-band (or set `PROMOTE_ORDER_MODEL` to an isolated throwaway name) if
+the accumulation is a concern.
 """
 import json
 import os

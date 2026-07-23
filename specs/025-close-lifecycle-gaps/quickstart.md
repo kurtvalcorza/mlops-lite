@@ -10,7 +10,7 @@ regressed." Offline where the logic is web-free; on the RTX 5070 Ti for the GPU-
 - For US1's load-under-lease leg and any GPU SC: the stack up on the target GPU box (`make up`).
 - Tabular (US2) is CPU/off-lease — no GPU needed.
 
-## 1. Nothing regressed (SC-009)
+## 1. Nothing regressed (SC-183)
 
 ```bash
 make lint test spec-check
@@ -18,7 +18,7 @@ make lint test spec-check
 
 Expected: green, unchanged; no existing test weakened.
 
-## 2. Batch correctness (US1 → SC-001/SC-002)
+## 2. Batch correctness (US1 → SC-175/SC-176)
 
 ```bash
 pytest -q tests/test_batch_version_assert.py
@@ -29,11 +29,11 @@ Expected (offline, injected predict_fn + fake admission): a batch requesting ver
 batch either completes or is rejected at submission (no runtime raise).
 
 ```bash
-# on the RTX 5070 Ti (SC-001):
+# on the RTX 5070 Ti (SC-175):
 make up && <launch a batch for a non-resident version>   # scores that version under the single lease
 ```
 
-## 3. Tabular full modality (US2 → SC-003/SC-004)
+## 3. Tabular full modality (US2 → SC-177/SC-178)
 
 ```bash
 pytest -q tests/test_tabular_eval.py tests/test_tabular_finetune.py
@@ -44,7 +44,7 @@ Expected (CPU, web-free/seam-level): AUC scorer + gate run over `benchmarks/tabu
 up on failure. End-to-end train→gate→promote→serve runs CPU/off-lease with no new heavy dependency; a
 tabular quality window is scorable where labels exist.
 
-## 4. Parked features (US3–US6 → SC-005..SC-008)
+## 4. Parked features (US3–US6 → SC-179..SC-182)
 
 ```bash
 pytest -q tests/test_stream_capture.py          # US4: streamed prediction yields the same log/capture rows

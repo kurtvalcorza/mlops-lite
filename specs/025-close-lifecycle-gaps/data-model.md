@@ -1,7 +1,7 @@
 # Phase 1 Data Model — Close Lifecycle Gaps
 
 This feature is mostly capability/fix over existing data. **No new persisted table is anticipated**; any
-genuinely-needed change lands as a NEW numbered `platformlib/migrations/*.sql` (FR-012). The "model" here
+genuinely-needed change lands as a NEW numbered `platformlib/migrations/*.sql` (FR-359). The "model" here
 is the reused/extended surfaces.
 
 ## Reused persisted state (no schema change expected)

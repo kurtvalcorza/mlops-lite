@@ -1,6 +1,6 @@
 # Phase 1 Data Model — Seams & Interfaces
 
-This is a refactor: there is **no new persisted data model** and no schema change (FR-016 would gate one if
+This is a refactor: there is **no new persisted data model** and no schema change (FR-344 would gate one if
 it appeared). The "model" here is the set of code seams the extractions introduce.
 
 ## Relational store seams (US1)
@@ -57,7 +57,7 @@ go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResu
 
 **Single-caller invariant**: `go_live()` is called **only** by the operator promote route. The scheduler
 and one-click policy paths keep calling `registry.promote` directly and cannot reach `go_live()`
-(FR-008 / SC-006).
+(FR-336 / SC-170).
 
 ## Agent route-table seam (US3)
 

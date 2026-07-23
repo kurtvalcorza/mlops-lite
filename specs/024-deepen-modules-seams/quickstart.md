@@ -10,7 +10,7 @@ lives here — see tasks.md (after `/speckit-tasks`) for the work items.
 - **Offline suite has no `fastapi`/`httpx`** — that is intentional and is the property US2 relies on.
 - For the live leg only: the stack up (`make up`) with a gateway API key.
 
-## 1. Offline suite stays green (SC-001, SC-002)
+## 1. Offline suite stays green (SC-165, SC-166)
 
 ```bash
 make test            # or: pytest -q
@@ -52,7 +52,7 @@ Expected: each handler is callable without constructing the HTTP server; the pub
 probes, keyed `/health`, secret-gated `/control/*`, legacy aliases) is byte-preserved; agent imports with no
 third-party package.
 
-## 5. Live ordering leg (SC-003)
+## 5. Live ordering leg (SC-167)
 
 ```bash
 make up
@@ -62,7 +62,7 @@ pytest -q tests/test_promote_ordering.py     # skips cleanly if the stack is dow
 Expected: on a brought-up stack, an unresolvable text-generation adapter is refused (409) and the `@serving`
 pointer is unchanged before/after — the ordering invariant holds end-to-end.
 
-## 6. Decisions recorded (US4 → SC-008)
+## 6. Decisions recorded (US4 → SC-172)
 
 ```bash
 ls docs/adr/

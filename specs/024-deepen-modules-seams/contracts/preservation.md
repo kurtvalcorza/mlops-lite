@@ -1,7 +1,7 @@
 # Contracts — Surfaces That MUST NOT Regress
 
 This feature is behavior-preserving. The "contracts" here are the existing surfaces each candidate must keep
-byte-stable. Any intentional deviation is an explicit, called-out change gated by FR-016 (new numbered
+byte-stable. Any intentional deviation is an explicit, called-out change gated by FR-344 (new numbered
 migration + contract update) and must be re-checked against the Constitution Check in plan.md.
 
 ## C1 — Store facade surface (US1)
@@ -40,7 +40,7 @@ migration + contract update) and must be re-checked against the Constitution Che
 
 ## C4 — Cross-cutting
 
-- No new heavy dependency in the gateway or agent images (FR-014).
-- Fail-open on prediction/label/capture WRITES; fail-loud on window/policy/job READS (FR-015).
-- `docs/current-architecture.md` updated in the same increment if any Snapshot row changes (FR-017) — none
+- No new heavy dependency in the gateway or agent images (FR-342).
+- Fail-open on prediction/label/capture WRITES; fail-loud on window/policy/job READS (FR-343).
+- `docs/current-architecture.md` updated in the same increment if any Snapshot row changes (FR-345) — none
   expected, since topology/authority/trust-boundaries are unaffected by internal module moves.
