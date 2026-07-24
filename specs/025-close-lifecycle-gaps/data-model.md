@@ -43,10 +43,11 @@ Outcome vocabulary: `scored(target)` | `refused(job_holds_gpu)` | `error(unresol
 (`gateway/app/batch.py:run_batch`) is unchanged; only *which version it scores* becomes explicit. This is
 **normative contract, not task prose**: the batch drives the same resident engine online `/infer` uses
 (single VRAM lease). (1) The `ensure target resident` load is INSIDE the `try` so a spawn/readiness/OOM
-failure that already disturbed the prior engine still hits the restore. (2) The prior target MUST be left
-resident on every non-refused path — success OR any raise — but the `finally` MUST **re-read the latest
-desired target** (a promote can land mid-batch: `models.py:124-142` moves the pointer while `swap.py:170-171`
-defers the reload because a GPU batch is active), not blindly restore the captured snapshot, or it erases the
+failure that already disturbed the prior engine still hits the restore. (2) The **current desired** target — the
+prior one, unless a promote legitimately changed it mid-batch — MUST be resident/converged on every
+non-refused path, success OR any raise. The `finally` MUST therefore **re-read the latest desired target**
+(a promote can land mid-batch: `models.py:124-142` moves the pointer while `swap.py:170-171` defers the
+reload because a GPU batch is active) rather than blindly restore the captured snapshot, or it erases the
 newer promotion. (3) A batch-wide exclusion (not just `_gpu_batch_active` eviction-blocking) MUST
 queue/refuse online `/infer` for the temporary target's lifetime — while letting the batch's OWN rows through
 (they post to the same `/engines/*` paths in separate agent threads, so they need a marker/token or an
