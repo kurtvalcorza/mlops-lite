@@ -25,9 +25,12 @@ pytest -q tests/test_batch_version_assert.py
 ```
 
 Expected (offline, injected predict_fn + fake admission): a batch requesting version A while B is
-"resident" asserts/loads A and scores A — never B — then **restores B** in a `finally` (asserted on both a
-successful and a failed batch), and refuses cleanly if a job holds the GPU. ASR batch is rejected at
-submission (status quo; a real ASR path is optional net-new).
+"resident" asserts/loads A and scores A — never B — then **restores B** in a `finally`, asserted on a
+successful batch, a mid-scoring raise, AND a **load/OOM failure** (the load sits inside the restore scope);
+a **concurrent online `/infer`** during the batch is queued/refused, never served A (batch-wide exclusion);
+and it refuses cleanly if a job holds the GPU. A **tabular** batch scores via the corrected `{"rows":[...]}`
+payload (not `{"features":...}` → 422). ASR batch is rejected at submission (status quo; a real ASR path is
+optional net-new).
 
 ```bash
 # on the RTX 5070 Ti (SC-175):

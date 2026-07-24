@@ -49,10 +49,13 @@ register-with-metric, failure cleanup).
 ## D4 — Tabular quality label source (US2)
 
 **Decision**: Wire tabular into quality where a clean per-request ground-truth label exists (tabular
-classification has real labels, unlike the earlier embeddings/tabular exclusion note). If a subset has
-no clean label, **document the exclusion with rationale** rather than fabricate labels.
+classification has real labels, unlike the earlier embeddings/tabular exclusion note). Tabular quality is
+**mandatory** (FR-353/SC-178): *individual* requests with no supplied label simply fall out of the labeled
+window (never fabricate labels) — but the tabular modality as a whole is NOT excludable from quality by
+documentation.
 
-**Rationale**: Reuses the existing predictions/labels/window machinery; honest about any gap.
+**Rationale**: Reuses the existing predictions/labels/window machinery; honest about any per-request gap
+without letting a doc note excuse the whole monitoring half of US2.
 
 ## D5 — Streamed-prediction capture (US4): reuse the fail-open seam
 

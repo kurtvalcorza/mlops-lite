@@ -10,9 +10,9 @@ live `conn`). Shared error/seam helpers stay in `storeimpl/_base.py`.
 
 | Repository module | Owns (table[s]) | Representative operations | Failure posture |
 |---|---|---|---|
-| `predictions.py` | `predictions` | insert prediction row; window join with labels | WRITE fail-open (drop-counter); READ fail-loud |
+| `predictions.py` | `predictions` | insert prediction row; window join with labels | WRITE **propagates** (raises) — fail-open/drop-counter is the `quality` wrapper's job, NOT the repo's; READ fail-loud |
 | `labels.py` | `labels` | write-once insert (PK-enforced) → `LabelExists` | **WRITE fail-loud** (`QualityStoreError`→502 — operator-facing label attach); duplicate ⇒ `LabelExists` |
-| `capture.py` | `capture_index` | insert capture row; list by window | WRITE fail-open; READ fail-loud |
+| `capture.py` | `capture_index` | insert capture row; list by window | WRITE **propagates** (raises) — fail-open is the `quality` wrapper's job, not the repo's; READ fail-loud |
 | `jobs.py` | jobs state | upsert/get job status | READ fail-loud |
 | `policies.py` | policy rows | CRUD policy + status | READ fail-loud |
 | `suggestions.py` | promotion suggestions | create/resolve/get suggestion | READ fail-loud |

@@ -30,19 +30,24 @@ batch_infer(model, registry_version, dataset, ...):
   under admission lease:
     if a non-preemptable job holds the GPU: REFUSE (clear error)   # never preempt (Principle II)
     prior = current resident/desired target                        # NEW: capture before loading
-    ensure target resident (load once for the batch)               # NEW: not "whatever is resident"
+    acquire batch-wide exclusion over the shared engine            # NEW: online /infer queues/refuses for the batch's lifetime
     try:
+      ensure target resident (load once for the batch)             # NEW: INSIDE the try — a load/OOM failure still restores
       score each record against target                             # unchanged scoring core
     finally:
-      restore prior (or unload target)                             # NEW: never leave the batch's version serving online /infer
+      restore prior (or unload target); release exclusion          # NEW: on success AND any failure, incl. a load failure
 ```
 
 Outcome vocabulary: `scored(target)` | `refused(job_holds_gpu)` | `error(unresolvable)`. The scoring core
-(`gateway/app/batch.py:run_batch`) is unchanged; only *which version it scores* becomes explicit. The
-`finally` restore is **part of this normative contract**, not just task prose: the batch drives the same
-resident engine online `/infer` uses (single VRAM lease), so on every non-refused path — success OR a
-mid-scoring raise — the prior target MUST be left resident. Hardware validation (SC-175) MUST assert the
-resident identity is the prior target again after both a successful and a failed batch.
+(`gateway/app/batch.py:run_batch`) is unchanged; only *which version it scores* becomes explicit. This is
+**normative contract, not task prose**: the batch drives the same resident engine online `/infer` uses
+(single VRAM lease). (1) The `ensure target resident` load is INSIDE the `try` so a spawn/readiness/OOM
+failure that already disturbed the prior engine still hits the restore. (2) The prior target MUST be left
+resident on every non-refused path — success OR any raise. (3) A batch-wide exclusion (not just
+`_gpu_batch_active` eviction-blocking) MUST queue/refuse online `/infer` for the temporary target's
+lifetime, or online calls between rows get the wrong version. Hardware validation (SC-175) MUST assert the
+resident identity is the prior target again after both a successful and a **load-failed** batch, and that a
+concurrent online `/infer` during the batch never observes the temporary version.
 
 ## Tabular as a full modality (US2)
 

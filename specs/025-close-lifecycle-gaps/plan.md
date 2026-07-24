@@ -6,7 +6,7 @@
 
 ## Summary
 
-Close the real gaps found in the full-loop review. Unlike 024 (behavior-preserving), 025 **changes behavior and adds capability**, so each change is explicit and constitution-checked. Committed core: **US1 batch correctness** (score the requested version under the lease, then restore the prior target; ASR is already rejected at submission, so any ASR batch path is optional net-new, not a fix) and **US2 tabular full modality** (fine-tune flow + AUC fixture/gate + quality). Lower-priority, phased: **US3–US6** surface previously-parked operator/data features (dataset byte-download, streamed-prediction logging, live HPO progress, shadow-replay UI). Approach: extend existing seams (no new engines), keep tabular CPU/off-lease, add no heavy deps, and validate the GPU-touching legs on hardware.
+Close the real gaps found in the full-loop review. Unlike 024 (behavior-preserving), 025 **changes behavior and adds capability**, so each change is explicit and constitution-checked. Committed core: **US1 batch correctness** (score the requested version under the lease, restore the prior target, and hold a batch-wide exclusion so online `/infer` never sees the batch's version; fix the broken tabular batch payload and the GPU-alias protection gap; ASR is already rejected at submission, so any ASR batch path is optional net-new, not a fix) and **US2 tabular full modality** (fine-tune flow + AUC fixture/gate + quality). Lower-priority, phased: **US3–US6** surface previously-parked operator/data features (dataset byte-download, streamed-prediction logging, live HPO progress, shadow-replay UI). Approach: extend existing seams (no new engines), keep tabular CPU/off-lease, add no heavy deps, and validate the GPU-touching legs on hardware.
 
 ## Technical Context
 
@@ -26,7 +26,7 @@ Close the real gaps found in the full-loop review. Unlike 024 (behavior-preservi
 
 **Constraints**: one GPU tenant (Principle II) — batch loads go through admission, jobs non-preemptable; dependency-light (III); console-only Node (workflow amendment); fail-open capture off the response path (streamed logging).
 
-**Scale/Scope**: US1 ≈ small (2 targeted fixes in `batch_infer.py`/`jobs.py`); US2 ≈ a modality slice (new `tabular_finetune` flow + scorer + fixture + quality wiring); US3–US6 ≈ mostly UI + thin BFF/stream surfaces over existing backends.
+**Scale/Scope**: US1 ≈ **medium, not the 2-liner it first looked** (Codex rounds 4-5): an agent-side version load/assert seam + a `finally` restore (load-failure-safe) + a batch-wide online-inference exclusion + GPU-alias protection normalization + the broken tabular batch-payload fix — the single-GPU engine sharing is what turns "score the right version" into real concurrency work. US2 ≈ a modality slice (new `tabular_finetune` flow + scorer + fixture + quality wiring) **plus** warm-child version-invalidation on promote and policy/retrain validator decoupling. US3–US6 ≈ mostly UI + thin BFF/stream surfaces over existing backends (each new endpoint/SSE-shape change lands its own contract update per FR-359).
 
 ## Constitution Check
 

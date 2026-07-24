@@ -53,7 +53,7 @@ Tabular serves (LightGBM child, CPU/off-lease) but is a half-modality: there is 
 
 1. **Given** a registered tabular dataset, **When** a tabular fine-tune is launched, **Then** it trains a model, registers a version with the tabular task/engine tags and its logged eval metric, and cleans up on failure (no partial version) — mirroring the existing modality flows.
 2. **Given** a tabular candidate, **When** it is promoted, **Then** the evaluation gate compares its AUC against the incumbent on a committed held-out fixture (AUC is no longer a stub).
-3. **Given** tabular predictions with delayed ground-truth labels, **When** a quality window is scored, **Then** tabular quality is computed and can drive the existing breach→retrain policy (or, if a modality is intentionally excluded from quality, that exclusion is documented with rationale).
+3. **Given** tabular predictions with delayed ground-truth labels, **When** a quality window is scored, **Then** tabular quality is computed and drives the existing breach→retrain policy. Individual requests for which no ground-truth label is ever supplied simply fall out of the labeled window; the tabular modality as a whole is NOT excludable from quality by documentation (FR-353/SC-178).
 4. **Given** the tabular fine-tune, **When** it runs, **Then** it adds no heavy dependency beyond what tabular serving already requires (Principle III) and holds no GPU lease (CPU/off-lease).
 
 ---
@@ -117,7 +117,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 ### Edge Cases
 
 - A batch version-assertion would require loading a model while a job holds the GPU → jobs are non-preemptable; the batch must queue/refuse, never preempt (Principle II).
-- Tabular quality where no clean per-request label exists → document the exclusion rather than fabricate labels.
+- Tabular quality: an *individual* request with no clean label falls out of the labeled window (never fabricate labels) — the tabular modality as a whole stays a mandatory quality participant, not excludable by documentation (FR-353/SC-178).
 - Streamed-prediction capture must never block or alter the streamed response — **except** the FR-356-required initial `prediction_id` metadata event the client needs to attach a label → otherwise fail-open, off the response path, like the existing tracing/quality capture.
 - Any persisted-state change (e.g. a tabular-specific column) → a NEW numbered migration, never an edit to an applied one.
 - The parked features (US3–US6) risk sprawling → each is independently shippable; if a story proves larger than a slice, it spins into its own follow-on increment rather than bloating a single PR.
@@ -129,8 +129,10 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 **Batch correctness (US1)**
 
 - **FR-348**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident. (This closes the explicit-`registry_version`-honoring gap batch never got — NOT 015's SC-068, which correctly kept batch-vs-`@serving` scoring as production-correct; a batch that requests `@serving` is unchanged.)
-- **FR-349**: Every modality *admitted* as a batch modality (`hostagent/jobs.py` `BATCH_MODALITIES`) MUST have a working batch path. This invariant already holds — `asr` is NOT in `BATCH_MODALITIES`, so an ASR batch is rejected at submission, never accepted-then-failed. If ASR batch support is added, `asr` MUST be admitted *and* given a working path in the same change — never admitted without one.
-- **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted. After scoring, the batch MUST restore the prior resident/desired target (or unload the temporary one) in a `finally` — on both success and failure — so online `/infer` traffic never inherits the batch's version (the batch drives the same resident serving engine online traffic uses).
+- **FR-349**: Every modality *admitted* as a batch modality (`hostagent/jobs.py` `BATCH_MODALITIES`) MUST have a working batch path. This does NOT hold today for **tabular**: tabular is admitted, but `batch_infer.py` posts `{"features": row}` while the tabular child requires `{"rows": [...]}` (`serving/children/tabular_service.py:99-127`), so every tabular batch row 422s — large batches abort, and small ones can even record `succeeded` with zero outputs. The tabular batch payload MUST be repaired and tested. (`asr`, by contrast, is NOT admitted — rejected at submission — so adding an ASR path is optional net-new: admit `asr` *and* provide the path together, never one without the other.)
+- **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted. Two guarantees are required around the temporary target:
+  (a) **Restore** — after scoring, the batch MUST restore the prior resident/desired target (or unload the temporary one) in a `finally`, on both success and failure (including a failure of the *load* itself, which may have already disturbed the prior engine), so online `/infer` never inherits the batch's version afterward.
+  (b) **Batch-wide exclusion** — restore-after is not enough on its own: online `/infer` shares the *same* resident engine and the runtime mutex is held per-request (not for the whole batch), so an online call arriving *between* batch rows would be served the batch's temporary version. The batch MUST hold a batch-wide exclusion over the shared engine for the temporary target's lifetime — queueing or refusing online inference (not merely blocking eviction via `_gpu_batch_active`). Design tension (Principle II): a *second* engine would violate one-model-in-VRAM, so on single-GPU hardware this exclusion means online inference is briefly unavailable for the batch's duration — an explicit, hardware-confirmed trade-off, not a second tenant.
 
 **Tabular full modality (US2)**
 
