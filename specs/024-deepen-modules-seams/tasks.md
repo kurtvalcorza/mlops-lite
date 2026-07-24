@@ -26,8 +26,8 @@ unit test for every extracted seam plus the existing live ordering leg, so test 
 
 ## Phase 1: Setup (Shared)
 
-- [ ] **T558** Establish the green baseline: run `make test` and record the current pass state as the parity reference for SC-165. (Correction: the offline suite installs `-r gateway/requirements.txt`, so `fastapi`/`httpx` ARE present — do NOT try to run it without them; SC-166 is a per-seam import-isolation test, not a fastapi-free suite run.)
-- [ ] **T559** [P] Create the ADR home `docs/adr/` with a short `docs/adr/README.md` (format: Context / Decision / Consequences; status values Accepted | Rejected).
+- [x] **T558** Establish the green baseline: run `make test` and record the current pass state as the parity reference for SC-165. (Correction: the offline suite installs `-r gateway/requirements.txt`, so `fastapi`/`httpx` ARE present — do NOT try to run it without them; SC-166 is a per-seam import-isolation test, not a fastapi-free suite run.)
+- [x] **T559** [P] Create the ADR home `docs/adr/` with a short `docs/adr/README.md` (format: Context / Decision / Consequences; status values Accepted | Rejected).
 
 ---
 
@@ -35,8 +35,8 @@ unit test for every extracted seam plus the existing live ordering leg, so test 
 
 **Purpose**: guards that must exist before any extraction, so every later slice is provably behavior-preserving.
 
-- [ ] **T560** Confirm `tests/test_store_facade.py` pins the **complete** current `store.<symbol>` surface; extend it to cover any symbol not yet asserted (this is the safety net US1 leans on).
-- [ ] **T561** Confirm `scripts/check_specs.py` passes for `specs/024-deepen-modules-seams/` (spec+plan+tasks present) so the `specs` CI gate is green before implementation lands.
+- [x] **T560** Confirm `tests/test_store_facade.py` pins the **complete** current `store.<symbol>` surface; extend it to cover any symbol not yet asserted (this is the safety net US1 leans on).
+- [x] **T561** Confirm `scripts/check_specs.py` passes for `specs/024-deepen-modules-seams/` (spec+plan+tasks present) so the `specs` CI gate is green before implementation lands.
 
 **Checkpoint**: baseline green + facade fully pinned → extractions can begin.
 
@@ -53,7 +53,7 @@ facade — with every call site and driver-laziness unchanged.
 
 ### Tests for User Story 1
 
-- [ ] **T562** [P] [US1] Write `tests/test_store_decomposition.py` — web-free per-aggregate repository tests (predictions insert+window join, write-once `labels`→`LabelExists`, capture insert/list, jobs upsert/get, policies CRUD, suggestions create/resolve/get), using fakes/temp seams in the house `tests/_activation.py` style; assert the exact postures (Codex round-5): the prediction/capture insert primitives **propagate** (raise) their errors — the fail-open/drop-counter posture lives in the `quality.log_prediction`/`capture_input` WRAPPER (which catches, increments the drop counter, and invalidates the broken cached connection), NOT in the repository (a repo that swallowed would silently break both the counter and the stale-connection reset). Label attach is **fail-loud**, and window/policy/job READS are fail-loud. So: test repo error-**propagation** here, and test the fail-open/drop-counter at the quality-wrapper boundary (FR-343). **Impl note:** `tests/test_store_decomposition.py` pins the decomposition structurally (facade re-exports resolve to the exact `storeimpl/*` functions; no aggregate SQL left in the facade) + the driver-laziness; the per-aggregate SQL behavior + the propagate-vs-wrapper-fail-open posture are already exercised by the unchanged existing suite (journal/quality/jobs tests over the real primitives), so per-aggregate fake-cursor tests were not duplicated. Test-parity is the behavior gate.
+- [x] **T562** [P] [US1] Write `tests/test_store_decomposition.py` — web-free per-aggregate repository tests (predictions insert+window join, write-once `labels`→`LabelExists`, capture insert/list, jobs upsert/get, policies CRUD, suggestions create/resolve/get), using fakes/temp seams in the house `tests/_activation.py` style; assert the exact postures (Codex round-5): the prediction/capture insert primitives **propagate** (raise) their errors — the fail-open/drop-counter posture lives in the `quality.log_prediction`/`capture_input` WRAPPER (which catches, increments the drop counter, and invalidates the broken cached connection), NOT in the repository (a repo that swallowed would silently break both the counter and the stale-connection reset). Label attach is **fail-loud**, and window/policy/job READS are fail-loud. So: test repo error-**propagation** here, and test the fail-open/drop-counter at the quality-wrapper boundary (FR-343). **Impl note:** `tests/test_store_decomposition.py` pins the decomposition structurally (facade re-exports resolve to the exact `storeimpl/*` functions; no aggregate SQL left in the facade) + the driver-laziness; the per-aggregate SQL behavior + the propagate-vs-wrapper-fail-open posture are already exercised by the unchanged existing suite (journal/quality/jobs tests over the real primitives), so per-aggregate fake-cursor tests were not duplicated. Test-parity is the behavior gate.
 - [x] **T563** [P] [US1] Add an import-laziness assertion: importing `platformlib.s3io` triggers no psycopg import and importing the relational path triggers no boto3 import (FR-332). (This requires making s3io's boto3 import lazy — see T564.)
 
 ### Implementation for User Story 1
@@ -92,7 +92,7 @@ mapping byte-identical (contracts/preservation.md §C2).
 - [x] **T575** [US2] Refactor `gateway/app/routers/models.py:promote` to call `promotion.go_live(...)` and map `GoLiveResult` → HTTP status + `REGISTRY_OPS` label; response contract unchanged (depends on T574).
 - [x] **T576** [US2] Verify `gateway/app/scheduler.py` (`_default_promote`) and `routers/policies.py` still call `registry.promote` directly and cannot reach `go_live()` — the single-live-switch invariant (FR-336/FR-275/307/313, SC-170).
 - [x] **T577** [US2] Relocate ONLY the serving-LLM **pointer CRUD** primitives (`get_serving_llm`/`set_serving_llm`/`restore_serving_llm`, `gateway/app/registry.py`) into a dedicated relational repository — they are pure Postgres state. **Keep `active_serving_llm_name` OUT of the relational repository**: it reads the pointer AND calls `llmresolve.adopt_active_llm` (MLflow) for the pointer-unset adoption + configured-default fallback, so it stays a higher-level web-free selection policy — moving it into `storeimpl` would either drag MLflow into the relational layer or drop the adoption behavior (changing which LLM serves after upgrade). Call sites and go-live capture/restore stay behavior-identical. Rationale in `docs/adr/0005-serving-llm-pointer-not-mlflow-alias.md`.
-- [ ] **T578** [US2] Run offline suite + `test_promotion_gate.py`/`test_promotion_modes.py` unchanged (SC-165); run `test_promote_ordering.py` on `make up` (SC-167).
+- [ ] **T578** [US2] Run offline suite + `test_promotion_gate.py`/`test_promotion_modes.py` unchanged (SC-165); run `test_promote_ordering.py` on `make up` (SC-167). **Status:** the OFFLINE half is done and green (full suite 674 passed / 0 failed; `test_promotion_gate.py` + `test_promotion_modes.py` pass unchanged). The **live leg is the only thing outstanding** — `test_promote_ordering.py` skips cleanly without a brought-up keyed stack, so SC-167 must be signed off on `make up` (the same `[HW]`/live boundary as 025's T599).
 
 **Checkpoint**: promote handler is translate→call→map only; US2 ships as its own PR.
 
@@ -154,9 +154,9 @@ contradicts `specs/*/tasks.md` or the shipped code.
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] **T591** [P] Review `docs/current-architecture.md` for Snapshot drift; update in-increment only if a row changed (FR-345 — none expected, since topology/authority/trust boundaries are untouched).
-- [ ] **T592** Run the full `quickstart.md` recipe end-to-end (offline suite → each seam test → live leg) and confirm `make lint test spec-check` green.
-- [ ] **T593** Confirm no new dependency entered `gateway/requirements.txt` or the agent (FR-342) and that exactly one gated promotion choke-point remains (SC-170).
+- [x] **T591** [P] Review `docs/current-architecture.md` for Snapshot drift; update in-increment only if a row changed (FR-345 — none expected, since topology/authority/trust boundaries are untouched). **Reviewed: NO drift, no edit made.** Process topology unchanged (no process/port added or removed); the data-authority row "monitoring/job state | `gateway` Postgres DB via `platformlib.store`" is still exactly right (the facade IS the entry point — only its internals moved); trust boundaries unchanged (US3 byte-preserved the public probe set `/healthz` `/readyz` `/metrics`, pinned by `tests/test_agent_routes.py`); runtime invariants unchanged (one GPU tenant, promote=go-live durable activation, agent transport bounds, gateway startup order). Internal module moves are invisible at Snapshot altitude — which is the point.
+- [x] **T592** Run the full `quickstart.md` recipe end-to-end (offline suite → each seam test → live leg) and confirm `make lint test spec-check` green.
+- [x] **T593** Confirm no new dependency entered `gateway/requirements.txt` or the agent (FR-342) and that exactly one gated promotion choke-point remains (SC-170).
 
 ---
 
