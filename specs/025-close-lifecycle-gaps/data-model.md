@@ -29,12 +29,20 @@ batch_infer(model, registry_version, dataset, ...):
   target = resolve(model, registry_version)          # NEW: explicit target
   under admission lease:
     if a non-preemptable job holds the GPU: REFUSE (clear error)   # never preempt (Principle II)
+    prior = current resident/desired target                        # NEW: capture before loading
     ensure target resident (load once for the batch)               # NEW: not "whatever is resident"
-  score each record against target                                 # unchanged scoring core
+    try:
+      score each record against target                             # unchanged scoring core
+    finally:
+      restore prior (or unload target)                             # NEW: never leave the batch's version serving online /infer
 ```
 
 Outcome vocabulary: `scored(target)` | `refused(job_holds_gpu)` | `error(unresolvable)`. The scoring core
-(`gateway/app/batch.py:run_batch`) is unchanged; only *which version it scores* becomes explicit.
+(`gateway/app/batch.py:run_batch`) is unchanged; only *which version it scores* becomes explicit. The
+`finally` restore is **part of this normative contract**, not just task prose: the batch drives the same
+resident engine online `/infer` uses (single VRAM lease), so on every non-refused path — success OR a
+mid-scoring raise — the prior target MUST be left resident. Hardware validation (SC-175) MUST assert the
+resident identity is the prior target again after both a successful and a failed batch.
 
 ## Tabular as a full modality (US2)
 

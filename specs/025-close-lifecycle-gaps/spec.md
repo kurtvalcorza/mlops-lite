@@ -130,13 +130,13 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 - **FR-348**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident. (This closes the explicit-`registry_version`-honoring gap batch never got — NOT 015's SC-068, which correctly kept batch-vs-`@serving` scoring as production-correct; a batch that requests `@serving` is unchanged.)
 - **FR-349**: Every modality *admitted* as a batch modality (`hostagent/jobs.py` `BATCH_MODALITIES`) MUST have a working batch path. This invariant already holds — `asr` is NOT in `BATCH_MODALITIES`, so an ASR batch is rejected at submission, never accepted-then-failed. If ASR batch support is added, `asr` MUST be admitted *and* given a working path in the same change — never admitted without one.
-- **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted.
+- **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted. After scoring, the batch MUST restore the prior resident/desired target (or unload the temporary one) in a `finally` — on both success and failure — so online `/infer` traffic never inherits the batch's version (the batch drives the same resident serving engine online traffic uses).
 
 **Tabular full modality (US2)**
 
 - **FR-351**: A tabular fine-tune flow MUST exist, registering a version with tabular task/engine tags and its logged eval metric, with failure cleanup (no partial version), mirroring the existing modality flows.
 - **FR-352**: A committed held-out tabular eval fixture + a tabular **prediction factory** (`predict_fn`) MUST exist so the **existing** pure-Python `auc` metric (`evaluation.py:153-173`, already in `METRICS`) can gate tabular promotion — the metric is *promoted from stub*, not re-implemented.
-- **FR-353**: Tabular MUST be integrated into quality monitoring where a per-request ground-truth label is available, so it can drive the existing breach→retrain policy; any intentional exclusion MUST be documented with rationale.
+- **FR-353**: Tabular MUST be a full quality participant — prediction logging (per-row ids + the served version), delayed-label scoring, and breach→retrain wiring are all MANDATORY (this is the half-modality US2 exists to close). A documented exclusion is limited to *individual requests for which no ground-truth label is ever supplied* (those rows simply never enter the labeled window); it MUST NOT be used to exclude the tabular modality as a whole from quality monitoring.
 - **FR-354**: Tabular training MUST remain CPU/off-lease and add no heavy dependency beyond tabular serving's existing footprint (Principles II and III).
 
 **Parked operator/data features (US3–US6)**
@@ -148,7 +148,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 **Cross-cutting**
 
-- **FR-359**: Any persisted-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
+- **FR-359**: API and schema changes are governed independently (as in 024's FR-344). A **persisted-schema** change MUST land as a NEW numbered `platformlib/migrations/*.sql` file (applied migrations MUST NOT be edited; DDL MUST NOT be inlined in code). An **external gateway/agent API** change MUST land a contract update. A schema-only internal change therefore needs a migration but NO contract update; an API change needs a contract update but no migration.
 - **FR-360**: No change may add a heavy dependency to the gateway or agent images, or introduce a second concurrent GPU tenant.
 - **FR-361**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row (topology, data authority, invariants) changes.
 
@@ -162,10 +162,10 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 ### Measurable Outcomes
 
-- **SC-175**: A batch for an *explicitly requested* non-resident version scores that exact version (or refuses) — never the resident one — proven offline for the ordering and on hardware for the load-under-lease leg (the explicit-version-honoring gap; 015's SC-068 batch exclusion stays intact).
+- **SC-175**: A batch for an *explicitly requested* non-resident version scores that exact version (or refuses) — never the resident one — and after the batch the prior serving target is resident again (verified on hardware after both a successful and a failed batch). Proven offline for the ordering/restore and on hardware for the load-under-lease leg (the explicit-version-honoring gap; 015's SC-068 batch exclusion stays intact).
 - **SC-176**: An ASR batch job completes successfully, OR ASR batch submissions are rejected at submission time; no admitted batch modality raises at runtime.
 - **SC-177**: A tabular dataset can be fine-tuned → registered-with-metric → gate-compared on a committed AUC fixture → promoted → served, with no GPU lease held and no new heavy dependency.
-- **SC-178**: Tabular predictions with labels produce a quality window that can trip the existing breach→retrain policy (or the exclusion is documented).
+- **SC-178**: Tabular predictions with labels produce a quality window that trips the existing breach→retrain policy; the modality is NOT excludable from quality by documentation — only individual requests with no supplied label fall out of the window.
 - **SC-179**: An operator downloads dataset bytes from the console with no object-store credential reaching the browser.
 - **SC-180**: A streamed LLM prediction yields the same log/capture rows as a non-streamed one and can be labeled.
 - **SC-181**: A running HPO study's trials are visible live in the console with no external dashboard service added.

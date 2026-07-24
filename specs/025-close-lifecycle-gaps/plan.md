@@ -6,7 +6,7 @@
 
 ## Summary
 
-Close the real gaps found in the full-loop review. Unlike 024 (behavior-preserving), 025 **changes behavior and adds capability**, so each change is explicit and constitution-checked. Committed core: **US1 batch correctness** (score the requested version under the lease; fix/remove the ASR batch path) and **US2 tabular full modality** (fine-tune flow + AUC fixture/gate + quality). Lower-priority, phased: **US3–US6** surface previously-parked operator/data features (dataset byte-download, streamed-prediction logging, live HPO progress, shadow-replay UI). Approach: extend existing seams (no new engines), keep tabular CPU/off-lease, add no heavy deps, and validate the GPU-touching legs on hardware.
+Close the real gaps found in the full-loop review. Unlike 024 (behavior-preserving), 025 **changes behavior and adds capability**, so each change is explicit and constitution-checked. Committed core: **US1 batch correctness** (score the requested version under the lease, then restore the prior target; ASR is already rejected at submission, so any ASR batch path is optional net-new, not a fix) and **US2 tabular full modality** (fine-tune flow + AUC fixture/gate + quality). Lower-priority, phased: **US3–US6** surface previously-parked operator/data features (dataset byte-download, streamed-prediction logging, live HPO progress, shadow-replay UI). Approach: extend existing seams (no new engines), keep tabular CPU/off-lease, add no heavy deps, and validate the GPU-touching legs on hardware.
 
 ## Technical Context
 
@@ -60,7 +60,7 @@ specs/025-close-lifecycle-gaps/
 
 ```text
 training/flows/
-├── batch_infer.py            # US1: load/assert requested version under lease; add ASR path (or remove ASR)
+├── batch_infer.py            # US1: load/assert requested version under lease, restore prior target in finally; ASR already rejected at submission (optional net-new path only)
 └── tabular_finetune.py       # US2: NEW — tabular fine-tune flow (mirrors vision_finetune.py)
 
 training/scoring/
@@ -90,7 +90,7 @@ tests/
 ## Design Phases
 
 ### Phase 0 — Research
-Key decisions to confirm during implementation: (a) US1 — prefer *load-and-assert the requested version under admission* over *refuse*, but refuse cleanly if a job holds the GPU (never preempt); decide ASR-batch *add* vs *remove* by whether an ASR batch path is genuinely wanted. (b) US2 — tabular training library = the LightGBM already shipped for serving; AUC stays pure-Python; decide the tabular quality label source (and document any exclusion). (c) US4 — reuse the existing fail-open capture seam so the streamed path matches the non-streamed contract exactly. (d) US5 — an in-process progress stream, no external Optuna dashboard.
+Key decisions to confirm during implementation: (a) US1 — prefer *load-and-assert the requested version under admission* over *refuse*, but refuse cleanly if a job holds the GPU (never preempt); restore the prior target in a `finally` (the batch drives the shared online engine). ASR is already rejected at submission (`BATCH_MODALITIES` excludes it) — no fix is needed; add an ASR batch path only if batched transcription is genuinely wanted (net-new: admit `asr` *and* provide the path together), otherwise it is a no-op. (b) US2 — tabular training library = the LightGBM already shipped for serving; AUC stays pure-Python; decide the tabular quality label source (and document any exclusion). (c) US4 — reuse the existing fail-open capture seam so the streamed path matches the non-streamed contract exactly. (d) US5 — an in-process progress stream, no external Optuna dashboard.
 
 ### Phase 1 — Contracts and models
 - No new persisted entities expected; if tabular quality needs a column, it is a NEW numbered migration (FR-359).

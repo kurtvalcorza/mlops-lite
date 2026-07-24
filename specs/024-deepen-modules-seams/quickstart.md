@@ -24,7 +24,7 @@ import-isolation check, not a fastapi-free run.)
 
 ```bash
 pytest -q tests/test_store_facade.py tests/test_store_decomposition.py
-python -c "import platformlib.store; import platformlib.objectstore; print('lazy import OK')"
+python -c "import platformlib.store; import platformlib.s3io; print('lazy import OK')"
 ```
 
 Expected: the facade surface is intact (every `store.<name>` resolves), each aggregate repository has direct
@@ -38,7 +38,7 @@ pytest -q tests/test_promotion_ordering.py
 
 Expected (web-free, fake registry/activation collaborators):
 - unresolvable adapter ⇒ `REFUSED` and `registry.promote` was **never** called;
-- conflicting activation ⇒ `CONFLICT` before the alias moves;
+- conflicting activation (pre-check) ⇒ `CONFLICT` before the alias moves; the post-promote TOCTOU race ⇒ `["ok", "conflict"]` with the alias left moved (invariant 4);
 - clean candidate ⇒ prior pointer captured before overwrite, then durable activation invoked;
 - outcome→HTTP/metric mapping matches the table in `contracts/preservation.md` §C2;
 - `promotion.go_live()` has exactly one caller (the operator route) — scheduler/policy paths cannot reach it.

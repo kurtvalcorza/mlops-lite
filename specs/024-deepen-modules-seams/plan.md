@@ -7,8 +7,8 @@
 ## Summary
 
 Finish three extractions the codebase already believes in, without changing behavior: (1) decompose
-`platformlib/store.py` into per-aggregate repositories under `storeimpl/` plus a separated object-store
-module, behind the existing test-pinned re-export facade; (2) lift the LLM go-live *ordering* out of the
+`platformlib/store.py` into per-aggregate repositories under `storeimpl/` plus consolidating object-store
+access into the existing `platformlib/s3io.py` (not a new module), behind the existing test-pinned re-export facade; (2) lift the LLM go-live *ordering* out of the
 FastAPI+httpx router into a web-free `gateway/app/promotion.py` so it unit-tests like the other domain
 cores, with the router reduced to an outcome→HTTP/metric adapter; (3) turn the agent's hand-rolled
 GET/POST if-ladders into a stdlib-only route table. Record accepted and rejected decisions as ADRs. The
@@ -86,7 +86,7 @@ specs/024-deepen-modules-seams/
 ```text
 platformlib/
 ├── store.py                     # US1: reduced to a thin re-export facade (no aggregate SQL inline)
-├── objectstore.py               # US1: NEW — S3 client + paginated listings, split off store.py
+├── s3io.py                      # US1: EXTENDED (not new) — the existing shared Garage authority gains store's cached s3_client()+list_keys/list_common_prefixes, consolidated with its _s3(); boto3 lazy
 └── storeimpl/
     ├── _base.py                 # existing: StoreError/LabelExists + epoch/json seam helpers
     ├── _engine.py               # US1: NEW — shared dsn/connect/bootstrap/ensure_schema/SCHEMA_VERSION/TABLES (drivers lazy), re-exported by the facade

@@ -7,9 +7,10 @@ re-litigated.
 ## D1 — Store decomposition: continue the proven facade-preserving move
 
 **Decision**: Extract one repository module per relational aggregate (predictions, labels, capture, jobs,
-policies, suggestions) under `platformlib/storeimpl/`, and split the S3 object-store access into
-`platformlib/objectstore.py`. `platformlib/store.py` becomes a thin re-export facade; the ~28
-`from platformlib import store` call sites are untouched.
+policies, suggestions) under `platformlib/storeimpl/`, and consolidate the S3 object-store access into the
+**existing** `platformlib/s3io.py` (the shared Garage/S3 client authority already used by
+batch/quality/validation) — NOT a new `objectstore.py`, which would be a second S3 home. `platformlib/store.py`
+becomes a thin re-export facade; the ~28 `from platformlib import store` call sites are untouched.
 
 **Rationale**: The pattern is already in production — the activation repository was lifted into
 `storeimpl/activations.py` behind re-exports pinned by `tests/test_store_facade.py`. Repeating a proven,

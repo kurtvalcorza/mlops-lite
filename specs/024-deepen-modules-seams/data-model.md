@@ -21,8 +21,10 @@ live `conn`). Shared error/seam helpers stay in `storeimpl/_base.py`.
 **Facade invariant**: every symbol currently reachable as `store.<name>` remains reachable after the move
 (re-exported in `platformlib/store.py`). `tests/test_store_facade.py` is the pinned guard.
 
-**Object store**: `platformlib/objectstore.py` owns `s3_client()` + paginated listings; imports boto3 lazily.
-No relational import path is triggered by importing it, and vice-versa.
+**Object store**: the existing `platformlib/s3io.py` (the shared Garage authority) gains `s3_client()` +
+paginated listings, consolidated with its `_s3()` into one factory; boto3 imported lazily. No relational
+import path is triggered by importing it, and vice-versa. No new `objectstore.py` is created — that would be
+a second S3 home alongside `s3io.py`.
 
 ## Go-live seam (US2)
 
@@ -44,9 +46,18 @@ go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResu
 
 **Ordering invariants encoded in the seam**:
 1. An unresolvable target ⇒ `REFUSED` **before** `registry.promote` is called (alias never moves — FR-265).
-2. A conflicting in-flight activation ⇒ `CONFLICT` **before** the alias moves.
+2. A conflicting in-flight activation caught by the pre-check (`assert_no_conflict`) ⇒ `CONFLICT` **before**
+   the alias moves (emits `conflict` only).
 3. On success, the prior serving pointer is captured **before** it is overwritten, then the durable
    activation runs.
+4. **Post-promote conflict (TOCTOU — preserve exactly):** the pre-check has a documented race — a different
+   activation can start between `assert_no_conflict` and `activate()`'s `submit`. When it does,
+   `registry.promote` has already moved the alias and emitted `ok`, then `activate()` raises
+   `ActivationError`; the route emits a SECOND label `conflict` and returns 409 with the **alias left moved**
+   (`models.py:114-145`). The seam MUST represent this as `metric_statuses == ["ok", "conflict"]` (the list
+   field already carries multi-emit, exactly like PROMOTED's `["ok","unresolvable"]`) — never collapse it to
+   a single pre-alias `conflict`, and do NOT "repair" the moved alias (that would be a behavior change out of
+   scope for this behavior-preserving feature).
 
 **Router mapping** (`routers/models.py:promote`, thin adapter — byte-identical to today):
 
@@ -54,7 +65,7 @@ go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResu
 |---|---|---|
 | NOT_FOUND | 404 | (none — preserves the current pre-metric 404 at `routers/models.py:105-106` for a missing version) |
 | REFUSED | 409 | `refused` |
-| CONFLICT | 409 | `conflict` |
+| CONFLICT | 409 | `conflict` (pre-alias, via `assert_no_conflict`); the **post-promote TOCTOU** path instead emits `ok` **then** `conflict` with the alias left moved — see invariant 4 |
 | BLOCKED | 200 (`promoted:false`) | `blocked` |
 | PROMOTED | 200 (`promoted:true`) | `ok`, THEN `unresolvable` on rollback — **two** emits in order (not one) |
 | ERROR | 502 | `error` on a **promote-time** failure; **empty (no emit)** on a **pre-check** failure — version-list / `llm_target_info` `RegistryError` return 502 *before* any `REGISTRY_OPS` increment (`models.py:101-110`) |

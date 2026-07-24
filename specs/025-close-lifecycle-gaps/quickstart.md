@@ -25,12 +25,14 @@ pytest -q tests/test_batch_version_assert.py
 ```
 
 Expected (offline, injected predict_fn + fake admission): a batch requesting version A while B is
-"resident" asserts/loads A and scores A — never B — and refuses cleanly if a job holds the GPU. ASR
-batch either completes or is rejected at submission (no runtime raise).
+"resident" asserts/loads A and scores A — never B — then **restores B** in a `finally` (asserted on both a
+successful and a failed batch), and refuses cleanly if a job holds the GPU. ASR batch is rejected at
+submission (status quo; a real ASR path is optional net-new).
 
 ```bash
 # on the RTX 5070 Ti (SC-175):
-make up && <launch a batch for a non-resident version>   # scores that version under the single lease
+make up && <launch a batch for a non-resident version>   # scores that version under the single lease,
+                                                          # then the prior target is resident again
 ```
 
 ## 3. Tabular full modality (US2 → SC-177/SC-178)

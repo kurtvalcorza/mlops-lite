@@ -44,28 +44,28 @@ unit test for every extracted seam plus the existing live ordering leg, so test 
 
 ## Phase 3: User Story 1 — Store decomposition (Priority: P1) 🎯 MVP
 
-**Goal**: one repository module per relational aggregate under `platformlib/storeimpl/`, the S3 side split
-into `platformlib/objectstore.py`, and `platformlib/store.py` reduced to a thin re-export facade — with
-every call site and driver-laziness unchanged.
+**Goal**: one repository module per relational aggregate under `platformlib/storeimpl/`, the S3 side
+consolidated into the existing `platformlib/s3io.py`, and `platformlib/store.py` reduced to a thin re-export
+facade — with every call site and driver-laziness unchanged.
 
 **Independent Test**: `pytest tests/test_store_facade.py tests/test_store_decomposition.py` passes and
-`python -c "import platformlib.store, platformlib.objectstore"` succeeds with neither boto3 nor psycopg installed.
+`python -c "import platformlib.store, platformlib.s3io"` succeeds with neither boto3 nor psycopg installed.
 
 ### Tests for User Story 1
 
 - [ ] **T562** [P] [US1] Write `tests/test_store_decomposition.py` — web-free per-aggregate repository tests (predictions insert+window join, write-once `labels`→`LabelExists`, capture insert/list, jobs upsert/get, policies CRUD, suggestions create/resolve/get), using fakes/temp seams in the house `tests/_activation.py` style; assert the exact postures — fail-open on prediction/capture WRITES, **fail-loud** on label attach + window/policy/job READS (FR-343).
-- [ ] **T563** [P] [US1] Add an import-laziness assertion: importing `platformlib.objectstore` triggers no psycopg import and importing the relational path triggers no boto3 import (FR-332).
+- [ ] **T563** [P] [US1] Add an import-laziness assertion: importing `platformlib.s3io` triggers no psycopg import and importing the relational path triggers no boto3 import (FR-332). (This requires making s3io's boto3 import lazy — see T564.)
 
 ### Implementation for User Story 1
 
-- [ ] **T564** [US1] Create `platformlib/objectstore.py` — move `s3_client()` + paginated listing helpers out of `platformlib/store.py`; boto3 imported lazily.
+- [ ] **T564** [US1] Consolidate the object-store access into the **existing** `platformlib/s3io.py` (the shared Garage authority used by batch/quality/validation) — move `store.s3_client()` + `list_keys`/`list_common_prefixes` there, reconciled with s3io's `_s3()` into ONE factory (preserve the process-cache), make s3io's `boto3` import **lazy** so the relational path stays boto3-free, and re-export the helpers from the `store` facade. **Do NOT create a new `objectstore.py`** — it would be a second S3 home, undercutting the single-home goal (Codex).
 - [ ] **T565** [P] [US1] Create `platformlib/storeimpl/predictions.py` — move the predictions rows + predictions⋈labels window join (keep it one indexed join, no O(N) object scan).
 - [ ] **T566** [P] [US1] Create `platformlib/storeimpl/labels.py` — move the write-once `labels` insert (PK-enforced `LabelExists`).
 - [ ] **T567** [P] [US1] Create `platformlib/storeimpl/capture.py` — move the capture-index rows.
 - [ ] **T568** [P] [US1] Create `platformlib/storeimpl/jobs.py` — move the jobs-state access.
 - [ ] **T569** [P] [US1] Create `platformlib/storeimpl/policies.py` — move the policy rows/status access.
 - [ ] **T570** [P] [US1] Create `platformlib/storeimpl/suggestions.py` — move the promotion-suggestions access.
-- [ ] **T571** [US1] Reduce `platformlib/store.py` to a facade: re-export every moved symbol (+ `objectstore`) so all ~28 `from platformlib import store` call sites resolve unchanged; keep psycopg/boto3 lazy (depends on T564–T570). **Scope note (Codex):** this MUST also relocate the `serving_llm` pointer SQL (`store.py:485-510` — `set`/`get`/`clear_serving_llm`) into a storeimpl repository — it is aggregate-specific SQL still in `store.py`, so the import-only facade + SC-168 cannot be met while it remains. (US2's T577 relocates the `registry.py` *wrappers* on top of this US1 move, so sequence T577 after T571.) **Shared-plumbing home (Codex):** `store.py` also owns the *shared* relational infrastructure `dsn`, `connect`, `bootstrap`, `ensure_schema`, `SCHEMA_VERSION`, and `TABLES` (lines 128-192) — not aggregate SQL, but not re-exportable from nowhere. Give it an explicit home: relocate it into a dedicated `platformlib/storeimpl/_engine.py` (connection + bootstrap/schema plumbing; drivers stay lazy) — or extend `storeimpl/_base.py`, which the current plan leaves untouched — and re-export it from the facade so `store.connect`/`store.bootstrap`/`store.ensure_schema`/`store.dsn`/`store.SCHEMA_VERSION`/`store.TABLES` resolve unchanged (migration startup and every `store.connect`/`store.bootstrap` caller depend on this). Pin these exact symbols in `test_store_facade.py`.
+- [ ] **T571** [US1] Reduce `platformlib/store.py` to a facade: re-export every moved symbol (+ the `s3io` object-store helpers) so all ~28 `from platformlib import store` call sites resolve unchanged; keep psycopg/boto3 lazy (depends on T564–T570). **Scope note (Codex):** this MUST also relocate the `serving_llm` pointer SQL (`store.py:485-510` — `set`/`get`/`clear_serving_llm`) into a storeimpl repository — it is aggregate-specific SQL still in `store.py`, so the import-only facade + SC-168 cannot be met while it remains. (US2's T577 relocates the `registry.py` *wrappers* on top of this US1 move, so sequence T577 after T571.) **Shared-plumbing home (Codex):** `store.py` also owns the *shared* relational infrastructure `dsn`, `connect`, `bootstrap`, `ensure_schema`, `SCHEMA_VERSION`, and `TABLES` (lines 128-192) — not aggregate SQL, but not re-exportable from nowhere. Give it an explicit home: relocate it into a dedicated `platformlib/storeimpl/_engine.py` (connection + bootstrap/schema plumbing; drivers stay lazy) — or extend `storeimpl/_base.py`, which the current plan leaves untouched — and re-export it from the facade so `store.connect`/`store.bootstrap`/`store.ensure_schema`/`store.dsn`/`store.SCHEMA_VERSION`/`store.TABLES` resolve unchanged (migration startup and every `store.connect`/`store.bootstrap` caller depend on this). Pin these exact symbols in `test_store_facade.py`.
 - [ ] **T572** [US1] Run the full offline suite + `test_store_facade.py`; confirm zero call-site edits and green (SC-165/SC-168).
 
 **Checkpoint**: store.py is a facade with no aggregate SQL inline; US1 ships as its own PR.
@@ -84,7 +84,7 @@ mapping byte-identical (contracts/preservation.md §C2).
 
 ### Tests for User Story 2
 
-- [ ] **T573** [P] [US2] Write `tests/test_promotion_ordering.py` — web-free tests over fake `registry`/`activation`: REFUSED before `registry.promote` is called (FR-265); CONFLICT before alias moves; PROMOTED captures prior pointer before overwrite then activates; each outcome maps to the status/metric in data-model.md; assert `go_live()` is referenced by exactly one caller (the operator route).
+- [ ] **T573** [P] [US2] Write `tests/test_promotion_ordering.py` — web-free tests over fake `registry`/`activation`: REFUSED before `registry.promote` is called (FR-265); CONFLICT before alias moves (pre-check path, `conflict` only); **the post-promote TOCTOU conflict** — `activate()` raising `ActivationError` *after* promote already emitted `ok` yields `metric_statuses == ["ok", "conflict"]`, 409, alias left moved (invariant 4, a preserved existing behavior); PROMOTED captures prior pointer before overwrite then activates; each outcome maps to the status/metric in data-model.md; assert `go_live()` is referenced by exactly one caller (the operator route).
 
 ### Implementation for User Story 2
 
