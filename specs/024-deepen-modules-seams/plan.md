@@ -89,6 +89,7 @@ platformlib/
 ├── objectstore.py               # US1: NEW — S3 client + paginated listings, split off store.py
 └── storeimpl/
     ├── _base.py                 # existing: StoreError/LabelExists + epoch/json seam helpers
+    ├── _engine.py               # US1: NEW — shared dsn/connect/bootstrap/ensure_schema/SCHEMA_VERSION/TABLES (drivers lazy), re-exported by the facade
     ├── activations.py           # existing: already-extracted activation repository (the proven seam)
     ├── predictions.py           # US1: NEW — predictions aggregate repository
     ├── labels.py                # US1: NEW — write-once labels repository

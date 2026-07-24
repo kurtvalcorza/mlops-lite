@@ -61,6 +61,8 @@ go_live(name, version, *, override, preempt, registry, activation) -> GoLiveResu
 
 **Not-found ordering**: version existence is checked first; a missing version ⇒ `NOT_FOUND` ⇒ 404 with **no** `REGISTRY_OPS` emit (matching today's route, which raises the 404 before any metric increment). The web-free use-case returns this outcome; it never raises an HTTP-specific exception.
 
+**Activation-store failures stay in the 200 body** (not 502): on the PROMOTED path the gate has passed and the alias has moved, so `ActivationService.activate` runs and a down/unmigrated *activation* store is absorbed into the 200 response's `serving_llm`/`activation` fields — the `_untracked` single-shot fallback, a failed pointer write as `{active:null, error}`, or a mid-flight loss as `activation.state:"unknown"` (reconciler resumes). Only the *registry* pre-check/promote exceptions in the ERROR row become 502. The extraction MUST NOT widen 502 to the activation store (see contracts/preservation.md §C2).
+
 **Single-caller invariant**: `go_live()` is called **only** by the operator promote route. The scheduler
 and one-click policy paths keep calling `registry.promote` directly and cannot reach `go_live()`
 (FR-336 / SC-170).

@@ -14,7 +14,10 @@ it only makes a batch that names a *specific* non-resident version score that ve
 
 **Rationale**: The current flow scores whatever is resident — a silent wrong-answer. Loading through
 admission (not a side channel) keeps the single-tenant invariant; refusing (vs. preempting) respects
-"running jobs are never preempted."
+"running jobs are never preempted." **Restore-after-batch (Codex):** the batch drives the *same* resident
+engine online `/infer` uses (single VRAM lease), so loading the batch target must be paired with a `finally`
+that restores the prior desired/resident target (or unloads the temporary one) on both success and failure —
+otherwise online traffic keeps hitting the batch's version after the job ends.
 
 **Alternatives considered**: *Preempt to load the batch target* — rejected (violates non-preemptable
 jobs). *Assert-only, error if not resident* — weaker but acceptable fallback; the spec allows "load or

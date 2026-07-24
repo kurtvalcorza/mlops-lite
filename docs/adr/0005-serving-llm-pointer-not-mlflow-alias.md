@@ -28,9 +28,13 @@ third, deliberately distinct fact.
   (`platformlib.store`), written only by the gated `registry.promote` go-live path.
 - Keep MLflow as the authority for per-model `@serving` aliases, versions, gate metrics, tracking,
   and traces — unchanged.
-- The go-live sequence captures and, on failure, restores the prior pointer **together with** the
-  alias move (FR-265 rollback). The host agent resolves the pointer at each cold load via
-  `platformlib.llmresolve` (a duck-typed MLflow client, so the stdlib-only agent needs no mlflow).
+- On an unresolvable reload the go-live sequence restores the prior **pointer** only
+  (`registry.restore_serving_llm`, FR-265 rollback — `gateway/app/activation.py:_roll_back`); the candidate
+  model's MLflow `@serving` alias **remains moved**. Rollback restores the global pointer but does NOT move
+  the per-model alias back (consistent with `specs/023-platform-architecture-hardening/spec.md:290`), so
+  recovery work must treat the alias as already advanced while the pointer names the prior serving LLM. The
+  host agent resolves the pointer at each cold load via `platformlib.llmresolve` (a duck-typed MLflow client,
+  so the stdlib-only agent needs no mlflow).
 - Unset pointer ⇒ adopt the sole promoted LLM, else the configured default (`active_serving_llm_name`).
 
 ## Consequences

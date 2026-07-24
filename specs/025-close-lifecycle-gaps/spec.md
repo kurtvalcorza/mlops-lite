@@ -25,16 +25,18 @@ Priorities: **US1 (batch correctness) and US2 (tabular) are the committed core.*
 
 ### User Story 1 - Batch inference scores the right model, for every admitted modality (Priority: P1)
 
-Batch inference has two correctness gaps. (a) The job layer admits `asr` as a batch modality, but the batch flow has no ASR path and raises `ValueError` at runtime — an accepted job that always fails. (b) The flow scores whichever model version the serving tenant currently *happens* to hold; it does not load/assert the requested `model`/`registry_version` first, so a batch launched while serving holds a different version silently scores the wrong model. This is the *explicit-version-honoring* gap 015 left open — **distinct from 015's SC-068**, which deliberately scoped batch OUT (`015/research.md:70-71`: "batch-inferring a dataset with the `@serving` model is correct production behavior, not a mislabel"). 025 does NOT overturn that: a batch against `@serving` stays correct; the fix only addresses a batch that names a *specific* non-resident version.
+Batch inference has one correctness gap: the flow scores whichever model version the serving tenant currently *happens* to hold; it does not load/assert the requested `model`/`registry_version` first, so a batch launched while serving holds a different version silently scores the wrong model. This is the *explicit-version-honoring* gap 015 left open — **distinct from 015's SC-068**, which deliberately scoped batch OUT (`015/research.md:70-71`: "batch-inferring a dataset with the `@serving` model is correct production behavior, not a mislabel"). 025 does NOT overturn that: a batch against `@serving` stays correct; the fix only addresses a batch that names a *specific* non-resident version.
 
-**Why this priority**: These are correctness bugs in a shipped feature — an accepted job that fails, and a silent wrong-answer. Highest value, smallest change.
+ASR is **not** a shipped bug. The submission validator (`hostagent/jobs.py` `BATCH_MODALITIES`) already **excludes** `asr`, so an ASR batch is rejected *at submission* today — never accepted-then-failed at runtime. (`GPU_BATCH_MODALITIES`, the post-validation lease-protection set, does include `asr`, but that set is only consulted for a job that has already passed submission.) Adding a real ASR *batch* path is therefore optional net-new capability, not a correctness fix; if it is not wanted, the status quo — rejected at submission — is already correct and this story is a no-op for ASR.
 
-**Independent Test**: A batch submitted for a version that is not currently resident scores *that* version (asserted), and an ASR batch runs to completion instead of raising. Offline via injected predict_fn for the ordering/assertion logic; the real load-under-lease leg is a hardware SC.
+**Why this priority**: This is a correctness bug in a shipped feature — a silent wrong-answer (a batch scoring the resident version instead of the one it named). Highest value, smallest change.
+
+**Independent Test**: A batch submitted for a version that is not currently resident scores *that* version (asserted) — never the resident one. Offline via injected predict_fn for the ordering/assertion logic; the real load-under-lease leg is a hardware SC. ASR needs no new test: it stays rejected at submission (status quo) unless a real ASR batch path is added as net-new — in which case that path runs to completion.
 
 **Acceptance Scenarios**:
 
 1. **Given** the serving tenant holds version B, **When** a batch is launched for version A, **Then** the flow loads/asserts A (under the single-tenant lease) before scoring, or refuses with a clear error — it never silently scores B.
-2. **Given** an ASR batch job, **When** it runs, **Then** it produces transcriptions via a real ASR batch path (no `ValueError`), or ASR is removed from the admitted batch modalities so the job is rejected at submission rather than accepted-then-failed.
+2. **Given** ASR is not an admitted batch modality (`BATCH_MODALITIES` excludes it), **When** an ASR batch is submitted, **Then** it is rejected *at submission* today (status quo — correct, not accepted-then-failed); adding a real ASR batch path is optional net-new that MUST admit `asr` *and* provide the path together, never admit it without one.
 3. **Given** the version-assertion, **When** validated on the target hardware, **Then** the one-GPU-tenant invariant is preserved (load happens through admission, jobs remain non-preemptable).
 
 ---
@@ -62,11 +64,11 @@ Dataset byte-download is browser-unreachable (021 FR-215, deferred): the console
 
 **Why this priority**: A real data-stage usability gap, but lower urgency than correctness/capability. Small.
 
-**Independent Test**: From the data page, an operator downloads a dataset version's bytes; the download is proxied/presigned through the BFF so object-store credentials never reach the browser.
+**Independent Test**: From the data page, an operator downloads a dataset version's bytes; the bytes are **proxied through the BFF** (not a presigned URL, which is signed against the browser-unresolvable internal Garage endpoint) so object-store credentials never reach the browser.
 
 **Acceptance Scenarios**:
 
-1. **Given** a registered dataset version, **When** the operator requests download in the console, **Then** the bytes are delivered via the key-injecting BFF (presigned or proxied), with credentials never exposed to the browser.
+1. **Given** a registered dataset version, **When** the operator requests download in the console, **Then** the bytes are **proxied through the key-injecting BFF** (never a bare presigned internal URL), with credentials never exposed to the browser.
 
 ---
 
@@ -76,11 +78,11 @@ Full logging/labeling of streamed LLM predictions is out of scope today (022): p
 
 **Why this priority**: Closes an observability blind spot for the streaming path, but requires care on the fire-and-forget capture seam. Medium.
 
-**Independent Test**: A prediction served over `/infer/stream` produces the same prediction-log + capture rows (fail-open, off the response path) as a non-streamed prediction, so it can be labeled and enter quality/shadow.
+**Independent Test**: A prediction served over `/infer/stream` produces the same prediction-log + capture rows (fail-open, off the response path) as a non-streamed prediction, AND the streamed response surfaces the generated prediction id the label endpoint requires, so it can be labeled and enter quality/shadow.
 
 **Acceptance Scenarios**:
 
-1. **Given** a streamed LLM completion, **When** it finishes (or is captured incrementally), **Then** a prediction-log/capture row is written fail-open off the response path, identifiable by prediction id for later label attach — matching the non-streamed contract.
+1. **Given** a streamed LLM completion, **When** it finishes (or is captured incrementally), **Then** a prediction-log/capture row is written fail-open off the response path, AND the generated prediction id is delivered to the client (e.g. an initial metadata SSE event) so the prediction can later be labeled — matching the non-streamed contract.
 
 ---
 
@@ -127,7 +129,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 **Batch correctness (US1)**
 
 - **FR-348**: Batch inference MUST score the requested `model`/`registry_version` — loading/asserting it before scoring under the single-GPU-tenant lease — or refuse with a clear error; it MUST NOT silently score whatever version is resident. (This closes the explicit-`registry_version`-honoring gap batch never got — NOT 015's SC-068, which correctly kept batch-vs-`@serving` scoring as production-correct; a batch that requests `@serving` is unchanged.)
-- **FR-349**: Every modality admitted as a batch modality MUST have a working batch path; ASR MUST either gain a real batch path or be removed from the admitted set so it is rejected at submission, never accepted-then-failed at runtime.
+- **FR-349**: Every modality *admitted* as a batch modality (`hostagent/jobs.py` `BATCH_MODALITIES`) MUST have a working batch path. This invariant already holds — `asr` is NOT in `BATCH_MODALITIES`, so an ASR batch is rejected at submission, never accepted-then-failed. If ASR batch support is added, `asr` MUST be admitted *and* given a working path in the same change — never admitted without one.
 - **FR-350**: The batch load/assert MUST preserve Principle II — model loads go through admission, running jobs are never preempted.
 
 **Tabular full modality (US2)**
@@ -139,8 +141,8 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 **Parked operator/data features (US3–US6)**
 
-- **FR-355**: The operator console MUST let an operator download a dataset version's bytes via the key-injecting BFF (presigned or proxied), with object-store credentials never reaching the browser (closes 021 FR-215).
-- **FR-356**: Predictions served over the SSE streaming path MUST be captured (prediction-log/capture rows) fail-open and off the response path, identifiable by prediction id, matching the non-streamed contract — so streamed predictions can be labeled and enter quality/shadow.
+- **FR-355**: The operator console MUST let an operator download a dataset version's bytes by **proxying the bytes through the gateway/BFF** — NOT by handing the browser a presigned URL, which is signed against the internal Garage endpoint (`garage:3900`, `gateway/app/datasets.py:130-134`) and is unresolvable from the browser. Object-store credentials MUST never reach the browser (closes 021 FR-215).
+- **FR-356**: Predictions served over the SSE streaming path MUST be captured (prediction-log/capture rows) fail-open and off the response path, matching the non-streamed contract. Because `quality.log_prediction` generates the prediction id internally and the label endpoint requires a caller-supplied id (there is no prediction-list endpoint), the streaming response MUST also **deliver that id to the client** — e.g. an initial metadata SSE event — without otherwise altering the stream; the client-facing test MUST assert the id is received. Otherwise streamed predictions cannot be labeled and SC-180 is unreachable.
 - **FR-357**: The console MUST surface live per-trial HPO progress (completed trials + objective values, updating live) within the dependency-light, single-machine constraints (no external dashboard service).
 - **FR-358**: The console MUST let an operator dispatch shadow-replay and read its advisory verdict using the existing backend endpoints, with verdicts clearly marked advisory (never gating).
 

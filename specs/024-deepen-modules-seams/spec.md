@@ -17,7 +17,7 @@ A read-only architecture review (following the improve-codebase-architecture met
 ### Session 2026-07-22
 
 - Q: Which findings should the spec cover? → A: All three refactors (store decomposition, promote-ordering extraction, agent route-table) **and** record ADRs for decisions + rejected alternatives.
-- Q: How much change is the refactor allowed to make? → A: External gateway/agent API and DB-schema changes are permitted where justified, but must land as a new numbered migration + contract update; behavior-preserving is preferred and any intentional external change is called out explicitly.
+- Q: How much change is the refactor allowed to make? → A: External gateway/agent API and DB-schema changes are permitted where justified, but must land as (a schema change) a new numbered migration and/or (an API change) a contract update — independently, per FR-344; behavior-preserving is preferred and any intentional external change is called out explicitly.
 - Q: Deliverable shape? → A: Full Spec Kit feature (spec → plan → tasks).
 - Q: Definition of done / validation gate? → A: Existing offline suite passes unchanged, every extracted seam gains web-free unit tests, **and** the live ordering tests pass on a brought-up stack.
 
@@ -108,7 +108,7 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 ### Edge Cases
 
 - A store aggregate is referenced by a call site the facade did not re-export → caught by `test_store_facade.py` before merge; the facade surface must be extended, not the call site.
-- An external contract or schema change is genuinely needed by a candidate → it must be an explicit, called-out change landing as a new numbered migration + contract update, never an in-place edit to an applied migration or ad-hoc DDL.
+- An external contract or schema change is genuinely needed by a candidate → it must be an explicit, called-out change: a schema change lands a new numbered migration, an API change lands a contract update (independently, per FR-344), never an in-place edit to an applied migration or ad-hoc DDL.
 - A refactor tempts a behavior change in the gate/shadow/activation decision logic → out of scope (non-goal); such a change belongs to a separate feature.
 - The agent route-table refactor risks changing a legacy path's bytes → rejected; byte-compatibility is an acceptance gate.
 
@@ -145,7 +145,7 @@ A full-loop review surfaced gaps that split by *nature*: most are net-new capabi
 
 - **FR-342**: No new heavy dependency may be added to the gateway or agent images (no pandas/scipy/sklearn/Evidently).
 - **FR-343**: The exact failure postures MUST be preserved — **fail-open** (drop-counter) on background prediction/capture index WRITES; **fail-loud** (`QualityStoreError`→502) on operator-facing **label attach** AND on window/policy/job READS. (Correction: label attach is operator-facing and fail-loud — it MUST NOT be silently dropped; only background prediction/capture writes are fail-open.)
-- **FR-344**: Any external gateway/agent API or DB-schema change MUST land as a NEW numbered `platformlib/migrations/*.sql` file plus a contract update; applied migrations MUST NOT be edited and DDL MUST NOT be inlined in code.
+- **FR-344**: API and schema changes are governed independently, so neither forces a meaningless instance of the other. A **persisted-schema** change MUST land as a NEW numbered `platformlib/migrations/*.sql` file (applied migrations MUST NOT be edited; DDL MUST NOT be inlined in code). An **external gateway/agent API** change MUST land a contract update. An API-only change with no schema impact therefore requires a contract update but NOT a migration; a schema change requires a migration plus a contract update only where it affects a contract.
 - **FR-345**: `docs/current-architecture.md` MUST be updated in the same increment if any Snapshot row changes.
 
 **Behavior-preserving gap closures (US5)**
