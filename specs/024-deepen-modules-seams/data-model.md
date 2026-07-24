@@ -21,9 +21,12 @@ live `conn`). Shared error/seam helpers stay in `storeimpl/_base.py`.
 **Facade invariant**: every symbol currently reachable as `store.<name>` remains reachable after the move
 (re-exported in `platformlib/store.py`). `tests/test_store_facade.py` is the pinned guard.
 
-**Object store**: the existing `platformlib/s3io.py` (the shared Garage authority) gains `s3_client()` +
-paginated listings, consolidated with its `_s3()` into one factory; boto3 imported lazily. No relational
-import path is triggered by importing it, and vice-versa. No new `objectstore.py` is created — that would be
+**Object store**: the existing `platformlib/s3io.py` (the shared Garage authority) gains the store's cached
+`s3_client()` + the paginated listings, homed alongside its per-call `_s3()`; boto3 imported lazily. (The
+two access patterns are NOT merged into one factory: `_s3()` builds fresh per call and that behavior is
+load-bearing — the missing-creds-raises contract relies on it — so behavior-preservation keeps them
+distinct, one home, two functions.) No relational import path is triggered by importing it, and vice-versa.
+No new `objectstore.py` is created — that would be
 a second S3 home alongside `s3io.py`.
 
 ## Go-live seam (US2)
