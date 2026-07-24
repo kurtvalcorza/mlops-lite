@@ -144,9 +144,9 @@ shipped reality — no production behavior change.
 **Independent Test**: `pytest tests/test_drift_psi.py` passes offline; no reconciled doc/comment
 contradicts `specs/*/tasks.md` or the shipped code.
 
-- [ ] **T588** [P] [US5] Write `tests/test_drift_psi.py` — web-free unit test for `gateway/app/monitoring.py:psi` (identical distributions → ~0; shifted → expected bucketed PSI; empty/degenerate inputs handled), no live stack (FR-346/SC-173).
-- [ ] **T589** [P] [US5] Reconcile the README 023 on-hardware status against `specs/023-platform-architecture-hardening/tasks.md` (drills marked passing on the RTX 5070 Ti) — comment/doc only, no code change (FR-347/SC-174).
-- [ ] **T590** [P] [US5] Reconcile stale comments in `gateway/app/evaluation.py`: the `:17` "shadow-replay deferred" note (shipped as feature 016) and the WER/recall@k "guidance stub" docstrings (fixtures shipped in 015) — comment-only, no code-path change (FR-347/SC-174).
+- [x] **T588** [P] [US5] Write `tests/test_drift_psi.py` — web-free unit test for `gateway/app/monitoring.py:psi` (identical distributions → ~0; shifted → expected bucketed PSI; empty/degenerate inputs handled), no live stack (FR-346/SC-173).
+- [x] **T589** [P] [US5] Reconcile the README 023 on-hardware status against `specs/023-platform-architecture-hardening/tasks.md` (drills marked passing on the RTX 5070 Ti) — comment/doc only, no code change (FR-347/SC-174).
+- [x] **T590** [P] [US5] Reconcile stale comments in `gateway/app/evaluation.py`: the `:17` "shadow-replay deferred" note (shipped as feature 016) and the WER/recall@k "guidance stub" docstrings (fixtures shipped in 015) — comment-only, no code-path change (FR-347/SC-174).
 
 **Checkpoint**: drift math is offline-tested and the ground-truth docs match reality; US5 ships as its own small PR.
 

@@ -14,13 +14,14 @@ connective tissue:
     (pass/warn/blocked). Wired into the single `registry.promote` choke-point (FR-103/FR-104/FR-105).
   - **compare()** (US3) — score the `@serving` champion and a challenger on the same held-out set,
     **sequentially** (one model in VRAM at a time, Principle II), and declare a per-metric winner
-    (FR-106). Shadow-replay is deferred to a 013-dependent follow-on.
+    (FR-106). Shadow-replay shipped as feature 016 (`gateway/app/shadow.py`) on the 013 capture path.
 
 **Dependency-light by design (Principle III, FR-102).** Like `monitoring.py` (which computes PSI in
 pure Python rather than pulling Evidently+pandas+scipy onto the constrained Windows C: drive), the
 primary metrics here are implemented in **pure Python** — no sklearn / numpy / jiwer landing in the
 gateway image. The two *committed* modalities (LLM task-accuracy, vision top-1 accuracy) need only
-string/equality math; the guidance-stub metrics (WER, recall@k, AUC, perplexity) are likewise pure.
+string/equality math; the others (WER + recall@k — each committed against a 015 held-out fixture — plus
+the AUC/perplexity guidance stubs) are likewise pure.
 Heavier libs (`jiwer`, `sacrebleu`, `scikit-learn`) remain swappable behind this metric interface
 (Principle V) if a modality later needs them.
 """
@@ -130,7 +131,8 @@ def _edit_distance(a: list, b: list) -> int:
 
 def wer(hyps, refs) -> float:
     """Word Error Rate (lower-better), pure-Python — total word edits / total reference words. ASR's
-    primary metric (guidance stub until 009's ASR serving path is wired; `jiwer` is the swap-in)."""
+    primary metric, scored at registration against the 015 held-out fixture (`jiwer` is the swap-in if a
+    live serving path later needs a heavier metric)."""
     edits = words = 0
     for h, r in zip(hyps, refs):
         rt = str(r).split()
@@ -143,7 +145,7 @@ def wer(hyps, refs) -> float:
 
 def recall_at_k(retrieved, relevant, k: int = 5) -> float:
     """recall@k (higher-better): fraction of queries whose relevant id appears in the top-k retrieved.
-    Embeddings' primary metric (guidance stub until 009's embedding serving path is wired)."""
+    Embeddings' primary metric, scored at registration against the 015 held-out fixture."""
     if not relevant:
         raise EvalError("empty benchmark — nothing to score")
     hits = sum(1 for got, rel in zip(retrieved, relevant) if rel in list(got)[:k])
