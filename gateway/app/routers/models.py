@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
-from .. import activation, evaluation, quality, registry, shadow
+from .. import activation, evaluation, promotion, quality, registry, shadow
 from ..settings import TRAINER_URL, agent_headers
 
 router = APIRouter()
@@ -91,62 +91,20 @@ def promote(name: str, req: PromoteRequest):
     then resolves to the serving version (FR-006).
 
     022 (FR-255 — promote = go live, one operator action): for a TEXT-GENERATION version this route
-    is also the served-LLM switch. In order: (1) an adapter whose base does not resolve is refused
-    HERE, before the gate — the alias and the currently-served LLM stay unchanged (FR-265);
-    (2) a promoted alias move also writes the ActiveServingLLM pointer (T461/T464); (3) the agent
-    is asked for the immediate controlled reload — refused/deferred reloads (job holder, missing
-    operator confirm) are surfaced in `serving_llm`, never silent (FR-259). This route is the ONLY
-    go-live surface: the retraining policy path calls `registry.promote` directly and so can gate a
-    candidate but can never switch the served LLM (FR-275)."""
-    try:
-        versions = registry.list_versions(name)
-    except registry.RegistryError as e:
-        raise HTTPException(status_code=502, detail=f"registry error: {e}")
-    if not any(v["version"] == str(req.version) for v in versions):
-        raise HTTPException(status_code=404, detail=f"{name!r} has no version {req.version}")
-    try:
-        llm_target = registry.llm_target_info(name, req.version)
-    except registry.RegistryError as e:
-        raise HTTPException(status_code=502, detail=f"registry error: {e}")
-    if llm_target and llm_target.get("error"):
-        REGISTRY_OPS.labels(op="promote", status="refused").inc()
-        raise HTTPException(status_code=409, detail=f"promotion refused: {llm_target['error']}")
-    if llm_target:
-        # review (Codex, alias order): refuse a conflicting in-flight activation BEFORE promote
-        # moves the @serving alias — otherwise the conflict surfaces only at activate()/submit(),
-        # after the alias moved, leaving the registry naming a version we never activated.
-        try:
-            activation.service().assert_no_conflict(name, req.version)
-        except activation.ActivationError as e:
-            REGISTRY_OPS.labels(op="promote", status="conflict").inc()
-            raise HTTPException(status_code=409, detail=f"activation refused: {e}")
-    try:
-        res = registry.promote(name, req.version, override=req.override)
-    except registry.RegistryError as e:
-        REGISTRY_OPS.labels(op="promote", status="error").inc()
-        raise HTTPException(status_code=502, detail=f"registry error: {e}")
-    REGISTRY_OPS.labels(op="promote", status="blocked" if not res.get("promoted", True) else "ok").inc()
-    if llm_target and res.get("promoted"):
-        prior = registry.get_serving_llm()  # capture BEFORE the pointer moves (FR-265 rollback)
-        # 023 US5 (T522): the pointer write → keyed reload → verify/rollback sequence runs as ONE
-        # durable ActivationOperation (gateway/app/activation.py) — recoverable across crashes and
-        # restarts, reconciled from gateway lifespan (FR-305..312). With the activation store
-        # unavailable the service falls back to 022's exact single-shot sequence (same rollback +
-        # double-fault semantics), so a promote never fails merely because durability is degraded.
-        # Response shape is 022's, plus an `activation` object when the durable record exists.
-        # This route stays the ONLY go-live surface — the policy path calls registry.promote
-        # directly and cannot live-switch text generation (FR-275/307/313).
-        try:
-            sl = activation.service().activate(
-                name=name, version=req.version, prior=prior, preempt=req.preempt,
-                kind=llm_target["kind"], base=llm_target["base"])
-        except activation.ActivationError as e:
-            REGISTRY_OPS.labels(op="promote", status="conflict").inc()
-            raise HTTPException(status_code=409, detail=f"activation refused: {e}")
-        if sl.get("rolled_back") is not None:
-            REGISTRY_OPS.labels(op="promote", status="unresolvable").inc()
-        res["serving_llm"] = sl
-    return res
+    is also the served-LLM switch. The ORDERING (unresolvable-adapter refused before the alias moves,
+    conflict refused before the alias moves, prior pointer captured before overwrite, then the durable
+    activation) lives in the web-free `promotion.go_live` use-case (024 US2); this handler is the thin
+    adapter that translates the request, emits the ordered `REGISTRY_OPS` labels, and maps the outcome
+    to HTTP. This route stays the ONLY go-live surface — `promotion.go_live` has exactly one caller;
+    the retraining policy path calls `registry.promote` directly and so can gate a candidate but can
+    never switch the served LLM (FR-275/307/313, SC-170)."""
+    result = promotion.go_live(name, req.version, override=req.override, preempt=req.preempt,
+                               registry=registry, activation=activation)
+    for status in result.metric_statuses:
+        REGISTRY_OPS.labels(op="promote", status=status).inc()
+    if not result.ok:
+        raise HTTPException(status_code=result.http_status, detail=result.body["detail"])
+    return result.body
 
 
 @router.post("/models/{name}/evaluate")
