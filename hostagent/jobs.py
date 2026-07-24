@@ -55,6 +55,17 @@ LOG_DIR = os.getenv("TRAINER_LOG_DIR",
 # generation/image-classification) are the registry task names the gateway may forward.
 GPU_BATCH_MODALITIES = {"llm", "vision", "asr"}
 BATCH_MODALITIES = ("llm", "text-generation", "vision", "image-classification", "tabular")
+# Registry-task aliases → their GPU modality. `BATCH_MODALITIES` admits both the canonical names and
+# the task aliases the gateway may forward, but `GPU_BATCH_MODALITIES` (serving-holder protection) is
+# keyed by the canonical modality — so an alias-named GPU batch must be normalized before the membership
+# check, else it leaves `_gpu_batch_active` False and a promote reload / preempting request can change
+# the engine mid-batch (mixed-version results).
+_GPU_BATCH_ALIAS = {"text-generation": "llm", "image-classification": "vision"}
+
+
+def _is_gpu_batch(modality: str) -> bool:
+    """A batch that drives a GPU serving engine (so it must hold the non-preemptable serving slot)."""
+    return _GPU_BATCH_ALIAS.get(modality, modality) in GPU_BATCH_MODALITIES
 
 # How long a COMPLETED job's idempotency key still dedupes a re-issued identical launch (019/US4,
 # FR-192): long enough to cover a lost-response re-detect or a park retry (a tick or two), short
@@ -236,7 +247,7 @@ class JobManager:
                     if _within_idempotency_window(self.journal.get(jid), now, IDEMPOTENCY_WINDOW_S)}
                 self._run_keys[key] = job_id   # so a re-issued identical launch dedupes to this job
             self._active = job_id
-            if kind == "batch" and modality in GPU_BATCH_MODALITIES:
+            if kind == "batch" and _is_gpu_batch(modality):
                 self._gpu_batch_active = True
         try:
             threading.Thread(target=self._worker, args=(kind, job_id, request),

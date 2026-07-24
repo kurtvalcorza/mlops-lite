@@ -5,7 +5,7 @@ register → serve → monitor → retrain — built around a single GPU that ho
 a time under a race-free, in-process admission lock**. A spec-driven (GitHub Spec Kit) reimagining of
 a heavier reference platform, sized to a laptop.
 
-> Status: **merged through increment 022; 023 built (offline slice — its [HW] drills are the tail).**
+> Status: **merged through increment 022; 023 built — its [HW] drills now pass on the RTX 5070 Ti.**
 > Five served modalities (LLM text-generation, vision image-classification, embeddings, ASR,
 > tabular), a multimodal trainer (LLM + vision + embeddings + ASR fine-tuning with
 > lineage/adapter-chaining), a **gated promotion** path (offline eval harness + champion-challenger),
@@ -431,7 +431,7 @@ the three approved items all landed, validated on hardware (runbook records in `
 No new capability, no new resident service, no new data shape; every externally observable behavior
 was preserved (goldens, suite, and golden flows pass unchanged).
 
-## Platform architecture hardening & delivery integrity (023 — BUILT, offline slice)
+## Platform architecture hardening & delivery integrity (023 — BUILT; [HW] drills passed on the RTX 5070 Ti)
 
 023 turned the [2026-07-11 architecture review](docs/architecture-review-2026-07-11.md) into seven
 independently testable hardening stories — no new resident service, no new GPU tenant:
@@ -586,4 +586,4 @@ and served live at `http://localhost:8080/docs`.
 | 020 | stack-remediation | **Built + [HW]-validated** — object-store exit (→ Garage; decommissioned), "Bento-ectomy" (byte-identical golden gates; venv 216→195), agent-runtime verdict keep-stdlib; no new capability |
 | 021 | loop-native-console | Front-end-only IA rebuild: the nav IS the loop (`data → training → models → serving → monitoring → retraining ⟲`) with live stage badges + GPU-lease pill; monitoring read-side, retraining stage (policies/cycle board/suggestions), promote-gate centerpiece, LLM stream/trace split; 13 allow-list additions, zero backend change |
 | 022 | registry-driven-llm-serving | Promote = go-live for the LLM: ActiveServingLLM pointer, base + LoRA-adapter resolution from registry lineage, controlled reload under admission, honest agent-reported served identity (offline slice + two on-HW fixes; the switch drills are the [HW] tail) |
-| 023 | platform-architecture-hardening | **Built (offline slice)** — live-eval routing repair + retired-port guard, fail-closed internal agent credential, required CI gates (backend·ui·compose·specs) + Makefile parity, ordered checksummed SQL migrations (gateway-owned apply, legacy adoption), durable LLM activation saga + startup reconciliation + desired/resident read model, bounded stdlib agent transport (asgi deleted), fixed-cardinality metrics + local alert rules with runbooks, constitution v1.5.2 wording amendment; [HW] drills (T517/T528/T536/T555-T557) are the tail |
+| 023 | platform-architecture-hardening | **Built (offline slice)** — live-eval routing repair + retired-port guard, fail-closed internal agent credential, required CI gates (backend·ui·compose·specs) + Makefile parity, ordered checksummed SQL migrations (gateway-owned apply, legacy adoption), durable LLM activation saga + startup reconciliation + desired/resident read model, bounded stdlib agent transport (asgi deleted), fixed-cardinality metrics + local alert rules with runbooks, constitution v1.5.2 wording amendment; [HW] drills (T517/T528/T536/T555/T556) now pass on the RTX 5070 Ti |

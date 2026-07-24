@@ -81,9 +81,13 @@ def _predict_fn(modality: str):
         return predict
     if modality == "tabular":  # CPU — off-lease
         def predict(row):
-            r = httpx.post(f"{TABULAR_URL}/predict", json={"features": row}, timeout=60)
+            # The tabular child takes a BATCH body `{"rows": [...]}` and returns
+            # `{"predictions": [{"prediction", "score"}, ...]}` (serving/children/tabular_service.py) —
+            # NOT a per-row `{"features": row}`, which 422s. Send one row, return its single prediction.
+            r = httpx.post(f"{TABULAR_URL}/predict", json={"rows": [row]}, timeout=60)
             r.raise_for_status()
-            return r.json()
+            preds = r.json().get("predictions") or []
+            return preds[0] if preds else None
         return predict
     raise ValueError(f"no batch serving path for modality {modality!r}")
 
