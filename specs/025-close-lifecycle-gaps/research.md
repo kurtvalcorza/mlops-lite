@@ -20,8 +20,14 @@ that restores the prior desired/resident target (or unloads the temporary one) o
 otherwise online traffic keeps hitting the batch's version after the job ends.
 
 **Alternatives considered**: *Preempt to load the batch target* — rejected (violates non-preemptable
-jobs). *Assert-only, error if not resident* — weaker but acceptable fallback; the spec allows "load or
-refuse," so load-under-lease is preferred, assert-and-refuse is the minimum.
+jobs). *Assert-only, error if not resident* — the smaller alternative (batch refuses a non-resident version
+instead of loading it), which sidesteps the online-inference exclusion entirely.
+
+**Maintainer decision (2026-07-24): full load-under-lease + batch-wide exclusion**, NOT assert-and-refuse.
+The batch loads the requested version and holds a batch-wide exclusion that queues/refuses online `/infer`
+for the temporary target's lifetime (FR-350), accepting that online inference is briefly unavailable during
+a batch on single-GPU hardware — an explicit, hardware-confirmed trade-off, not a second VRAM tenant. This
+is the chosen scope, not an open question.
 
 ## D2 — ASR batch path (US1): add vs remove
 
