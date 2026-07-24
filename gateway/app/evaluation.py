@@ -192,14 +192,15 @@ class Metric:
 
 
 # Per-modality default primary metric + direction (the grilled defaults; all operator-configurable).
-# Keyed by the registry `task` tag (009 FR-074). LLM + vision + ASR + embeddings all score at
-# registration as of 015 (each ships a held-out fixture); tabular has no fine-tune flow → still a stub.
+# Keyed by the registry `task` tag (009 FR-074). EVERY modality now scores at registration against a
+# committed held-out fixture: LLM + vision (committed from 011), ASR + embeddings (015), and tabular
+# (025 US2 — the fine-tune flow + `benchmarks/tabular/auc_smoke.jsonl` promote AUC from stub).
 METRICS = {
     "text-generation": Metric("task_accuracy", HIGHER, task_accuracy),  # LLM (committed)
     "image-classification": Metric("accuracy", HIGHER, accuracy),       # vision (committed)
     "asr": Metric("wer", LOWER, wer),                                   # 015 — WER fixture shipped
     "embedding": Metric("recall_at_k", HIGHER, recall_at_k),            # 015 — recall@k fixture shipped
-    "tabular": Metric("auc", HIGHER, auc),                              # stub (no fine-tune flow)
+    "tabular": Metric("auc", HIGHER, auc),                              # 025 — AUC fixture shipped
 }
 # Universal LLM fallback (used when a QA answer key is absent) — kept out of METRICS so it is opt-in.
 PERPLEXITY = Metric("perplexity", LOWER, perplexity)
@@ -242,6 +243,11 @@ DEFAULT_BENCHMARKS = {
     "image-classification": "vision/shapes_smoke.jsonl",
     "embedding": "embedding/recall_smoke.jsonl",  # 015 — recall@k held-out fixture (score-at-registration)
     "asr": "asr/wer_smoke.jsonl",                  # 015 — WER held-out fixture (score-at-registration)
+    # 025 US2 — AUC held-out fixture. Registered HERE (not only shipped as a file) because
+    # `training.scoring.score_and_log` calls `load_benchmark(modality)` with no override: without this
+    # entry a tabular fine-tune raises "no default benchmark", the flow's wrapper swallows it, and the
+    # version registers WITHOUT the logged AUC the gate needs (Codex round-6 finding).
+    "tabular": "tabular/auc_smoke.jsonl",
 }
 
 
