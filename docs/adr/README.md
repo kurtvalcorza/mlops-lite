@@ -15,7 +15,8 @@ it or "helpfully" undo it.
 
 | ADR | Status | Summary |
 |---|---|---|
+| [0001](./0001-store-decomposition.md) | Accepted | Decompose `platformlib/store.py` into per-aggregate `storeimpl/` repositories behind the test-pinned facade (024 US1). |
+| [0002](./0002-go-live-paths-not-merged.md) | Rejected | Do NOT merge the three `registry.promote` callers — only the operator route may live-switch the LLM (FR-275/307/313; 024 US2). |
+| [0003](./0003-agent-stays-framework-free.md) | Accepted | The host agent dispatches with a stdlib route table, not a web framework (Principle III / FR-339; 024 US3). |
+| [0004](./0004-behavior-preserving-test-parity-gate.md) | Accepted | 024's refactors are gated by test parity — unchanged offline suite + web-free seam tests + live legs. |
 | [0005](./0005-serving-llm-pointer-not-mlflow-alias.md) | Accepted | The platform serving-LLM selection is a Postgres pointer, not an MLflow alias (documents spec 022). |
-
-_Reserved for feature 024 (added with the refactors they document — see `specs/024-deepen-modules-seams/tasks.md`):_
-`0001` store decomposition · `0002` go-live paths NOT merged (rejected) · `0003` agent stays framework-free · `0004` behavior-preserving test-parity gate.

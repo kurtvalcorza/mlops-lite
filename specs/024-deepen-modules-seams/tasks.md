@@ -104,10 +104,10 @@ mapping byte-identical (contracts/preservation.md §C2).
 
 **Independent Test**: `ls docs/adr/` shows an ADR per decision; the rejected-path ADRs state their rationale.
 
-- [ ] **T579** [P] [US4] `docs/adr/0001-store-decomposition.md` (Accepted) — per-aggregate repositories behind the test-pinned facade; alternatives rejected.
-- [ ] **T580** [P] [US4] `docs/adr/0002-go-live-paths-not-merged.md` (**Rejected** alternative) — record why unifying the three promote callers was rejected (endangers the single live-switch invariant, FR-275/307/313).
-- [ ] **T581** [P] [US4] `docs/adr/0003-agent-stays-framework-free.md` (Accepted) — stdlib route table over introducing a web framework in the agent.
-- [ ] **T582** [P] [US4] `docs/adr/0004-behavior-preserving-test-parity-gate.md` (Accepted) — refactors gated by unchanged offline suite + web-free seam tests + live leg.
+- [x] **T579** [P] [US4] `docs/adr/0001-store-decomposition.md` (Accepted) — per-aggregate repositories behind the test-pinned facade; alternatives rejected.
+- [x] **T580** [P] [US4] `docs/adr/0002-go-live-paths-not-merged.md` (**Rejected** alternative) — record why unifying the three promote callers was rejected (endangers the single live-switch invariant, FR-275/307/313).
+- [x] **T581** [P] [US4] `docs/adr/0003-agent-stays-framework-free.md` (Accepted) — stdlib route table over introducing a web framework in the agent.
+- [x] **T582** [P] [US4] `docs/adr/0004-behavior-preserving-test-parity-gate.md` (Accepted) — refactors gated by unchanged offline suite + web-free seam tests + live leg.
 - [x] **T583** [P] [US4] `docs/adr/0005-serving-llm-pointer-not-mlflow-alias.md` (Accepted) — record why the platform serving-LLM selection is a Postgres pointer, not an MLflow `@serving` alias (aliases are per-registered-model; the selection is cross-model). Delivered in this PR since it documents the pre-existing spec-022 decision, and it names the T577 relocation follow-up.
 
 **Checkpoint**: ADRs land alongside the code they document (SC-172).
