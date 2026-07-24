@@ -159,14 +159,17 @@ class ModelPolicy(_Base):
     updated_by: str = ""
 
     def validate(self):
-        from .topology import TRAINABLE_MODALITIES
+        # 025 US2: validate against the FINE-TUNE set (GPU-trained + CPU/off-lease), so a tabular
+        # policy is accepted — it has a fine-tune flow and can drive breach→retrain. Deliberately NOT
+        # `TRAINABLE_MODALITIES`, which is the GPU/HPO-capable set (tabular has no HPO search space).
+        from .topology import FINETUNE_MODALITIES
 
         errors = []
         if not self.model_name:
             errors.append({"field": "model_name", "reason": "required"})
-        if self.modality not in TRAINABLE_MODALITIES:
+        if self.modality not in FINETUNE_MODALITIES:
             errors.append({"field": "modality",
-                           "reason": f"must be one of {TRAINABLE_MODALITIES} "
+                           "reason": f"must be one of {FINETUNE_MODALITIES} "
                                      f"(a modality with a fine-tune flow)"})
         if not isinstance(self.check_interval_s, int) or self.check_interval_s < 60:
             errors.append({"field": "check_interval_s", "reason": "must be an integer >= 60"})

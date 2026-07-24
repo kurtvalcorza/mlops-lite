@@ -33,7 +33,13 @@ import threading
 import time
 import uuid
 
-from platformlib.topology import TRAINABLE_MODALITIES, Tenant, vram_budget_gb
+from platformlib.topology import (
+    CPU_TRAINABLE_MODALITIES,
+    FINETUNE_MODALITIES,
+    TRAINABLE_MODALITIES,
+    Tenant,
+    vram_budget_gb,
+)
 
 from . import admission as adm
 
@@ -66,6 +72,13 @@ _GPU_BATCH_ALIAS = {"text-generation": "llm", "image-classification": "vision"}
 def _is_gpu_batch(modality: str) -> bool:
     """A batch that drives a GPU serving engine (so it must hold the non-preemptable serving slot)."""
     return _GPU_BATCH_ALIAS.get(modality, modality) in GPU_BATCH_MODALITIES
+
+
+def _needs_gpu(spec: "_Kind", modality: str) -> bool:
+    """Whether THIS submission takes the single GPU lease (025 US2). A GPU kind normally does — but a
+    CPU/off-lease modality (tabular fine-tune) must not: it trains on CPU, so acquiring the lease would
+    block real GPU work and violate the off-lease guarantee (FR-354, Principle II)."""
+    return bool(spec.gpu) and modality not in CPU_TRAINABLE_MODALITIES
 
 # How long a COMPLETED job's idempotency key still dedupes a re-issued identical launch (019/US4,
 # FR-192): long enough to cover a lost-response re-detect or a park retry (a tick or two), short
@@ -104,10 +117,13 @@ class _Kind:
 
 
 KINDS = {
+    # 025 US2: `finetune` admits the CPU/off-lease modalities too (FINETUNE_MODALITIES) — a tabular
+    # fine-tune is valid and takes NO GPU lease (see `_needs_gpu`). `hpo` deliberately stays on the
+    # GPU-trained set: a tabular HPO job would take the lease and then fail every trial (no search space).
     "finetune": _Kind(
         "finetune", route="train", id_key="run_id", gpu=True,
         required=("dataset_name", "dataset_version", "output_name"), terminal="completed",
-        modality_set=TRAINABLE_MODALITIES, modality_default="llm",
+        modality_set=FINETUNE_MODALITIES, modality_default="llm",
         extra=("mlflow_run_id", "model", "metrics", "params", "error")),
     "hpo": _Kind(
         "hpo", route="study", id_key="study_id", gpu=True,
@@ -161,6 +177,9 @@ class JobManager:
         self.lock = threading.Lock()
         self._active = None            # job_id holding the single job slot (queued/running)
         self._gpu_batch_active = False  # a GPU-modality batch runs → serving holder not preemptable
+        self._lease_held = False       # 025 US2: this job actually holds the GPU lease (a CPU/off-lease
+        #                               tabular fine-tune runs under a gpu=True kind WITHOUT one), so the
+        #                               release paths mirror the acquire instead of assuming `spec.gpu`
         self._children = {}            # job_id -> Popen (subprocess kinds only, for cancel)
         self._run_keys = {}            # idempotency_key -> job_id (019/US4 — dedupe a re-launch)
 
@@ -213,7 +232,7 @@ class JobManager:
                                  "idempotent": True}
             if self._active is not None:
                 return 409, {"error": f"agent busy with job {self._active}"}
-            if spec.gpu:
+            if _needs_gpu(spec, modality):
                 try:  # the single GPU slot — a run/HPO/shadow is one GPU tenant (FR-097/FR-168)
                     self.admission.acquire(self.tenant, "job", self.est_gb)
                 except adm.Held as e:
@@ -221,6 +240,10 @@ class JobManager:
                                  "kind": e.holder.get("kind")}
                 except adm.VramExceeded as e:
                     return 507, {"error": str(e)}
+                # Track that the lease was ACTUALLY taken, so the release paths mirror the acquire
+                # rather than re-deriving it from `spec.gpu` (which is now per-request — a CPU/off-lease
+                # tabular fine-tune runs under a gpu=True kind while holding no lease).
+                self._lease_held = True
             job_id = request[spec.id_field] if spec.id_field else uuid.uuid4().hex[:12]
             record = {"job_id": job_id, "kind": kind, "state": "queued", "modality": modality,
                       "request": request, "submitted_at": self.clock(), spec.id_key: job_id}
@@ -233,8 +256,9 @@ class JobManager:
                 # blip must not strand the GPU lease we just took. Release it before propagating so the
                 # next submit isn't wrongly refused with a 409 by a lease no live job holds. `_active`
                 # is still unset here, so only the lease needs unwinding.
-                if spec.gpu:
+                if self._lease_held:
                     self.admission.release(self.tenant)
+                    self._lease_held = False
                 raise
             if key is not None:
                 # Prune keys whose job has aged out of the dedup window before recording this one, so
@@ -266,8 +290,12 @@ class JobManager:
         atomically under `lock` so a concurrent submit can't observe 'slot free but lease held'
         (the trainer's `_worker` finally discipline, Claude review F1)."""
         with self.lock:
-            if spec.gpu:
+            # Release only if this job ACTUALLY holds the lease (025 US2: a CPU/off-lease tabular
+            # fine-tune runs under the gpu=True `finetune` kind without one, so releasing on
+            # `spec.gpu` alone would free a lease a real GPU tenant might hold).
+            if self._lease_held:
                 self.admission.release(self.tenant)
+                self._lease_held = False
             self._active = None
             self._gpu_batch_active = False
 

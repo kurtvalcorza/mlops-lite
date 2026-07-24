@@ -46,8 +46,16 @@ def test_valid_policy_passes():
 
 
 def test_unknown_modality_rejected():
-    assert "modality" in _errors(_doc(modality="tabular"))   # no fine-tune flow → rejected
-    assert "modality" in _errors(_doc(modality="banana"))
+    assert "modality" in _errors(_doc(modality="banana"))     # not a modality at all
+    assert "modality" in _errors(_doc(modality="embedding"))  # the TASK tag, not the modality name
+
+
+def test_tabular_policy_accepted_since_025_gave_it_a_finetune_flow():
+    """025 US2 (intentional behavior CHANGE): tabular gained a fine-tune flow + a committed AUC gate,
+    so it is a valid policy modality — it can drive breach→retrain like vision. Before 025 this was
+    rejected ('no fine-tune flow'); the validator now checks FINETUNE_MODALITIES (GPU-trained + the
+    CPU/off-lease set), NOT the GPU/HPO-capable TRAINABLE_MODALITIES."""
+    assert _errors(_doc(modality="tabular")) == set()
 
 
 def test_interval_and_monitors_rejected():
