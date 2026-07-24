@@ -124,13 +124,13 @@ pass; agent imports with zero third-party packages.
 
 ### Tests for User Story 3
 
-- [ ] **T584** [P] [US3] Write `tests/test_agent_routes.py` — each handler is invoked directly with fake `admission`/`journal`/`manager`/`jobs` (no HTTP server, no raw-path parsing); assert the public route set from contracts/preservation.md §C3.
+- [x] **T584** [P] [US3] Write `tests/test_agent_routes.py` — each handler is invoked directly with fake `admission`/`journal`/`manager`/`jobs` (no HTTP server, no raw-path parsing); assert the public route set from contracts/preservation.md §C3.
 
 ### Implementation for User Story 3
 
-- [ ] **T585** [US3] Introduce an ordered route table (matcher → handler) in `hostagent/main.py` and split each `if path == …` branch body into a named handler function; matching keys on the parsed path.
-- [ ] **T586** [US3] Route `handle_get`/`handle_post` through the table (first match wins; unmatched → 404); preserve open GET probes, keyed `/health`, secret-gated `/control/*`, and byte-compatible legacy aliases (FR-340).
-- [ ] **T587** [US3] Confirm the agent imports/starts with no pip dependency (FR-339) and run `test_agent_http.py`/`test_agent_jobs_http.py`/`test_agent_auth.py` unchanged (SC-165/SC-171).
+- [x] **T585** [US3] Introduce an ordered route table (matcher → handler) in `hostagent/main.py` and split each `if path == …` branch body into a named handler function; matching keys on the parsed path.
+- [x] **T586** [US3] Route `handle_get`/`handle_post` through the table (first match wins; unmatched → 404); preserve open GET probes, keyed `/health`, secret-gated `/control/*`, and byte-compatible legacy aliases (FR-340).
+- [x] **T587** [US3] Confirm the agent imports/starts with no pip dependency (FR-339) and run `test_agent_http.py`/`test_agent_jobs_http.py`/`test_agent_auth.py` unchanged (SC-165/SC-171).
 
 **Checkpoint**: agent handlers independently testable; US3 ships as its own PR.
 
