@@ -9,7 +9,9 @@ pulls torch into its own process — that is exactly what the subprocess isolati
 """
 import os
 
-VALID_MODALITIES = ("llm", "vision", "embeddings", "asr")  # one daemon dispatches all four
+#: 025 US2: tabular joins the dispatch as a CPU/off-lease modality (no GPU lease, no HPO search space).
+#: Mirrors `platformlib.topology.FINETUNE_MODALITIES` — the set the `finetune` job kind admits.
+VALID_MODALITIES = ("llm", "vision", "embeddings", "asr", "tabular")
 
 
 def dispatch(modality: str, req: dict) -> dict:
@@ -52,4 +54,11 @@ def dispatch(modality: str, req: dict) -> dict:
             base_model=base, epochs=int(req.get("epochs", 3)), lr=float(req.get("lr", 1e-4)),
             grad_accum=int(req.get("grad_accum", 4)), warmup_ratio=float(req.get("warmup_ratio", 0.1)),
             lora_r=int(req.get("lora_r", 8)), quant=req.get("quant", "q8_0"), **common)
+    if modality == "tabular":
+        # 025 US2: CPU/off-lease LightGBM fine-tune (no GPU lease held — FR-354).
+        from flows.tabular_finetune import tabular_finetune_flow
+        return tabular_finetune_flow(
+            num_leaves=int(req.get("num_leaves", 15)),
+            learning_rate=float(req.get("learning_rate", req.get("lr", 0.1))),
+            n_estimators=int(req.get("n_estimators", 60)), base_model=base, **common)
     raise ValueError(f"unknown modality {modality!r} (expected {'|'.join(VALID_MODALITIES)})")
