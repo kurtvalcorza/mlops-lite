@@ -118,7 +118,7 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 - A batch version-assertion would require loading a model while a job holds the GPU → jobs are non-preemptable; the batch must queue/refuse, never preempt (Principle II).
 - Tabular quality where no clean per-request label exists → document the exclusion rather than fabricate labels.
-- Streamed-prediction capture must never block or alter the streamed response → fail-open, off the response path, like the existing tracing/quality capture.
+- Streamed-prediction capture must never block or alter the streamed response — **except** the FR-356-required initial `prediction_id` metadata event the client needs to attach a label → otherwise fail-open, off the response path, like the existing tracing/quality capture.
 - Any persisted-state change (e.g. a tabular-specific column) → a NEW numbered migration, never an edit to an applied one.
 - The parked features (US3–US6) risk sprawling → each is independently shippable; if a story proves larger than a slice, it spins into its own follow-on increment rather than bloating a single PR.
 

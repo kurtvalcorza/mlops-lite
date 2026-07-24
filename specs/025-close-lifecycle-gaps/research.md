@@ -57,10 +57,14 @@ no clean label, **document the exclusion with rationale** rather than fabricate 
 ## D5 — Streamed-prediction capture (US4): reuse the fail-open seam
 
 **Decision**: Capture `/infer/stream` predictions via the **existing fail-open capture seam** used by
-the non-streamed path, off the response path, keyed by prediction id.
+the non-streamed path, off the response path, keyed by prediction id. The generated `prediction_id` MUST
+also be delivered to the client (e.g. an initial metadata SSE event) so the streamed caller can attach the
+promised delayed label — `quality.log_prediction` mints the id internally and the label endpoint requires a
+caller-supplied id, so an undelivered id makes SC-180 unreachable (FR-356).
 
-**Rationale**: Matches the non-streamed contract exactly; never blocks/alters the stream (the fire-and-
-forget discipline already proven for tracing/quality).
+**Rationale**: Matches the non-streamed contract exactly; never blocks/alters the stream — save for that one
+required prediction-id metadata event — reusing the fire-and-forget discipline already proven for
+tracing/quality.
 
 ## D6 — HPO progress (US5): in-process stream, no external dashboard
 
