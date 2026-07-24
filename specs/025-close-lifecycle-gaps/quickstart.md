@@ -33,9 +33,13 @@ payload (not `{"features":...}` → 422). ASR batch is rejected at submission (s
 optional net-new).
 
 ```bash
-# on the RTX 5070 Ti (SC-175):
+# on the RTX 5070 Ti (SC-175) — the fake-admission offline test can't exercise real teardown/OOM/routing:
 make up && <launch a batch for a non-resident version>   # scores that version under the single lease,
                                                           # then the prior target is resident again
+# also on hardware (the two highest-risk FR-350 guarantees):
+#   - a load/OOM failure leaves the prior target resident again;
+#   - a concurrent online /infer during the batch is excluded (never the temp version) while batch rows proceed;
+#   - a promote landing mid-batch is preserved (restore re-reads the latest desired target).
 ```
 
 ## 3. Tabular full modality (US2 → SC-177/SC-178)
