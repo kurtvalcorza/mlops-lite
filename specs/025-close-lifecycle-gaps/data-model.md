@@ -53,5 +53,5 @@ concurrent online `/infer` during the batch never observes the temporary version
 
 Tabular joins the existing per-modality contract used by vision:
 `fine-tune flow → register version (task=tabular, engine tags, logged AUC) → gate on held-out fixture →
-promote → serve (existing LightGBM child) → quality window (where a per-request label exists) → breach→retrain`.
+promote → serve (existing LightGBM child, **version-aware reload on promote** — a warm child must be invalidated/reloaded, not left on the old booster) → quality window (where a per-request label exists) → breach→retrain`.
 No new entity — it fills the produce/eval/monitor columns that were previously stubbed for tabular.
