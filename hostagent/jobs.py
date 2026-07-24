@@ -50,10 +50,13 @@ RUN_SHADOW = os.path.join(_TRAINING, "run_shadow.py")  # per-shadow-replay subpr
 LOG_DIR = os.getenv("TRAINER_LOG_DIR",
                     os.path.join(tempfile.gettempdir(), "mlops-lite-trainer-logs"))
 
-# Batch modalities that drive a serving engine's GPU (llm/vision/asr) — a batch of one of these
-# makes the serving holder non-preemptable (FR-155). A tabular batch is off-GPU. The aliases (text-
-# generation/image-classification) are the registry task names the gateway may forward.
-GPU_BATCH_MODALITIES = {"llm", "vision", "asr"}
+# Batch modalities that drive a serving engine's GPU (llm/vision) — a batch of one of these makes the
+# serving holder non-preemptable (FR-155). A tabular batch is off-GPU. Must stay a subset of
+# BATCH_MODALITIES (the submission allowlist): 025 US1 (T598/FR-349) dropped `asr`, which the batch
+# flow has no serving path for and which BATCH_MODALITIES never admitted anyway — so no admitted batch
+# modality can be accepted-then-fail at runtime. The aliases (text-generation/image-classification)
+# are the registry task names the gateway may forward.
+GPU_BATCH_MODALITIES = {"llm", "vision"}
 BATCH_MODALITIES = ("llm", "text-generation", "vision", "image-classification", "tabular")
 
 # How long a COMPLETED job's idempotency key still dedupes a re-issued identical launch (019/US4,

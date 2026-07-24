@@ -25,13 +25,13 @@ description: "Task list for feature 025 — close lifecycle gaps"
 
 ## Phase 1: Setup
 
-- [ ] **T594** Establish the green baseline: run `make lint test spec-check` and record the current pass state as the regression reference (SC-183).
+- [X] **T594** Establish the green baseline: run `make lint test spec-check` and record the current pass state as the regression reference (SC-183). *(Baseline: 645 passed / 41 skipped, ruff clean, spec-check OK — the reference this US1 slice preserves.)*
 
 ---
 
 ## Phase 2: Foundational
 
-- [ ] **T595** Confirm no change in this feature needs a schema migration; if one emerges, create it as a NEW numbered `platformlib/migrations/*.sql` + contract update (FR-359) before dependent tasks.
+- [X] **T595** Confirm no change in this feature needs a schema migration; if one emerges, create it as a NEW numbered `platformlib/migrations/*.sql` + contract update (FR-359) before dependent tasks. *(US1 is behavior-only — no persisted-state change, no migration.)*
 
 ---
 
@@ -41,9 +41,9 @@ description: "Task list for feature 025 — close lifecycle gaps"
 
 **Independent Test**: a batch for a non-resident version scores that version (offline ordering + injected predict_fn); an ASR batch completes or is rejected at submission.
 
-- [ ] **T596** [P] [US1] Write `tests/test_batch_version_assert.py` — offline: a batch requesting version A while B is "resident" asserts/loads A before scoring (injected predict_fn + fake admission), never scores B; refuses cleanly if a job holds the GPU (FR-348/FR-350).
-- [ ] **T597** [US1] In `training/flows/batch_infer.py`, load/assert the requested `model`/`registry_version` under admission before scoring (once per batch, not per record); refuse without preempting a running job (FR-348/FR-350, closes SC-068).
-- [ ] **T598** [US1] Resolve the ASR batch inconsistency: either add a real ASR batch path in `batch_infer.py` OR remove `asr` from `GPU_BATCH_MODALITIES` in `hostagent/jobs.py` so it is rejected at submission — no admitted modality raises at runtime (FR-349/SC-176).
+- [X] **T596** [P] [US1] Write `tests/test_batch_version_assert.py` — offline: a batch requesting version A while B is "resident" asserts/loads A before scoring (injected predict_fn + fake admission), never scores B; refuses cleanly if a job holds the GPU (FR-348/FR-350).
+- [X] **T597** [US1] In `training/flows/batch_infer.py`, load/assert the requested `model`/`registry_version` under admission before scoring (once per batch, not per record); refuse without preempting a running job (FR-348/FR-350, closes SC-068). *(Probe the agent-reported resident identity + controlled `@serving` reload; `BatchVersionMismatch` on a confirmed mismatch — consistent with 015's score-at-registration, no arbitrary cold-load.)*
+- [X] **T598** [US1] Resolve the ASR batch inconsistency: either add a real ASR batch path in `batch_infer.py` OR remove `asr` from `GPU_BATCH_MODALITIES` in `hostagent/jobs.py` so it is rejected at submission — no admitted modality raises at runtime (FR-349/SC-176). *(Removed `asr` — the batch flow has no ASR path and `BATCH_MODALITIES` never admitted it, so an ASR batch is already 400-rejected at submit; the two sets are now consistent.)*
 - [ ] **T599** [HW] [US1] On the RTX 5070 Ti box: validate the load-under-lease leg — a batch for a non-resident version scores it correctly while preserving one-GPU-tenant (SC-175).
 
 **Checkpoint**: batch is correct for every admitted modality; ships as its own PR.
