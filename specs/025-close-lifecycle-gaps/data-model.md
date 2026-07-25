@@ -35,8 +35,13 @@ batch_infer(model, registry_version, dataset, ...):
       ensure target resident (load once for the batch)             # NEW: INSIDE the try — a load/OOM failure still restores
       score each record against target                             # unchanged scoring core (rows carry the batch marker)
     finally:
-      desired = re-read latest desired target                      # NEW: a promote may have landed mid-batch (reload deferred)
-      restore desired (or unload target); release exclusion        # NEW: restore the CURRENT desired, not the stale snapshot
+      try:
+        desired = re-read latest desired target                    # NEW: a promote may have landed mid-batch (reload deferred)
+        restore desired (or unload target)                         # NEW: restore the CURRENT desired, not the stale snapshot
+      except restore-seam failure:                                 # NEW: report it; propagate only if the batch itself succeeded
+        log; re-raise ONLY when the batch did not already fail
+      finally:
+        release exclusion                                          # NEW: UNCONDITIONAL — a raising restore must never leak the gate
 ```
 
 Outcome vocabulary: `scored(target)` | `refused(job_holds_gpu)` | `error(unresolvable)`. The scoring core
@@ -51,9 +56,16 @@ reload because a GPU batch is active) rather than blindly restore the captured s
 newer promotion. (3) A batch-wide exclusion (not just `_gpu_batch_active` eviction-blocking) MUST
 queue/refuse online `/infer` for the temporary target's lifetime — while letting the batch's OWN rows through
 (they post to the same `/engines/*` paths in separate agent threads, so they need a marker/token or an
-agent-internal seam, else the batch deadlocks against itself). Hardware validation (SC-175) MUST assert the
-resident identity is the prior target again after both a successful and a **load-failed** batch, and that a
-concurrent online `/infer` during the batch never observes the temporary version.
+agent-internal seam, else the batch deadlocks against itself). (4) The exclusion release MUST be
+**unconditional** — its own nested `finally` — because the restore runs while the exclusion is still held: a
+read/write failure in the pointer seam (store outage) would otherwise skip the release and leave online
+`/infer` gated until the agent restarts, converting a recoverable cleanup error into an outage. That restore
+failure MUST NOT be silent either (the shared engine may still hold the batch's target, so online traffic
+would serve the wrong version once the gate lifts): it propagates when the batch itself **succeeded**, and is
+logged **without displacing the batch's own exception** when the batch already failed — the operator needs the
+original cause, not the cleanup's. Hardware validation (SC-175) MUST assert the resident identity is the prior
+target again after both a successful and a **load-failed** batch, and that a concurrent online `/infer` during
+the batch never observes the temporary version.
 
 ## Tabular as a full modality (US2)
 

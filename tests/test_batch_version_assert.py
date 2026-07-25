@@ -112,14 +112,23 @@ class _Engine:
 
 
 class _Desired:
-    def __init__(self, value):
+    def __init__(self, value, fail_read=False, fail_restore=False):
         self.value = value        # tests mutate this to simulate a promote landing mid-batch
         self.restored = []
+        self.fail_read, self.fail_restore = fail_read, fail_restore
+        self._reads = 0
 
     def read(self):
+        self._reads += 1
+        # The FIRST read is the pre-acquire snapshot (nothing held yet); fail only the `finally`
+        # re-read, which is the one that runs with the exclusion held.
+        if self.fail_read and self._reads > 1:
+            raise OSError("pointer store unreachable")
         return self.value
 
     def restore(self, target):
+        if self.fail_restore:
+            raise OSError("pointer store unreachable on write")
         self.restored.append(target)
 
 
@@ -177,6 +186,66 @@ def test_session_restores_a_promotion_that_landed_mid_batch():
 
     _session(adm, exc, eng, des).run("A", score)
     assert des.restored == ["C"]                    # restored the NEWER desired, never the stale "B"
+
+
+# --- a FAILING restore seam must not leak the exclusion, nor hide the batch's own cause ------------
+#
+# The restore path runs while the exclusion is HELD, so anything it raises used to skip
+# `exclusion.release()` outright: online /infer would stay gated until the agent restarted (review
+# round 7 flagged the narrower exception-masking half of this). Both halves are pinned below, because
+# the real read/restore seams land later (T599, [HW]) behind exactly these interfaces.
+
+def test_restore_read_failure_releases_the_exclusion_and_fails_loud():
+    """A SUCCEEDED batch whose restore fails must report it — the engine may still hold the target."""
+    adm, exc, eng, des = _Admission(), _Exclusion(), _Engine(), _Desired("B", fail_read=True)
+    try:
+        _session(adm, exc, eng, des).run("A", lambda token: "result")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("a restore failure on a successful batch must propagate, not be silent")
+    assert exc.events == ["acquire", "release"]      # THE LEAK: release must still have happened
+
+
+def test_restore_write_failure_releases_the_exclusion_and_fails_loud():
+    adm, exc, eng, des = _Admission(), _Exclusion(), _Engine(), _Desired("B", fail_restore=True)
+    try:
+        _session(adm, exc, eng, des).run("A", lambda token: "result")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("a failed restore WRITE must propagate too")
+    assert exc.events == ["acquire", "release"]
+
+
+def test_restore_failure_never_displaces_the_batchs_own_exception():
+    """When scoring already failed, the operator needs THAT cause — not the cleanup's."""
+    adm, exc, eng, des = _Admission(), _Exclusion(), _Engine(), _Desired("B", fail_read=True)
+    logs = []
+    session = bs.BatchSession(admission=adm, exclusion=exc, engine=eng, desired=des,
+                              log=lambda *a, **k: logs.append(" ".join(str(x) for x in a)))
+    try:
+        session.run("A", lambda token: (_ for _ in ()).throw(ValueError("scoring blew up")))
+    except ValueError as e:
+        assert "scoring blew up" in str(e)          # the BATCH's cause survives...
+    except OSError:
+        raise AssertionError("the cleanup failure displaced the batch's own exception")
+    else:
+        raise AssertionError("expected the scoring failure to propagate")
+    assert any("RESTORE FAILED" in m for m in logs)  # ...and the cleanup failure is still reported
+    assert exc.events == ["acquire", "release"]
+
+
+def test_load_failure_with_a_failing_restore_still_releases():
+    """Both seams down at once — the worst case still cannot leave online inference gated."""
+    adm, exc, eng, des = _Admission(), _Exclusion(), _Engine(fail=True), _Desired("B", fail_read=True)
+    try:
+        _session(adm, exc, eng, des).run("A", lambda token: "unreached")
+    except RuntimeError as e:
+        assert "OOM" in str(e)                      # the load failure is still what surfaces
+    except OSError:
+        raise AssertionError("the cleanup failure displaced the load failure")
+    assert exc.events == ["acquire", "release"]
 
 
 if __name__ == "__main__":

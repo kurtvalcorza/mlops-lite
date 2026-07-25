@@ -14,7 +14,10 @@ engine online `/infer` uses, so honoring the version means, in order:
      engine still hits the restore;
   4. in `finally`, RE-READ the latest desired target (a promote can land mid-batch, its reload
      deferred while the batch held the engine) and restore THAT — not the stale captured snapshot —
-     then release the exclusion.
+     then release the exclusion. The release is UNCONDITIONAL (its own nested `finally`): a restore
+     seam that raises must not leak the exclusion, or online `/infer` stays gated until the agent
+     restarts. A restore failure is reported, never silent — it propagates when the batch itself
+     succeeded, and is logged without displacing the batch's own exception when it did not.
 
 This module is the pure ORDERING. The engine-load, the exclusion gate, and the desired-pointer are
 injected seams (duck-typed), so the sequence unit-tests offline with fakes
@@ -60,20 +63,38 @@ class BatchSession:
         prior = self._desired.read()        # generation snapshot (telemetry; the restore re-reads)
         token = self._exclusion.acquire()   # online /infer excluded; `token` is the batch's bypass
         loaded = False
+        failing = False
         try:
             self._engine.load(target)       # INSIDE the try — a load/OOM failure still restores
             loaded = True
             return score(token)
+        except BaseException:
+            failing = True                  # tracked explicitly: sys.exc_info() would also report an
+            raise                           # exception being handled by an OUTER frame's `except`
         finally:
-            # A promote can land mid-batch (its reload deferred while the batch held the engine), so
-            # the desired pointer may now name a NEWER target than `prior`. Restore what's desired NOW —
-            # restoring the stale `prior` would erase that promotion.
-            desired = self._desired.read()
-            if desired != prior:
-                self._log("batch: desired target changed mid-batch "
-                          f"({prior!r} -> {desired!r}); restoring the newer target", flush=True)
-            self._desired.restore(desired)
-            self._exclusion.release()
-            if not loaded:
-                self._log("batch: target load failed; desired target restored, exclusion released",
-                          flush=True)
+            try:
+                # A promote can land mid-batch (its reload deferred while the batch held the engine),
+                # so the desired pointer may now name a NEWER target than `prior`. Restore what's
+                # desired NOW — restoring the stale `prior` would erase that promotion.
+                desired = self._desired.read()
+                if desired != prior:
+                    self._log("batch: desired target changed mid-batch "
+                              f"({prior!r} -> {desired!r}); restoring the newer target", flush=True)
+                self._desired.restore(desired)
+            except Exception as exc:  # noqa: BLE001 — see the two postures below
+                # The restore seam itself failed (a store outage while reading/writing the pointer).
+                # The shared engine may still hold the BATCH's target, so online /infer would serve the
+                # wrong version once the exclusion lifts: never silent.
+                self._log(f"batch: RESTORE FAILED ({exc!r}) — the shared engine may still hold "
+                          f"{target!r}; the exclusion is released regardless", flush=True)
+                if not failing:
+                    raise                   # a SUCCEEDED batch fails loud: the operator must converge
+                # ...but a batch that was ALREADY failing keeps its own exception as the surfaced one —
+                # the cause the operator needs — with this one logged above, not swallowed silently.
+            finally:
+                # Unconditional: a restore failure must never LEAK the exclusion, or online /infer
+                # stays gated until the agent restarts.
+                self._exclusion.release()
+                if not loaded:
+                    self._log("batch: target load failed; desired target restored, exclusion "
+                              "released", flush=True)
