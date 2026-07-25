@@ -15,11 +15,11 @@ delete it, so repeated live runs accumulate junk versions in the registry. This 
 smoke test — prune them out-of-band (or set `PROMOTE_ORDER_MODEL` to an isolated throwaway name) if
 the accumulation is a concern.
 
-Coverage boundary: `_serving_version()` reads only the model-local `@serving` MLflow alias, NOT the
-platform-global `serving_llm` Postgres pointer. A regression that wrote the global pointer during a
-refused promote while leaving the alias + response shape unchanged would pass this test. A complete
-check should also assert the desired-LLM pointer is unchanged (via the activation / serving-LLM read
-surface) — worth adding when this leg is next revisited on hardware.
+Both halves of the go-live identity are captured across the refusal (review, Codex): the model-local
+`@serving` MLflow alias AND the platform-global `serving_llm` Postgres pointer, read through
+`/serving/llm/activation`'s `desired`. Checking only the alias would let a regression that writes the
+global pointer during a refused promote — leaving the alias and the response shape untouched — pass
+here while changing which LLM the next cold load serves.
 """
 import json
 import os
@@ -52,6 +52,21 @@ def _serving_version(name):
     return (body.get("serving") or {}).get("version") if s == 200 else None
 
 
+def _desired_llm():
+    """The platform-global desired serving-LLM identity as `(model_name, version)`.
+
+    This is the `serving_llm` Postgres pointer (023 US5 read model), a DIFFERENT authority from the
+    per-model MLflow alias above — the pointer decides what the next cold load serves. Returns a
+    marker tuple rather than raising so the caller reports an unreadable surface as a failure instead
+    of silently comparing two Nones and calling it "unchanged".
+    """
+    s, body = _req("GET", "/serving/llm/activation")
+    if s != 200:
+        return ("<unreadable>", s)
+    desired = body.get("desired") or {}
+    return (desired.get("model_name"), desired.get("version"))
+
+
 def main() -> int:
     name = os.getenv("PROMOTE_ORDER_MODEL", "promote-order-adapter")
 
@@ -66,7 +81,14 @@ def main() -> int:
         return 1
     version = reg["version"]
 
-    before = _serving_version(name)  # capture the serving pointer BEFORE the refused promote
+    # Capture BOTH go-live authorities before the refused promote: the model-local alias and the
+    # platform-global desired pointer.
+    before = _serving_version(name)
+    before_desired = _desired_llm()
+    if before_desired[0] == "<unreadable>":
+        print(f"[FAIL] /serving/llm/activation unreadable ({before_desired[1]}) — cannot verify the "
+              f"global serving pointer is preserved")
+        return 1
 
     sp, pr = _req("POST", f"/models/{name}/promote", {"version": version})
     if sp != 409 or "refused" not in json.dumps(pr):
@@ -81,7 +103,15 @@ def main() -> int:
         print(f"[FAIL] alias moved on a refused promote: {before!r} -> {after!r}")
         return 1
 
-    print(f"[OK] unresolvable adapter v{version} refused before the alias moved (FR-265)")
+    after_desired = _desired_llm()
+    if before_desired != after_desired:
+        blamed = " — and it now names the REFUSED model" if after_desired[0] == name else ""
+        print(f"[FAIL] the global serving-LLM pointer moved on a refused promote: "
+              f"{before_desired!r} -> {after_desired!r}{blamed}")
+        return 1
+
+    print(f"[OK] unresolvable adapter v{version} refused before EITHER the alias or the global "
+          f"serving pointer moved (FR-265) — pointer still {before_desired[0]!r}")
     return 0
 
 

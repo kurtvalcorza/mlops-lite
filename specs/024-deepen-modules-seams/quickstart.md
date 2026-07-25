@@ -60,8 +60,11 @@ make up
 pytest -q tests/test_promote_ordering.py     # skips cleanly if the stack is down
 ```
 
-Expected: on a brought-up stack, an unresolvable text-generation adapter is refused (409) and the `@serving`
-pointer is unchanged before/after — the ordering invariant holds end-to-end.
+Expected: on a brought-up stack, an unresolvable text-generation adapter is refused (409) and BOTH go-live
+authorities are unchanged before/after — the model-local `@serving` MLflow alias and the platform-global
+`serving_llm` pointer (read via `/serving/llm/activation`'s `desired`). The ordering invariant holds
+end-to-end. Checking the alias alone would miss a regression that writes the global pointer during a
+refusal, since that pointer — not the alias — decides what the next cold load serves.
 
 ## 6. Decisions recorded (US4 → SC-172)
 
