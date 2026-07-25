@@ -8,6 +8,7 @@ import base64
 from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from prometheus_client import Counter
 from pydantic import BaseModel
 
@@ -66,7 +67,10 @@ def get_dataset(name: str):
 
 @router.get("/datasets/{name}/{version}")
 def get_dataset_version(name: str, version: str):
-    """Resolve one pinned dataset version → manifest + presigned download URL."""
+    """Resolve one pinned dataset version → its manifest.
+
+    025 US3 (FR-355): no presigned `download_url` — see `datasets.get_dataset`. Bytes come from
+    `GET /datasets/{name}/{version}/download`."""
     try:
         m = datasets.get_dataset(name, version)
     except datasets.DatasetError as e:
@@ -74,3 +78,26 @@ def get_dataset_version(name: str, version: str):
     if m is None:
         raise HTTPException(status_code=404, detail=f"dataset '{name}' has no version {version}")
     return m
+
+
+@router.get("/datasets/{name}/{version}/download")
+def download_dataset_version(name: str, version: str):
+    """Stream a pinned dataset version's bytes THROUGH the gateway (025 US3, FR-355 — closes 021 FR-215).
+
+    A byte proxy, deliberately NOT a presigned redirect: the presigned URL this replaced was signed
+    against the internal object-store endpoint (`garage:3900`), so a browser could not resolve it — and
+    handing one out would leak a signed object-store capability. Here the gateway (which holds the
+    credentials) relays the object in bounded chunks, so the operator console downloads via the
+    key-injecting BFF and no credential or signed URL ever reaches the browser."""
+    try:
+        opened = datasets.open_dataset_bytes(name, version)
+    except datasets.DatasetError as e:
+        raise HTTPException(status_code=502, detail=f"dataset store error: {e}")
+    if opened is None:
+        raise HTTPException(status_code=404,
+                            detail=f"dataset '{name}' has no data for version {version}")
+    chunks, size = opened
+    headers = {"Content-Disposition": f'attachment; filename="{name}-{version}.jsonl"'}
+    if size is not None:
+        headers["Content-Length"] = str(size)
+    return StreamingResponse(chunks, media_type="application/x-ndjson", headers=headers)
