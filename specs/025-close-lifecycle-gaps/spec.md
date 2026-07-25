@@ -143,7 +143,11 @@ The shadow-replay *backend* is fully implemented (feature 016) but its console U
 
 **Parked operator/data features (US3–US6)**
 
-- **FR-355**: The operator console MUST let an operator download a dataset version's bytes by **proxying the bytes through the gateway/BFF** — NOT by handing the browser a presigned URL, which is signed against the internal Garage endpoint (`garage:3900`, `gateway/app/datasets.py:130-134`) and is unresolvable from the browser. Object-store credentials MUST never reach the browser (closes 021 FR-215).
+- **FR-355**: The operator console MUST let an operator download a dataset version's bytes by **proxying the bytes through the gateway/BFF** — NOT by handing the browser a presigned URL, which is signed against the internal Garage endpoint (`garage:3900`, `gateway/app/datasets.py:130-134`) and is unresolvable from the browser. Object-store credentials MUST never reach the browser (closes 021 FR-215). The download MUST advertise the
+version's **declared `format`** (filename extension + content type), resolved through a whitelist and
+degrading to a generic binary type for an unknown/unset format — `format` is persisted verbatim and
+unvalidated at registration, so it MUST NOT be interpolated into a response header, where a crafted value
+could inject `Content-Disposition` parameters.
 - **FR-356**: Predictions served over the SSE streaming path MUST be captured (prediction-log/capture rows) fail-open and off the response path, matching the non-streamed contract. Because `quality.log_prediction` generates the prediction id internally and the label endpoint requires a caller-supplied id (there is no prediction-list endpoint), the streaming response MUST also **deliver that id to the client** — e.g. an initial metadata SSE event — without otherwise altering the stream; the client-facing test MUST assert the id is received. Otherwise streamed predictions cannot be labeled and SC-180 is unreachable.
 - **FR-357**: The console MUST surface live per-trial HPO progress (completed trials + objective values, updating live) within the dependency-light, single-machine constraints (no external dashboard service).
 - **FR-358**: The console MUST let an operator dispatch shadow-replay and read its advisory verdict using the existing backend endpoints, with verdicts clearly marked advisory (never gating).

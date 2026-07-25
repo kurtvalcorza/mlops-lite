@@ -195,7 +195,7 @@ function VersionRow({ name, version: v }: { name: string; version: Version }) {
               href={`/api/gw/datasets/${encodeURIComponent(detail.name)}/${encodeURIComponent(
                 detail.version,
               )}/download`}
-              download={`${detail.name}-${detail.version}.jsonl`}
+              download={`${detail.name}-${detail.version}${downloadExt(detail.format)}`}
             >
               [↓] download pinned bytes
             </a>
@@ -234,6 +234,23 @@ function VersionRow({ name, version: v }: { name: string; version: Version }) {
       )}
     </li>
   );
+}
+
+// The suggested save-as extension follows the version's declared format (review round 8) — a CSV
+// version must not be offered as `.jsonl`. Mirrors the gateway's whitelist in routers/datasets.py;
+// the gateway's Content-Disposition is authoritative, this only pre-fills the browser's dialog.
+const DOWNLOAD_EXT: Record<string, string> = {
+  jsonl: '.jsonl',
+  ndjson: '.jsonl',
+  json: '.json',
+  csv: '.csv',
+  tsv: '.tsv',
+  parquet: '.parquet',
+  txt: '.txt',
+};
+
+function downloadExt(format?: string): string {
+  return DOWNLOAD_EXT[(format || '').trim().toLowerCase().replace(/^\./, '')] ?? '.bin';
 }
 
 function ManifestRow({ k, children }: { k: string; children: React.ReactNode }) {

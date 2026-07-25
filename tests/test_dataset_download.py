@@ -133,6 +133,75 @@ def test_bff_allowlist_has_the_download_route():
         "the byte-download route must be allowlisted in the BFF"
 
 
+# --- the download advertises the version's REAL format (round 8) ---------------------------------
+#
+# The route hardcoded `.jsonl` + application/x-ndjson for every version, so a csv/parquet dataset
+# downloaded through the console arrived mislabeled. Resolved from the manifest via a whitelist —
+# `format` is stored verbatim and unvalidated at registration, so interpolating it into
+# Content-Disposition would let a crafted value inject header parameters.
+
+from app.routers import datasets as ds_router  # noqa: E402
+
+
+def _download(monkeypatch, fmt):
+    manifest = {**MANIFEST, "format": fmt}
+    monkeypatch.setattr(ds_router.datasets, "_s3", lambda: FakeS3(manifest))
+    return ds_router.download_dataset_version("ds", "abc123")
+
+
+def test_download_content_type_and_extension_follow_the_manifest_format(monkeypatch):
+    for fmt, ext, ctype in [("csv", ".csv", "text/csv"),
+                            ("jsonl", ".jsonl", "application/x-ndjson"),
+                            ("parquet", ".parquet", "application/vnd.apache.parquet"),
+                            ("json", ".json", "application/json")]:
+        r = _download(monkeypatch, fmt)
+        assert r.media_type == ctype, fmt
+        assert r.headers["content-disposition"].endswith(f'{ext}"'), fmt
+
+
+def test_unknown_or_missing_format_degrades_to_a_generic_binary_download(monkeypatch):
+    for fmt in (None, "", "weird-proprietary-thing"):
+        r = _download(monkeypatch, fmt)
+        assert r.media_type == "application/octet-stream"
+        assert r.headers["content-disposition"].endswith('.bin"')
+
+
+def test_format_is_whitelisted_not_interpolated_into_the_header(monkeypatch):
+    """A quote in the stored format must not escape the quoted Content-Disposition parameter."""
+    r = _download(monkeypatch, 'jsonl"; filename*=UTF-8\'\'evil.exe')
+    cd = r.headers["content-disposition"]
+    assert cd == 'attachment; filename="ds-abc123.bin"'      # fell back, nothing injected
+    assert "evil.exe" not in cd and "filename*" not in cd
+
+
+def test_dataset_name_is_sanitized_in_the_filename():
+    """`name` was already interpolated before the format work and is equally unvalidated."""
+    assert ds_router._safe_filename_stem('a"b; x=', "v1") == "a_b__x_-v1"
+    assert ds_router._safe_filename_stem("", "") == "dataset"       # never a separators-only name
+    assert ds_router._safe_filename_stem("..", "..") == "dataset"   # nor a path-ish one
+    assert '"' not in ds_router._safe_filename_stem('""""', "v")
+
+
+def test_download_still_streams_the_exact_bytes_through_the_route(monkeypatch):
+    """The identity work must not disturb the byte proxy itself."""
+    import asyncio
+    r = _download(monkeypatch, "csv")
+
+    async def _drain():
+        return b"".join([c async for c in r.body_iterator])   # Starlette wraps the sync generator
+
+    assert asyncio.run(_drain()) == DATA
+    assert r.headers["content-length"] == str(len(DATA))
+
+
+def test_ui_download_extension_mirrors_the_gateway_whitelist():
+    src = open(os.path.join(REPO, "ui", "app", "data", "page.tsx")).read()
+    assert "downloadExt(detail.format)" in src          # not a hardcoded .jsonl
+    assert ".jsonl`}" not in src
+    for fmt in ("csv", "parquet", "jsonl"):             # same formats the gateway maps
+        assert f"{fmt}:" in src, fmt
+
+
 def test_the_data_page_links_the_proxy_route_not_a_presigned_url():
     src = open(os.path.join(REPO, "ui", "app", "data", "page.tsx")).read()
     assert "/download`" in src and "/api/gw/datasets/" in src   # goes through the key-injecting BFF
