@@ -116,6 +116,25 @@ def test_rows_are_logged_version_scoped_so_the_quality_window_can_join(monkeypat
     assert all(r["modality"] == "tabular" for r in logged)     # the MODALITY_TASK key
 
 
+def test_child_reported_version_wins_over_the_registry(monkeypatch):
+    """The alias moves the instant a promote lands, but the child only picks the new booster up on
+    its next version check. Attributing to the registry alone would log rows produced by the OLD
+    booster under the NEW version — poisoning that version's window with another model's outputs.
+    The child's reported identity names the booster that actually produced these rows (022 FR-260)."""
+    body = {**CHILD_OK, "model": "tab-model", "model_version": "6"}   # child still on v6…
+    logged, _, _, pending = _wire(monkeypatch, FakeResp(body), serving=("tab-model", "7"))  # …alias v7
+    _run([{"x1": 1.0}, {"x1": 2.0}], pending)
+    assert all(r["version"] == "6" for r in logged)             # attributed to what actually scored
+    assert all(r["name"] == "tab-model" for r in logged)
+
+
+def test_registry_is_the_fallback_when_the_child_reports_no_version(monkeypatch):
+    """A child too old to report `model_version` still gets version-scoped rows (the prior behavior)."""
+    logged, _, _, pending = _wire(monkeypatch, FakeResp(CHILD_OK), serving=("tab-model", "7"))
+    _run([{"x1": 1.0}], pending)
+    assert [r["version"] for r in logged] == ["7"]
+
+
 def test_feature_rows_are_captured_for_shadow_replay(monkeypatch):
     _, captured, _, pending = _wire(monkeypatch, FakeResp(CHILD_OK))
     _run([{"x1": 1.0}, {"x1": 2.0}], pending)

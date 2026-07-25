@@ -32,15 +32,27 @@ SC-178) is unreachable. This mirrors the vision route, which already returns `pr
 Consumers ignore unknown fields (`platformlib.contracts`), so the addition is backward-compatible: an
 existing caller that reads only `predictions[i].prediction`/`score` is unaffected.
 
-## What does NOT change: the child contract
+## The child contract: one additive field
 
-`specs/020-stack-remediation/contracts/children-api.md` describes the **tabular child's** `/predict` as
-`JSON (rows)` → `JSON (predictions)`. That row is still accurate and needs no edit: the child is
-untouched by this slice. The gateway adds the identity fields **on top of** the child's response; the
-child neither mints nor sees a prediction id.
+The gateway still mints every prediction id — the child neither mints nor sees one. But the child is
+no longer untouched: closing the **T603 warm-reload follow-up** anticipated below made it report the
+version it actually scored with, so `specs/020-stack-remediation/contracts/children-api.md` is
+amended in the same increment (FR-359).
 
-(If a later slice makes the child report its own registry version — the T603 warm-reload follow-up — that
-WOULD change the child response and require a `children-api.md` edit at that time.)
+| Boundary | Added | Meaning |
+|---|---|---|
+| child `/predict` | `model_version` | the registry version the rows were ACTUALLY scored by — `null` when the registry was unreachable and the env-fallback artifact is resident (never a guess) |
+
+**Why the gateway prefers it over its own registry read.** The `@serving` alias moves the instant a
+promote lands, but the child only picks up the new booster on its next version check. Attributing
+rows to the registry alone would log predictions produced by the OLD booster under the NEW version,
+poisoning that version's quality window with another model's outputs. So `_resolve_tabular_version`
+takes the child-reported identity when present and falls back to the registry only for a child too
+old to report one — the same agent-reported-identity rule 022 FR-260 established for the LLM path.
+
+This is only sound because the child now RELOADS when the alias moves (previously a warm child served
+the old booster indefinitely, since continuous traffic prevents the idle-release that was the sole
+re-resolve trigger). Serving side pinned by `tests/test_tabular_serving_version.py`.
 
 ## Logged value: the numeric score, not the class
 

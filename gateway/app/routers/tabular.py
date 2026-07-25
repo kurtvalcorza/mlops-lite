@@ -42,9 +42,20 @@ TABULAR_SERVING_MODEL = os.getenv("TABULAR_SERVING_MODEL") or os.getenv("TABULAR
 TASK = "tabular"
 
 
-def _resolve_tabular_version() -> tuple:
-    """Best-effort (model_name, version) currently serving `task=tabular`, for prediction logging —
-    never raises (None on any failure). Blocking → call off the event loop."""
+def _resolve_tabular_version(served=None) -> tuple:
+    """Best-effort (model_name, version) to attribute a served row to, for prediction logging —
+    never raises (None on any failure). Blocking → call off the event loop.
+
+    Prefers the version the CHILD reports it actually scored with (`model_version`) over a registry
+    read, the same agent-reported-identity rule 022 FR-260 established for the LLM path. The two can
+    legitimately disagree: the alias moves the instant a promote lands, but the child only picks the
+    new booster up on its next version check — so attributing to the registry alone would log rows
+    produced by the OLD booster under the NEW version and quietly poison that version's quality
+    window with another model's outputs. The registry stays the fallback for a child too old to
+    report its version.
+    """
+    if served and served.get("version") is not None:
+        return (served.get("model") or TABULAR_SERVING_MODEL, str(served["version"]))
     try:
         target = registry.resolve_serving_target(TASK, TABULAR_SERVING_MODEL)
         return (target["name"], target["version"]) if target else (None, None)
@@ -98,9 +109,14 @@ async def predict(req: PredictRequest):
     # latency to the served prediction (the vision/LLM discipline, FR-119).
     scores = _row_scores(data)
     pids = [uuid.uuid4().hex for _ in range(len(scores))]
+    # Snapshot the child's reported identity from THIS response, before awaiting anything: it names
+    # the booster that produced these very rows, so a promote landing mid-flight cannot re-attribute
+    # them (the child reloads on a version change — serving/children/tabular_service.py).
+    served = {"model": data.get("model"), "version": data.get("model_version")} \
+        if isinstance(data, dict) else None
 
     async def _log():
-        name, version = await run_in_threadpool(_resolve_tabular_version)
+        name, version = await run_in_threadpool(_resolve_tabular_version, served)
         for pid, score, row in zip(pids, scores, req.rows):
             # The numeric score, never the thresholded class — quality.score_window ranks these.
             quality.log_prediction(name, version, TASK, None, score, prediction_id=pid)

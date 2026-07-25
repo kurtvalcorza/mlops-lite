@@ -19,12 +19,20 @@ for _p in (REPO, os.path.join(REPO, "gateway")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from app.routers.monitor import RetrainSpec  # noqa: E402
+
 from hostagent import jobs as jobs_mod  # noqa: E402
 from platformlib.topology import (  # noqa: E402
     CPU_TRAINABLE_MODALITIES,
     FINETUNE_MODALITIES,
     TRAINABLE_MODALITIES,
 )
+
+# `RetrainSpec` is imported HERE, at collection time, rather than lazily inside the two tests below:
+# other suites install a stub `app.settings` into `sys.modules` (test_platform_health /
+# test_serving_client), so a lazy `from app.routers.monitor import …` resolved against whichever
+# `app` happened to be installed when the test ran — passing in the default alphabetical order but
+# failing whenever those suites ran first. Collection happens before any of them execute.
 
 # --- the modality sets -----------------------------------------------------------------------------
 
@@ -149,14 +157,12 @@ def test_scheduler_maps_the_tabular_modality_to_a_task():
 
 
 def test_retrain_spec_accepts_tabular():
-    from app.routers.monitor import RetrainSpec
     spec = RetrainSpec(dataset_name="ds", dataset_version="latest", output_name="o",
                        modality="tabular")
     assert spec.modality == "tabular"
 
 
 def test_retrain_spec_still_rejects_a_non_modality():
-    from app.routers.monitor import RetrainSpec
     try:
         RetrainSpec(dataset_name="ds", dataset_version="latest", output_name="o", modality="banana")
     except Exception as e:
