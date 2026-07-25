@@ -213,6 +213,21 @@ def test_promotion_module_imports_no_web_framework():
             f"promotion must stay web-free — it imports {driver}"
 
 
+def test_exactly_one_gated_alias_move_choke_point():
+    """The companion invariant to the single-caller check above (SC-170): every promotion — the operator
+    route, the scheduler's auto-on-green `_default_promote`, and suggestion acceptance — must move the
+    `@serving` alias through `registry.promote`, the ONE gated choke-point. A second
+    `set_registered_model_alias` call site anywhere in the gateway would be an ungated back door that
+    skips the evaluation gate (and, for a modality whose served process caches by version, the
+    post-promote refresh). 024's T593 verified this by hand; this pins it."""
+    r = subprocess.run(
+        ["grep", "-rn", "set_registered_model_alias", os.path.join(REPO, "gateway"), "--include=*.py"],
+        capture_output=True, text=True)
+    sites = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    assert len(sites) == 1 and "registry.py" in sites[0], \
+        f"expected ONE gated alias-move site (registry.promote); found {sites}"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
