@@ -6,11 +6,20 @@ the gateway is the authority). `/infer` (REST) stays intact for non-UI clients a
 
 `GET /runs/{run_id}/events` bridges the trainer's poll API (`GET /training/{id}`) to SSE — the
 gateway polls and re-emits status/metrics until the run reaches a terminal state.
+
+**025 US4 (T610/FR-356) — streamed predictions are labelable.** A completed stream was already logged
+for quality, but its prediction id stayed internal, so a streamed prediction could never be labeled
+(the label endpoint takes a caller-supplied id and there is no prediction-list endpoint). `/infer/stream`
+now emits ONE leading `{"event": "metadata", "prediction_id": …}` frame and logs under that same id.
+Every upstream frame after it remains a byte-identical passthrough — this ADDS a frame, it does not
+alter the supervisor's. Contract delta: `specs/025-close-lifecycle-gaps/contracts/streamed-prediction-identity.md`
+(022 FR-271 said the stream shape was unchanged; this is the deliberate, additive amendment).
 """
 import asyncio
 import json
 import os
 import time
+import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -82,10 +91,24 @@ async def infer_stream(req: StreamRequest):
     _preempt_q = "?preempt=true" if req.preempt else ""
     infer_stream_url = f"{serving.SERVING_URL}/infer/stream" + _preempt_q
 
+    # 025 US4 (T610/FR-356): mint the prediction id HERE, synchronously, and hand it to the client in an
+    # initial metadata frame (below) — `quality.log_prediction` would otherwise generate it internally
+    # and keep it, and the label endpoint takes a CALLER-SUPPLIED id with no prediction-list endpoint to
+    # look one up. Without this a streamed prediction is unlabelable and the delayed-label → quality
+    # loop (SC-180) is unreachable for streaming, unlike every non-streamed path.
+    prediction_id = uuid.uuid4().hex
+
     async def gen():
         # 006/FR-050: trace timing captured OUTSIDE the GPU lock (export never coincides with the
         # mutex) and emitted fire-and-forget in the finally. The SSE bytes are an untouched passthrough.
         start_ns = time.time_ns()
+        # 025 US4: the ONE added frame — emitted before the upstream stream opens so a client has the id
+        # immediately (and even if the lock makes it wait). Every upstream frame after this stays a
+        # byte-identical passthrough; this adds a frame, it does not alter theirs. The id becomes
+        # labelable only if the stream COMPLETES, since that is when the prediction row is logged
+        # (the pre-existing `outcome == "completed"` rule below) — an aborted stream logs nothing.
+        yield _sse({"event": "metadata", "prediction_id": prediction_id,
+                    "model": served_model, "version": served_version})
         frames = 0
         saw_done = False
         done_tail = b""  # rolling overlap so a `done` frame split across transport chunks is still seen
@@ -165,8 +188,10 @@ async def infer_stream(req: StreamRequest):
             # returns synchronously), so with the resolve already done it never delays teardown — the
             # detached-task wrapper the pre-resolve version needed is no longer required.
             if outcome == "completed":
+                # 025 US4 (T610): log under the SAME id already handed to the client in the metadata
+                # frame, so the delayed label the caller attaches lands on this row (FR-356).
                 quality.log_prediction(served_model, served_version, "text-generation",
-                                       req.prompt, None)
+                                       req.prompt, None, prediction_id=prediction_id)
                 # 016 (FR-146): do NOT capture streamed prompts. The streamed output isn't logged
                 # (prediction=None), so join_window excludes these as champion-unscorable — but a
                 # capture would still consume the per-modality ring-buffer cap, evicting replayable

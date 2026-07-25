@@ -14,13 +14,14 @@ connective tissue:
     (pass/warn/blocked). Wired into the single `registry.promote` choke-point (FR-103/FR-104/FR-105).
   - **compare()** (US3) — score the `@serving` champion and a challenger on the same held-out set,
     **sequentially** (one model in VRAM at a time, Principle II), and declare a per-metric winner
-    (FR-106). Shadow-replay is deferred to a 013-dependent follow-on.
+    (FR-106). Shadow-replay shipped as feature 016 (`gateway/app/shadow.py`) on the 013 capture path.
 
 **Dependency-light by design (Principle III, FR-102).** Like `monitoring.py` (which computes PSI in
 pure Python rather than pulling Evidently+pandas+scipy onto the constrained Windows C: drive), the
 primary metrics here are implemented in **pure Python** — no sklearn / numpy / jiwer landing in the
 gateway image. The two *committed* modalities (LLM task-accuracy, vision top-1 accuracy) need only
-string/equality math; the guidance-stub metrics (WER, recall@k, AUC, perplexity) are likewise pure.
+string/equality math; the others (WER + recall@k — each committed against a 015 held-out fixture — plus
+the AUC/perplexity guidance stubs) are likewise pure.
 Heavier libs (`jiwer`, `sacrebleu`, `scikit-learn`) remain swappable behind this metric interface
 (Principle V) if a modality later needs them.
 """
@@ -130,7 +131,8 @@ def _edit_distance(a: list, b: list) -> int:
 
 def wer(hyps, refs) -> float:
     """Word Error Rate (lower-better), pure-Python — total word edits / total reference words. ASR's
-    primary metric (guidance stub until 009's ASR serving path is wired; `jiwer` is the swap-in)."""
+    primary metric, scored at registration against the 015 held-out fixture (`jiwer` is the swap-in if a
+    live serving path later needs a heavier metric)."""
     edits = words = 0
     for h, r in zip(hyps, refs):
         rt = str(r).split()
@@ -143,7 +145,7 @@ def wer(hyps, refs) -> float:
 
 def recall_at_k(retrieved, relevant, k: int = 5) -> float:
     """recall@k (higher-better): fraction of queries whose relevant id appears in the top-k retrieved.
-    Embeddings' primary metric (guidance stub until 009's embedding serving path is wired)."""
+    Embeddings' primary metric, scored at registration against the 015 held-out fixture."""
     if not relevant:
         raise EvalError("empty benchmark — nothing to score")
     hits = sum(1 for got, rel in zip(retrieved, relevant) if rel in list(got)[:k])
@@ -190,14 +192,15 @@ class Metric:
 
 
 # Per-modality default primary metric + direction (the grilled defaults; all operator-configurable).
-# Keyed by the registry `task` tag (009 FR-074). LLM + vision + ASR + embeddings all score at
-# registration as of 015 (each ships a held-out fixture); tabular has no fine-tune flow → still a stub.
+# Keyed by the registry `task` tag (009 FR-074). EVERY modality now scores at registration against a
+# committed held-out fixture: LLM + vision (committed from 011), ASR + embeddings (015), and tabular
+# (025 US2 — the fine-tune flow + `benchmarks/tabular/auc_smoke.jsonl` promote AUC from stub).
 METRICS = {
     "text-generation": Metric("task_accuracy", HIGHER, task_accuracy),  # LLM (committed)
     "image-classification": Metric("accuracy", HIGHER, accuracy),       # vision (committed)
     "asr": Metric("wer", LOWER, wer),                                   # 015 — WER fixture shipped
     "embedding": Metric("recall_at_k", HIGHER, recall_at_k),            # 015 — recall@k fixture shipped
-    "tabular": Metric("auc", HIGHER, auc),                              # stub (no fine-tune flow)
+    "tabular": Metric("auc", HIGHER, auc),                              # 025 — AUC fixture shipped
 }
 # Universal LLM fallback (used when a QA answer key is absent) — kept out of METRICS so it is opt-in.
 PERPLEXITY = Metric("perplexity", LOWER, perplexity)
@@ -240,6 +243,11 @@ DEFAULT_BENCHMARKS = {
     "image-classification": "vision/shapes_smoke.jsonl",
     "embedding": "embedding/recall_smoke.jsonl",  # 015 — recall@k held-out fixture (score-at-registration)
     "asr": "asr/wer_smoke.jsonl",                  # 015 — WER held-out fixture (score-at-registration)
+    # 025 US2 — AUC held-out fixture. Registered HERE (not only shipped as a file) because
+    # `training.scoring.score_and_log` calls `load_benchmark(modality)` with no override: without this
+    # entry a tabular fine-tune raises "no default benchmark", the flow's wrapper swallows it, and the
+    # version registers WITHOUT the logged AUC the gate needs (Codex round-6 finding).
+    "tabular": "tabular/auc_smoke.jsonl",
 }
 
 

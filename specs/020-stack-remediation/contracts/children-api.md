@@ -8,7 +8,7 @@ The agent adapters are the ONLY consumers (FR-177). Each child keeps, byte-for-b
 |---|---|---|---|---|
 | vision | `/classify` | multipart image (field + content type unchanged) | JSON body identical to today's | `GET /readyz` → 200 |
 | embed | `/embed` | JSON (texts) | JSON (vectors) — same shape/dtype formatting | `GET /readyz` → 200 |
-| tabular | `/predict` | JSON (rows) | JSON (predictions) | `GET /readyz` → 200 |
+| tabular | `/predict` | JSON (rows) | JSON (predictions) + `model_version` — see §Tabular served version | `GET /readyz` → 200 |
 
 Launch contract (unchanged from R10/018): the adapter spawns `run.sh` with a dynamic port in a
 process group; readiness = the probe; teardown = process-group signal. The ONLY permitted adapter
@@ -16,6 +16,20 @@ edits are the child launch path, the `unavailable` pip-hint string, and the cosm
 `_bento_cpu.py` → `_child_cpu.py` module rename (with its import updates) — the adapter
 *contract* (verbs, states, error mapping) is untouched. Error vocabulary at the
 agent boundary (404 verb / 415 content-type / 5xx child failure) is unchanged.
+
+### Tabular served version (025 US2, FR-353/FR-359 — amends the tabular row above)
+
+The tabular child's `/predict` response gains ONE additive top-level field, `model_version`: the
+registry version the rows were ACTUALLY scored by, or `null` when the registry was unreachable and
+the env-fallback artifact is resident. Additive only — every pre-025 field keeps its name, type, and
+value, so the GoldenSet byte-diff below is extended rather than broken, and consumers reading only
+`predictions[i]` (the adapters, the batch flow) are unaffected.
+
+The child also now RELOADS when the `@serving` alias moves, rather than re-resolving only on a cold
+load: continuous traffic keeps the child warm, so idle-release never fired and a promote left the
+old booster resident indefinitely. The reported version is what makes that observable, and the
+gateway prefers it over its own registry read when attributing logged predictions — see
+`specs/025-close-lifecycle-gaps/contracts/tabular-prediction-identity.md`.
 
 Gate: the GoldenSet replay (data-model.md) diffs status + content type + body bytes at the agent
 boundary per child, same machine/session. A drifted response fails the swap, not production.

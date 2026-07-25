@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from prometheus_client import Counter
 from pydantic import BaseModel, Field, field_validator
 
-from platformlib.topology import TRAINABLE_MODALITIES
+from platformlib.topology import FINETUNE_MODALITIES
 
 from .. import monitoring, policies, quality
 from ..settings import TRAINER_URL, agent_headers
@@ -40,15 +40,17 @@ class RetrainSpec(BaseModel):
     dataset_name: str
     dataset_version: str                   # a pinned version, or "latest"
     output_name: str
-    modality: str = "llm"                  # any TRAINABLE_MODALITIES member (422 otherwise)
+    modality: str = "llm"                  # any FINETUNE_MODALITIES member (422 otherwise)
     steps: int = 10
     lora_r: int = 8
 
     @field_validator("modality")
     @classmethod
     def _known_modality(cls, v):
-        if v not in TRAINABLE_MODALITIES:
-            raise ValueError(f"modality must be one of {TRAINABLE_MODALITIES}")
+        # 025 US2: the FINE-TUNE set (incl. CPU/off-lease tabular), not the GPU/HPO-capable set — a
+        # tabular breach retrain is dispatchable and must not 422 before the scheduler can run it.
+        if v not in FINETUNE_MODALITIES:
+            raise ValueError(f"modality must be one of {FINETUNE_MODALITIES}")
         return v
 
 

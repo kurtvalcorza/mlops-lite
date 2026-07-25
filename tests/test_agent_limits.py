@@ -99,9 +99,18 @@ def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
         conn.putheader("Transfer-Encoding", "chunked")
         conn.endheaders()
         chunk = b"x" * 256
-        for _ in range(4):  # 1024 > 512: the counted read must abort mid-stream
+        for _ in range(2):  # 2 x 256 == the 512 limit exactly: still admissible
             conn.send(b"100\r\n" + chunk + b"\r\n")
-        conn.send(b"0\r\n\r\n")
+        # Announce a THIRD chunk (768 > 512) but send no data for it. `_read_chunked` counts the
+        # announced size and aborts on this size LINE, so the server stops reading here.
+        #
+        # Deliberately nothing is written after this point, and nothing announced is left unsent.
+        # Writing more (the chunk's data, or a `0\r\n\r\n` terminator) raced the abort this test
+        # exists to prove: the server has already stopped reading and closed, so the write hits an
+        # RST as BrokenPipeError — and that RST can also discard the 413 still sitting unread in the
+        # client's buffer. Both made this a flake that failed on a fast runner and passed on a slow
+        # one; counting is by announced size, so the size line alone exercises the same property.
+        conn.send(b"100\r\n")
         r = conn.getresponse()
         assert r.status == 413
         conn.close()

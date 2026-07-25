@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -272,89 +273,130 @@ def _legacy_job_get(path: str, jobs):
     return 200, jobs_mod.legacy_view(rec)
 
 
+# -- GET route handlers (024 US3, T585): each `if path == …` branch body, split into a named handler
+#    of `(path, ctx)` so it is unit-callable without the HTTP server (tests/test_agent_routes.py). Bodies
+#    are byte-preserved; `ctx` is a SimpleNamespace of the deps `handle_get` already received.
+
+def _get_healthz(path, ctx):
+    # 023 US2 (FR-283): the PUBLIC liveness probe is minimal — process-up only. The rich
+    # operational view (holder/engines/jobs — real state an attacker can enumerate) moved
+    # behind the key on `/health`; pre-023 the two paths shared one payload.
+    return 200, {"ok": True, "service": "hostagent"}, "application/json"
+
+
+def _get_readyz(path, ctx):
+    # Public minimal readiness (FR-283): can this agent take work? Extended by US4 with the
+    # store schema-compatibility verdict (an incompatible schema fails readiness, FR-301).
+    ready, reason = _readiness()
+    return (200 if ready else 503), {"ready": ready, **({"reason": reason} if reason else {})}, \
+        "application/json"
+
+
+def _get_health(path, ctx):
+    admission, manager, journal, jobs, policy = (ctx.admission, ctx.manager, ctx.journal,
+                                                 ctx.jobs, ctx.policy)
+    holder = admission.holder()
+    # The agent's own health PLUS the trainer's `/health` fields (018 T362): TRAINER_URL
+    # now points here, so swap (gpu_batch_active), platform_metrics (busy/free_mib/
+    # gpu_batch_active), and the gateway training-health view keep reading the same
+    # field names with only a base-URL flip (byte-compat, FR-177).
+    # Compute engine_states ONCE (019/US7): each call sweeps every engine's readiness
+    # probe, and /health is polled hot — computing it twice doubled the child probes.
+    states = manager.engine_states()
+    # FLAT GPU fields to match platformlib.contracts.AgentHealth (019/US7, FR-195): the
+    # prior nested `gpu` object was dropped by the contract's unknown-field filter, so a
+    # consumer read the GPU as free/unheld (holder=None) even while a tenant held it.
+    return 200, {
+        "ok": True,
+        "engines": {eid: s["state"] for eid, s in states.items()},
+        "gpu_free_gb": admission.free_gb(),
+        "holder": (holder or {}).get("tenant"),
+        "holder_kind": (holder or {}).get("kind"),
+        "wedged": any(s["state"] == "wedged" for s in states.values()),
+        "jobs_active": journal.active_count(),
+        "interrupted_since_start": _interrupted_at_start,
+        "started_at": _started_at,
+        # 023 US2 (contracts/agent-security.md §Open-development): the mode is visible on the
+        # (now protected) operational health — never any secret material. Additive; contract
+        # consumers ignore unknown fields (platformlib.contracts).
+        **({"security_mode": policy.security_mode} if policy is not None else {}),
+        **jobs.health_fields(),
+    }, "application/json"
+
+
+def _get_metrics(path, ctx):
+    _refresh_metrics(ctx.admission, ctx.journal, ctx.manager)
+    return 200, REGISTRY.render().encode(), "text/plain; version=0.0.4"
+
+
+def _get_engines(path, ctx):
+    # Contract-shaped rows (019/US7, FR-195): each row carries engine_id/gpu/optional so
+    # a consumer can EngineState.from_json(row) — the bare {state:…} value the prior
+    # listing returned raised ContractError (validate() requires engine_id).
+    return 200, {"engines": ctx.manager.engine_rows()}, "application/json"
+
+
+def _get_engine_health(path, ctx):
+    # Per-engine health/readiness (byte-compat, FR-177): the gateway/swap probe the child-
+    # derived engines (vision/embed/tabular) via /readyz|/healthz and the native ones
+    # (llm/asr) via /health — the agent answers ALL with the same GPU-lease payload +
+    # status, so no gateway probe URL needs to change. gpu_state reads it for the UI/swap.
+    manager = ctx.manager
+    suffix = next(s for s in ("/health", "/readyz", "/healthz") if path.endswith(s))
+    eid = path[len("/engines/"):-len(suffix)]
+    rt = manager.runtimes.get(eid)
+    if rt is None or not hasattr(rt.adapter, "health"):
+        return 404, {"error": f"unknown engine {eid!r}"}, "application/json"
+    payload = rt.adapter.health(rt._resident())
+    # 503 when the engine can't serve so the gateway readiness aggregator
+    # (platform_health keys on status==200), serving.health(), and the supervisor
+    # all see a REQUIRED engine as down, not falsely healthy. Two cases (Codex
+    # rounds 7/8, 018): the adapter reports NOT ok (missing/dud prereqs), OR the
+    # runtime is wedged/disabled — a wedged child (survived SIGKILL, GPU pinned)
+    # reports ok:true from the adapter's file checks alone, so fold in the runtime
+    # state. A cold/idle engine stays `ok` (available, just not resident).
+    st = rt.state().get("state")
+    if st in ("wedged", "disabled"):
+        payload["ok"] = False
+        payload[st] = rt.state().get("reason", True)
+    return (200 if payload.get("ok", True) else 503), payload, "application/json"
+
+
+def _get_jobs(path, ctx):
+    journal = ctx.journal
+    job_id = path[len("/jobs/"):] if path.startswith("/jobs/") else None
+    if job_id:
+        rec = journal.get(job_id)
+        return (200, rec, "application/json") if rec else \
+            (404, {"error": "unknown job"}, "application/json")
+    kind = (parse_qs(ctx.query).get("kind") or [None])[0]
+    return 200, {"jobs": journal.jobs(kind=kind)}, "application/json"
+
+
+#: Ordered GET route table (T585): first matcher wins — the exact order of the prior if-ladder.
+_GET_ROUTES = (
+    (lambda p: p == "/healthz", _get_healthz),
+    (lambda p: p == "/readyz", _get_readyz),
+    (lambda p: p == "/health", _get_health),
+    (lambda p: p == "/metrics", _get_metrics),
+    (lambda p: p == "/engines", _get_engines),
+    (lambda p: p.startswith("/engines/") and any(
+        p.endswith(s) for s in ("/health", "/readyz", "/healthz")), _get_engine_health),
+    (lambda p: p == "/jobs" or p.startswith("/jobs/"), _get_jobs),
+)
+
+
 def handle_get(path: str, query: str, *, admission, journal, manager, jobs, policy=None):
-    """(status, payload, content_type) for every GET route. Routed on the PARSED path (Codex
-    round 4, 018): the raw request path carries the query string, so `/jobs?kind=train` failed
-    the exact match and a stray `/jobsxyz` fell into the jobs listing instead of 404."""
-    if path == "/healthz":
-        # 023 US2 (FR-283): the PUBLIC liveness probe is minimal — process-up only. The rich
-        # operational view (holder/engines/jobs — real state an attacker can enumerate) moved
-        # behind the key on `/health`; pre-023 the two paths shared one payload.
-        return 200, {"ok": True, "service": "hostagent"}, "application/json"
-    if path == "/readyz":
-        # Public minimal readiness (FR-283): can this agent take work? Extended by US4 with the
-        # store schema-compatibility verdict (an incompatible schema fails readiness, FR-301).
-        ready, reason = _readiness()
-        return (200 if ready else 503), {"ready": ready, **({"reason": reason} if reason else {})}, \
-            "application/json"
-    if path == "/health":
-        holder = admission.holder()
-        # The agent's own health PLUS the trainer's `/health` fields (018 T362): TRAINER_URL
-        # now points here, so swap (gpu_batch_active), platform_metrics (busy/free_mib/
-        # gpu_batch_active), and the gateway training-health view keep reading the same
-        # field names with only a base-URL flip (byte-compat, FR-177).
-        # Compute engine_states ONCE (019/US7): each call sweeps every engine's readiness
-        # probe, and /health is polled hot — computing it twice doubled the child probes.
-        states = manager.engine_states()
-        # FLAT GPU fields to match platformlib.contracts.AgentHealth (019/US7, FR-195): the
-        # prior nested `gpu` object was dropped by the contract's unknown-field filter, so a
-        # consumer read the GPU as free/unheld (holder=None) even while a tenant held it.
-        return 200, {
-            "ok": True,
-            "engines": {eid: s["state"] for eid, s in states.items()},
-            "gpu_free_gb": admission.free_gb(),
-            "holder": (holder or {}).get("tenant"),
-            "holder_kind": (holder or {}).get("kind"),
-            "wedged": any(s["state"] == "wedged" for s in states.values()),
-            "jobs_active": journal.active_count(),
-            "interrupted_since_start": _interrupted_at_start,
-            "started_at": _started_at,
-            # 023 US2 (contracts/agent-security.md §Open-development): the mode is visible on the
-            # (now protected) operational health — never any secret material. Additive; contract
-            # consumers ignore unknown fields (platformlib.contracts).
-            **({"security_mode": policy.security_mode} if policy is not None else {}),
-            **jobs.health_fields(),
-        }, "application/json"
-    if path == "/metrics":
-        _refresh_metrics(admission, journal, manager)
-        return 200, REGISTRY.render().encode(), "text/plain; version=0.0.4"
-    if path == "/engines":
-        # Contract-shaped rows (019/US7, FR-195): each row carries engine_id/gpu/optional so
-        # a consumer can EngineState.from_json(row) — the bare {state:…} value the prior
-        # listing returned raised ContractError (validate() requires engine_id).
-        return 200, {"engines": manager.engine_rows()}, "application/json"
-    if path.startswith("/engines/") and any(
-            path.endswith(s) for s in ("/health", "/readyz", "/healthz")):
-        # Per-engine health/readiness (byte-compat, FR-177): the gateway/swap probe the child-
-        # derived engines (vision/embed/tabular) via /readyz|/healthz and the native ones
-        # (llm/asr) via /health — the agent answers ALL with the same GPU-lease payload +
-        # status, so no gateway probe URL needs to change. gpu_state reads it for the UI/swap.
-        suffix = next(s for s in ("/health", "/readyz", "/healthz") if path.endswith(s))
-        eid = path[len("/engines/"):-len(suffix)]
-        rt = manager.runtimes.get(eid)
-        if rt is None or not hasattr(rt.adapter, "health"):
-            return 404, {"error": f"unknown engine {eid!r}"}, "application/json"
-        payload = rt.adapter.health(rt._resident())
-        # 503 when the engine can't serve so the gateway readiness aggregator
-        # (platform_health keys on status==200), serving.health(), and the supervisor
-        # all see a REQUIRED engine as down, not falsely healthy. Two cases (Codex
-        # rounds 7/8, 018): the adapter reports NOT ok (missing/dud prereqs), OR the
-        # runtime is wedged/disabled — a wedged child (survived SIGKILL, GPU pinned)
-        # reports ok:true from the adapter's file checks alone, so fold in the runtime
-        # state. A cold/idle engine stays `ok` (available, just not resident).
-        st = rt.state().get("state")
-        if st in ("wedged", "disabled"):
-            payload["ok"] = False
-            payload[st] = rt.state().get("reason", True)
-        return (200 if payload.get("ok", True) else 503), payload, "application/json"
-    if path == "/jobs" or path.startswith("/jobs/"):
-        job_id = path[len("/jobs/"):] if path.startswith("/jobs/") else None
-        if job_id:
-            rec = journal.get(job_id)
-            return (200, rec, "application/json") if rec else \
-                (404, {"error": "unknown job"}, "application/json")
-        kind = (parse_qs(query).get("kind") or [None])[0]
-        return 200, {"jobs": journal.jobs(kind=kind)}, "application/json"
+    """(status, payload, content_type) for every GET route, dispatched through the ordered
+    `_GET_ROUTES` table (024 US3, T586 — first match wins; unmatched falls to the legacy job aliases,
+    then 404). Routed on the PARSED path (Codex round 4, 018): the raw request path carries the query
+    string, so `/jobs?kind=train` failed the exact match and a stray `/jobsxyz` fell into the jobs
+    listing instead of 404. Signature unchanged — callers/tests are byte-compatible (FR-340)."""
+    ctx = SimpleNamespace(query=query, admission=admission, journal=journal, manager=manager,
+                          jobs=jobs, policy=policy)
+    for matcher, handler in _GET_ROUTES:
+        if matcher(path):
+            return handler(path, ctx)
     legacy = _legacy_job_get(path, jobs)
     if legacy is not None:
         return legacy[0], legacy[1], "application/json"
@@ -368,130 +410,172 @@ def _parse_json(raw: bytes):
         return None
 
 
-def handle_post(path: str, query: str, content_type: str, control_header: str, raw_body: bytes,
-                *, admission, journal, manager, jobs):
-    """Route a POST. Returns ("json", status, payload) or ("stream", frame_generator)."""
-    if path == "/control/unload":
-        if CONTROL_SECRET and control_header != CONTROL_SECRET:
-            return "json", 403, {"error": "bad or missing X-Agent-Control"}
-        body = _parse_json(raw_body)
-        if body is None:
-            return "json", 400, {"error": "invalid JSON"}
-        engine = body.get("engine")
-        rt = manager.runtimes.get(engine)
-        if rt is None:
-            return "json", 404, {"error": f"unknown engine {engine!r}"}
-        result = rt.unload(drain_timeout_s=float(body.get("drain_timeout_s", 10)))
-        code = 200 if result.get("status") in ("unloaded", "idle") else 409
-        return "json", code, result
-    if path == "/control/reload":
-        # 022 T466/T467 (FR-255): the gateway's gated promote requests this so the newly selected
-        # serving-LLM goes live via a controlled reload — cross-tenant swap or same-tenant
-        # force-reload, job holders never preempted (the preserved 409 vocabulary). Secret-gated
-        # like /control/unload (state-changing).
-        if CONTROL_SECRET and control_header != CONTROL_SECRET:
-            return "json", 403, {"error": "bad or missing X-Agent-Control"}
-        body = _parse_json(raw_body)
-        if body is None:
-            return "json", 400, {"error": "invalid JSON"}
-        try:
-            # 023 US5 (T523): an operation_id keys the reload for idempotent retry — same op +
-            # same target replays the stored result; a different target under the same op is a
-            # 409; success requires the EXACT target resident (FR-307/308/312). Absent (a plain
-            # 022 caller) this is byte-compatibly the unkeyed reload.
-            result = swap_mod.reload_serving_llm_op(
-                manager, operation_id=body.get("operation_id"), target=body.get("target"),
-                preempt=bool(body.get("preempt")),
-                batch_active_fn=lambda: jobs.health_fields()["gpu_batch_active"],
-                drain_timeout_s=float(body.get("drain_timeout_s", 10)))
-        except swap_mod.TargetUnresolvable as e:
-            # FR-265: an unloadable target is distinct from a retryable job-holder/confirm deferral —
-            # tag it so the gateway rolls the active-serving-LLM pointer back (a persisted pointer to
-            # this target would 503 the next cold load). Still 409 (the preserved vocabulary).
-            REGISTRY.inc("hostagent_reload_outcomes_total", labels={"status": "unresolvable"})
-            return "json", 409, {"error": str(e), "unresolvable": True}
-        except Exception as e:  # noqa: BLE001 — mapped to the preserved status vocabulary
-            REGISTRY.inc("hostagent_reload_outcomes_total", labels={"status": "refused"})
-            code, payload = error_response(e)
-            return "json", code, payload
-        # bounded vocabulary (T534/FR-321): loaded|reloaded|swapped|noop|verify_failed
-        REGISTRY.inc("hostagent_reload_outcomes_total",
-                     labels={"status": result.get("status", "unknown")})
-        return "json", 200, result
-    # Jobs surface (018 T362, contracts/agent-api.md) + the legacy trainer aliases the
-    # gateway still calls (byte-compat, FR-177 — retired from the gateway at US4/cleanup).
-    if path == "/jobs":
-        body = _parse_json(raw_body)
-        if body is None:
-            return "json", 400, {"error": "invalid JSON"}
-        # {kind, modality, request}: fold `modality` into the inner request (the trainer
-        # carried it there); tolerate a flat body (request fields at top level) too.
-        request = dict(body.get("request") or {k: v for k, v in body.items()
-                                               if k not in ("kind", "modality", "request")})
-        if body.get("modality") is not None:
-            request.setdefault("modality", body["modality"])
-        try:
-            code, payload = jobs.submit(body.get("kind"), request)
-        except StoreError as e:  # US4 T375-B: submit's journal write is a Postgres upsert
-            return "json", 502, {"error": str(e)}  # now — a blip is a clean 502, not a
-        return "json", code, payload               # dropped connection (@claude PR#46)
-    if path.startswith("/jobs/") and path.endswith("/cancel"):
-        if CONTROL_SECRET and control_header != CONTROL_SECRET:
-            return "json", 403, {"error": "bad or missing X-Agent-Control"}
-        job_id = path[len("/jobs/"):-len("/cancel")]
-        result = jobs.cancel(job_id)
-        code = 404 if result.get("status") == "unknown" else 200
-        return "json", code, result
-    if path.strip("/") in jobs_mod.ROUTE_TO_KIND:  # legacy trainer aliases
-        body = _parse_json(raw_body)
-        if body is None:
-            return "json", 400, {"error": "invalid JSON"}
-        try:
-            code, payload = jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
-        except StoreError as e:  # (@claude PR#46) — same clean-502 mapping for the aliases
-            return "json", 502, {"error": str(e)}
+# -- POST route handlers (024 US3, T585): each branch body split into a named `(path, ctx)` handler,
+#    byte-preserved. `ctx` adds the POST inputs (content_type/control_header/raw_body) to the deps.
+
+def _post_control_unload(path, ctx):
+    if CONTROL_SECRET and ctx.control_header != CONTROL_SECRET:
+        return "json", 403, {"error": "bad or missing X-Agent-Control"}
+    body = _parse_json(ctx.raw_body)
+    if body is None:
+        return "json", 400, {"error": "invalid JSON"}
+    engine = body.get("engine")
+    rt = ctx.manager.runtimes.get(engine)
+    if rt is None:
+        return "json", 404, {"error": f"unknown engine {engine!r}"}
+    result = rt.unload(drain_timeout_s=float(body.get("drain_timeout_s", 10)))
+    code = 200 if result.get("status") in ("unloaded", "idle") else 409
+    return "json", code, result
+
+
+def _post_control_reload(path, ctx):
+    # 022 T466/T467 (FR-255): the gateway's gated promote requests this so the newly selected
+    # serving-LLM goes live via a controlled reload — cross-tenant swap or same-tenant
+    # force-reload, job holders never preempted (the preserved 409 vocabulary). Secret-gated
+    # like /control/unload (state-changing).
+    if CONTROL_SECRET and ctx.control_header != CONTROL_SECRET:
+        return "json", 403, {"error": "bad or missing X-Agent-Control"}
+    body = _parse_json(ctx.raw_body)
+    if body is None:
+        return "json", 400, {"error": "invalid JSON"}
+    manager, jobs = ctx.manager, ctx.jobs
+    try:
+        # 023 US5 (T523): an operation_id keys the reload for idempotent retry — same op +
+        # same target replays the stored result; a different target under the same op is a
+        # 409; success requires the EXACT target resident (FR-307/308/312). Absent (a plain
+        # 022 caller) this is byte-compatibly the unkeyed reload.
+        result = swap_mod.reload_serving_llm_op(
+            manager, operation_id=body.get("operation_id"), target=body.get("target"),
+            preempt=bool(body.get("preempt")),
+            batch_active_fn=lambda: jobs.health_fields()["gpu_batch_active"],
+            drain_timeout_s=float(body.get("drain_timeout_s", 10)))
+    except swap_mod.TargetUnresolvable as e:
+        # FR-265: an unloadable target is distinct from a retryable job-holder/confirm deferral —
+        # tag it so the gateway rolls the active-serving-LLM pointer back (a persisted pointer to
+        # this target would 503 the next cold load). Still 409 (the preserved vocabulary).
+        REGISTRY.inc("hostagent_reload_outcomes_total", labels={"status": "unresolvable"})
+        return "json", 409, {"error": str(e), "unresolvable": True}
+    except Exception as e:  # noqa: BLE001 — mapped to the preserved status vocabulary
+        REGISTRY.inc("hostagent_reload_outcomes_total", labels={"status": "refused"})
+        code, payload = error_response(e)
         return "json", code, payload
+    # bounded vocabulary (T534/FR-321): loaded|reloaded|swapped|noop|verify_failed
+    REGISTRY.inc("hostagent_reload_outcomes_total",
+                 labels={"status": result.get("status", "unknown")})
+    return "json", 200, result
+
+
+def _post_jobs(path, ctx):
+    body = _parse_json(ctx.raw_body)
+    if body is None:
+        return "json", 400, {"error": "invalid JSON"}
+    # {kind, modality, request}: fold `modality` into the inner request (the trainer
+    # carried it there); tolerate a flat body (request fields at top level) too.
+    request = dict(body.get("request") or {k: v for k, v in body.items()
+                                           if k not in ("kind", "modality", "request")})
+    if body.get("modality") is not None:
+        request.setdefault("modality", body["modality"])
+    try:
+        code, payload = ctx.jobs.submit(body.get("kind"), request)
+    except StoreError as e:  # US4 T375-B: submit's journal write is a Postgres upsert
+        return "json", 502, {"error": str(e)}  # now — a blip is a clean 502, not a
+    return "json", code, payload               # dropped connection (@claude PR#46)
+
+
+def _post_job_cancel(path, ctx):
+    if CONTROL_SECRET and ctx.control_header != CONTROL_SECRET:
+        return "json", 403, {"error": "bad or missing X-Agent-Control"}
+    job_id = path[len("/jobs/"):-len("/cancel")]
+    result = ctx.jobs.cancel(job_id)
+    code = 404 if result.get("status") == "unknown" else 200
+    return "json", code, result
+
+
+def _post_legacy_alias(path, ctx):
+    # Legacy trainer aliases the gateway still calls (byte-compat, FR-177 — retired from the
+    # gateway at US4/cleanup).
+    body = _parse_json(ctx.raw_body)
+    if body is None:
+        return "json", 400, {"error": "invalid JSON"}
+    try:
+        code, payload = ctx.jobs.submit(jobs_mod.ROUTE_TO_KIND[path.strip("/")], body)
+    except StoreError as e:  # (@claude PR#46) — same clean-502 mapping for the aliases
+        return "json", 502, {"error": str(e)}
+    return "json", code, payload
+
+
+def _post_engine_verb(path, ctx):
     # Inference passthrough: /engines/<id>/<verb> (+ /stream, + `?preempt=true`). The
     # byte-compatible /engines/<id>/unload-now relic retired at T364 (its only caller, the
     # gateway swap, was removed at T363); operators use /control/unload.
+    query, content_type, raw_body = ctx.query, ctx.content_type, ctx.raw_body
+    manager, jobs = ctx.manager, ctx.jobs
     segs = path.strip("/").split("/")
-    if len(segs) >= 3 and segs[0] == "engines":
-        eid, verb = segs[1], segs[2]
-        # T363: the gateway swap thinned to forwarding `?preempt=true`; the agent
-        # orchestrates the evict→admit transactionally (`kind="job"` refuses structurally,
-        # and a GPU batch's serving holder refuses via `gpu_batch_active` — FR-155).
-        preempt = (parse_qs(query).get("preempt") or [""])[0].lower() in ("1", "true", "yes")
-        # A callable (read fresh inside preempt_for at the decision point, not a stale
-        # snapshot — @claude PR#37) reporting whether a GPU batch is driving the holder.
-        batch_active_fn = (lambda: jobs.health_fields()["gpu_batch_active"]) if preempt \
-            else None
-        rt = manager.runtimes.get(eid)
-        if rt is None:
-            return "json", 404, {"error": f"unknown engine {eid!r}"}
-        # Strict shape (Codex round 8, 018): exactly /engines/<id>/<verb> or
-        # /engines/<id>/<verb>/stream — reject /engines/<id>/<verb>/typo and deeper rather
-        # than silently forwarding them as the bare verb.
-        stream = len(segs) == 4 and segs[3] == "stream"
-        if not (len(segs) == 3 or stream):
-            return "json", 404, {"error": "unknown path"}
-        # Binary/multipart engines (vision classify) send multipart, not JSON — relay the
-        # raw body + Content-Type through to the child unchanged (byte-compat, FR-177).
-        if not stream and (content_type or "").startswith("multipart/"):
-            code, payload = forward_engine_multipart(
-                manager, eid, verb, raw_body, content_type, preempt=preempt,
-                batch_active_fn=batch_active_fn)
-            return "json", code, payload
-        body = _parse_json(raw_body)
-        if body is None:
-            return "json", 400, {"error": "invalid JSON"}
-        if stream:
-            if verb not in getattr(rt.adapter, "stream_verbs", ()):
-                return "json", 404, {"error": f"engine {eid!r} has no stream verb {verb!r}"}
-            return "stream", stream_frames(manager, rt, eid, verb, body, preempt=preempt,
-                                           batch_active_fn=batch_active_fn)
-        code, payload = forward_engine(manager, eid, verb, body, preempt=preempt,
-                                       batch_active_fn=batch_active_fn)
+    eid, verb = segs[1], segs[2]
+    # T363: the gateway swap thinned to forwarding `?preempt=true`; the agent
+    # orchestrates the evict→admit transactionally (`kind="job"` refuses structurally,
+    # and a GPU batch's serving holder refuses via `gpu_batch_active` — FR-155).
+    preempt = (parse_qs(query).get("preempt") or [""])[0].lower() in ("1", "true", "yes")
+    # A callable (read fresh inside preempt_for at the decision point, not a stale
+    # snapshot — @claude PR#37) reporting whether a GPU batch is driving the holder.
+    batch_active_fn = (lambda: jobs.health_fields()["gpu_batch_active"]) if preempt \
+        else None
+    rt = manager.runtimes.get(eid)
+    if rt is None:
+        return "json", 404, {"error": f"unknown engine {eid!r}"}
+    # Strict shape (Codex round 8, 018): exactly /engines/<id>/<verb> or
+    # /engines/<id>/<verb>/stream — reject /engines/<id>/<verb>/typo and deeper rather
+    # than silently forwarding them as the bare verb.
+    stream = len(segs) == 4 and segs[3] == "stream"
+    if not (len(segs) == 3 or stream):
+        return "json", 404, {"error": "unknown path"}
+    # Binary/multipart engines (vision classify) send multipart, not JSON — relay the
+    # raw body + Content-Type through to the child unchanged (byte-compat, FR-177).
+    if not stream and (content_type or "").startswith("multipart/"):
+        code, payload = forward_engine_multipart(
+            manager, eid, verb, raw_body, content_type, preempt=preempt,
+            batch_active_fn=batch_active_fn)
         return "json", code, payload
+    body = _parse_json(raw_body)
+    if body is None:
+        return "json", 400, {"error": "invalid JSON"}
+    if stream:
+        if verb not in getattr(rt.adapter, "stream_verbs", ()):
+            return "json", 404, {"error": f"engine {eid!r} has no stream verb {verb!r}"}
+        return "stream", stream_frames(manager, rt, eid, verb, body, preempt=preempt,
+                                       batch_active_fn=batch_active_fn)
+    code, payload = forward_engine(manager, eid, verb, body, preempt=preempt,
+                                   batch_active_fn=batch_active_fn)
+    return "json", code, payload
+
+
+def _is_engine_verb(path):
+    segs = path.strip("/").split("/")
+    return len(segs) >= 3 and segs[0] == "engines"
+
+
+#: Ordered POST route table (T585): first matcher wins — the exact order of the prior if-ladder.
+_POST_ROUTES = (
+    (lambda p: p == "/control/unload", _post_control_unload),
+    (lambda p: p == "/control/reload", _post_control_reload),
+    (lambda p: p == "/jobs", _post_jobs),
+    (lambda p: p.startswith("/jobs/") and p.endswith("/cancel"), _post_job_cancel),
+    (lambda p: p.strip("/") in jobs_mod.ROUTE_TO_KIND, _post_legacy_alias),
+    (_is_engine_verb, _post_engine_verb),
+)
+
+
+def handle_post(path: str, query: str, content_type: str, control_header: str, raw_body: bytes,
+                *, admission, journal, manager, jobs):
+    """Route a POST through the ordered `_POST_ROUTES` table (024 US3, T586 — first match wins;
+    unmatched → 404). Returns ("json", status, payload) or ("stream", frame_generator). Signature
+    unchanged: the open/keyed/secret-gated semantics + legacy aliases are byte-preserved (FR-340)."""
+    ctx = SimpleNamespace(query=query, content_type=content_type, control_header=control_header,
+                          raw_body=raw_body, admission=admission, journal=journal, manager=manager,
+                          jobs=jobs)
+    for matcher, handler in _POST_ROUTES:
+        if matcher(path):
+            return handler(path, ctx)
     return "json", 404, {"error": "unknown path"}
 
 

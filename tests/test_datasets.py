@@ -30,6 +30,16 @@ def _req(method, path, body=None):
         return e.code, json.load(e)
 
 
+def _req_raw(method, path):
+    """Like `_req` but returns the RAW body — the byte-proxy download is not JSON (025 US3)."""
+    req = urllib.request.Request(GW + path, headers=auth_headers({}), method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
 def _register(content: bytes, fmt="csv"):
     return _req("POST", "/datasets", {
         "name": NAME, "content_b64": base64.b64encode(content).decode(), "format": fmt,
@@ -66,7 +76,10 @@ def main() -> int:
         return 1
     print(f"[OK] /datasets/{NAME} lists {len(listed)} versions")
 
-    # 4. Each version independently resolvable with the correct, distinct sha256 + a download URL.
+    # 4. Each version independently resolvable with the correct, distinct sha256 — and, 025 US3
+    #    (FR-355), with NO presigned `download_url`: that URL was signed against the internal store
+    #    endpoint (browser-unresolvable) and leaked an object-store capability to every manifest
+    #    reader. Bytes come from the gateway's byte-proxy route instead (checked in step 4b).
     s1, m1 = _req("GET", f"/datasets/{NAME}/{va['version']}")
     s2, m2 = _req("GET", f"/datasets/{NAME}/{vb['version']}")
     ok = (
@@ -74,12 +87,21 @@ def main() -> int:
         and m1["sha256"] != m2["sha256"]
         and m1["size_bytes"] == len(content_a)
         and m2["size_bytes"] == len(content_b)
-        and m1.get("download_url") and m2.get("download_url")
+        and "download_url" not in m1 and "download_url" not in m2
     )
     if not ok:
-        print(f"[FAIL] resolve -> {s1}/{s2} sha differ={m1.get('sha256') != m2.get('sha256')}")
+        print(f"[FAIL] resolve -> {s1}/{s2} sha differ={m1.get('sha256') != m2.get('sha256')} "
+              f"presigned-leak={'download_url' in m1 or 'download_url' in m2}")
         return 1
-    print("[OK] both versions resolve with distinct sha256, correct sizes, and download URLs")
+    print("[OK] both versions resolve with distinct sha256, correct sizes, and no presigned URL")
+
+    # 4b. The byte-proxy download returns the EXACT pinned bytes (025 US3, FR-355 / SC-179).
+    sd, body = _req_raw("GET", f"/datasets/{NAME}/{va['version']}/download")
+    if sd != 200 or body != content_a:
+        print(f"[FAIL] byte download -> {sd} len={len(body) if body else 0} "
+              f"expected={len(content_a)}")
+        return 1
+    print(f"[OK] byte download returns the pinned {len(body)} bytes through the gateway")
 
     # 5. Missing version → 404.
     s404, _ = _req("GET", f"/datasets/{NAME}/deadbeef0000")
