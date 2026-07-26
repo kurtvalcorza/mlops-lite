@@ -1,6 +1,6 @@
 # User Guide — LAN Self-Service GPU Broker
 
-> **Status: PLANNED UX (spec 024, pre-implementation).** This guide describes how the broker is
+> **Status: PLANNED UX (spec 026, pre-implementation).** This guide describes how the broker is
 > *intended* to work per [spec.md](./spec.md). Exact endpoints, command names, and flags are
 > **illustrative** and will be finalized in `/speckit-plan` (contracts) and `/speckit-implement`.
 > Each section notes the spec story/FR it traces to.

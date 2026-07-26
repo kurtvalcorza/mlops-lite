@@ -1,6 +1,6 @@
 # Feature Specification: LAN Self-Service GPU Broker
 
-**Feature Branch**: `024-lan-gpu-broker`
+**Feature Branch**: `026-lan-gpu-broker`
 
 **Created**: 2026-07-19
 

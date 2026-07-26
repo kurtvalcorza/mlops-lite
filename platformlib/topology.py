@@ -54,9 +54,22 @@ ENGINES = {
     "tabular": {"gpu": False, "optional": False, "ready_wait_s": 120},
 }
 
-#: Modalities with a fine-tune flow (the on-breach retrain targets, FR-181). The canonical shared
-#: definition — `training/flow_dispatch.VALID_MODALITIES` mirrors it until the jobs fold-in (T362).
+#: GPU-trained modalities — those with a fine-tune flow AND a wired HPO search space, so they are the
+#: valid modality set for BOTH the `finetune` and `hpo` job kinds (each a GPU tenant). The canonical
+#: shared definition — `training/flow_dispatch.VALID_MODALITIES` mirrors it until the jobs fold-in (T362).
 TRAINABLE_MODALITIES = ("llm", "vision", "embeddings", "asr")
+
+#: CPU/off-lease trainable modalities (025 US2): a fine-tune flow, NO GPU lease, and NO HPO search space.
+#: Kept SEPARATE from TRAINABLE_MODALITIES on purpose — that tuple is the shared `modality_set` for both
+#: the `finetune` and `hpo` kinds (both `gpu=True`), so folding tabular into it would let `/study` accept
+#: a tabular HPO job, take the GPU lease, then fail every trial with SearchSpaceError (no tabular search
+#: space in `training/search_spaces.py`). Admit CPU modalities per-KIND instead (Codex round-4 finding).
+CPU_TRAINABLE_MODALITIES = ("tabular",)
+
+#: Modalities a FINE-TUNE (and therefore an on-breach policy retrain, FR-181) may target — the GPU-trained
+#: set plus the CPU/off-lease ones. This is the set the `finetune` kind, `ModelPolicy.validate`, and
+#: `RetrainSpec` validate against; `hpo` deliberately stays on TRAINABLE_MODALITIES.
+FINETUNE_MODALITIES = TRAINABLE_MODALITIES + CPU_TRAINABLE_MODALITIES
 
 #: The host agent's single stable endpoint (research R3) — the ONLY port the platform binds for
 #: inference/jobs now that every engine + the jobs surface is folded into the agent (the legacy

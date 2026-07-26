@@ -8,7 +8,6 @@ single named alias (`serving`) always points at the version US1 should resolve.
 The MLflow server version is pinned in infra/mlflow (3.14.0, 007 US1); this client matches it.
 """
 import os
-import time
 from typing import Optional
 
 from mlflow.exceptions import MlflowException
@@ -149,61 +148,15 @@ def _store():
     return store
 
 
-def get_serving_llm() -> Optional[dict]:
-    """The active serving-LLM selection {model_name, selected_at, selected_by}, or None when unset
-    (or the store is unreachable — both read as 'the configured default base serves')."""
-    try:
-        s = _store()
-        conn = s.connect()
-        try:
-            return s.get_serving_llm(conn)
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001 — best-effort read; unset ⇒ default base
-        return None
-
-
-def set_serving_llm(model_name: str, actor: str = "operator") -> dict:
-    """Record `model_name` as the active serving LLM (022 US1 — the gated promote IS the go-live
-    action; this is its persistence half, the agent reload is the other). Fail-loud."""
-    try:
-        s = _store()
-        conn = s.connect()
-        try:
-            # 023 US4: bootstrap() VERIFIES schema compatibility now (gateway startup applies
-            # the migrations, FR-299). The guard survives so a promote against an unmigrated or
-            # newer-schema DB fails HERE with the migration verdict — before the pointer write
-            # half-applies (the original Codex F2 concern, now enforced by the ledger).
-            s.bootstrap(conn)
-            s.set_serving_llm(conn, model_name, time.time(), actor)
-        finally:
-            conn.close()
-    except Exception as e:  # noqa: BLE001 — normalize driver/connection errors
-        raise RegistryError(f"active serving-LLM pointer write failed: {e}") from e
-    return {"model_name": model_name, "selected_by": actor}
-
-
-def restore_serving_llm(prior: Optional[dict]) -> None:
-    """Roll the active serving-LLM pointer back to a previously-captured value (022 FR-265). Called
-    when a promote's reload comes back `unresolvable`: the alias moved but the agent can't load the
-    artifact, so the pointer must NOT stay pointed at it — a persisted EXPLICIT pointer to an
-    unloadable model 503s the next cold load. `prior` is a `get_serving_llm()` snapshot taken BEFORE
-    the promote overwrote it: a concrete model ⇒ restore it; None (was unset) ⇒ clear it, back to
-    best-effort adoption / the configured default, which never bricks serving. Fail-loud."""
-    try:
-        s = _store()
-        conn = s.connect()
-        try:
-            if prior and prior.get("model_name"):
-                s.set_serving_llm(conn, prior["model_name"],
-                                  prior.get("selected_at") or time.time(),
-                                  prior.get("selected_by") or "operator")
-            else:
-                s.clear_serving_llm(conn)
-        finally:
-            conn.close()
-    except Exception as e:  # noqa: BLE001 — normalize driver/connection errors
-        raise RegistryError(f"active serving-LLM pointer rollback failed: {e}") from e
+# The serving-LLM pointer CRUD (`get`/`set`/`restore`) is pure Postgres state, relocated OUT of this
+# MLflow adapter into `serving_pointer.py` (024 US2 T577, ADR-0005) and re-exported here so every
+# `registry.get_serving_llm(...)` / `set_serving_llm(...)` / `restore_serving_llm(...)` call site is
+# unchanged. `active_serving_llm_name` below STAYS — it resolves cross-authority via MLflow adoption.
+from .serving_pointer import (  # noqa: E402,F401 — re-exported; import here (not top) to sit beside its kin
+    get_serving_llm,
+    restore_serving_llm,
+    set_serving_llm,
+)
 
 
 def active_serving_llm_name() -> str:

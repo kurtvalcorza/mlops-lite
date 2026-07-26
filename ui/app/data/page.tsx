@@ -8,9 +8,10 @@ import { gwGet, gwPost } from '@/lib/gw';
 type Version = { version: string; size_bytes: number; sha256: string; format: string; uri: string };
 type Dataset = { name: string; versions: Version[] };
 type Manifest = { name: string; version: string; size_bytes: number; sha256: string; format: string };
-// Full version manifest (021 FR-215): `download_url` exists on the wire but is presigned against
-// the INTERNAL store endpoint — not browser-reachable — so this stage is inspect-only (no byte
-// download button; deferred until a public-presign knob exists).
+// Full version manifest. 025 US3 (FR-355, closes 021 FR-215): the manifest no longer carries a
+// presigned `download_url` — it was signed against the INTERNAL store endpoint (not browser-reachable)
+// and handing one out leaked an object-store capability. Bytes now come from the gateway's byte-proxy
+// route through the key-injecting BFF, so no credential or signed URL reaches the browser.
 type VersionDetail = {
   name: string;
   version: string;
@@ -19,7 +20,6 @@ type VersionDetail = {
   format: string;
   uri?: string;
   created_at?: number | string;
-  download_url?: string;
 };
 
 // 014 US2 — the hand-rolled dataset-validation report.
@@ -190,9 +190,19 @@ function VersionRow({ name, version: v }: { name: string; version: Version }) {
               <ManifestRow k="created">{String(detail.created_at)}</ManifestRow>
             )}
           </dl>
+          <p className="mt-1">
+            <a
+              href={`/api/gw/datasets/${encodeURIComponent(detail.name)}/${encodeURIComponent(
+                detail.version,
+              )}/download`}
+              download={`${detail.name}-${detail.version}${downloadExt(detail.format)}`}
+            >
+              [↓] download pinned bytes
+            </a>
+          </p>
           <p className="mt-1 text-ash">
-            [i] inspect-only — the pinned bytes live in the internal store (byte download deferred;
-            the presigned URL is not browser-reachable).
+            [i] proxied by the gateway through the BFF (025 FR-355) — no object-store credential or
+            presigned URL reaches the browser.
           </p>
         </div>
       )}
@@ -224,6 +234,23 @@ function VersionRow({ name, version: v }: { name: string; version: Version }) {
       )}
     </li>
   );
+}
+
+// The suggested save-as extension follows the version's declared format (review round 8) — a CSV
+// version must not be offered as `.jsonl`. Mirrors the gateway's whitelist in routers/datasets.py;
+// the gateway's Content-Disposition is authoritative, this only pre-fills the browser's dialog.
+const DOWNLOAD_EXT: Record<string, string> = {
+  jsonl: '.jsonl',
+  ndjson: '.jsonl',
+  json: '.json',
+  csv: '.csv',
+  tsv: '.tsv',
+  parquet: '.parquet',
+  txt: '.txt',
+};
+
+function downloadExt(format?: string): string {
+  return DOWNLOAD_EXT[(format || '').trim().toLowerCase().replace(/^\./, '')] ?? '.bin';
 }
 
 function ManifestRow({ k, children }: { k: string; children: React.ReactNode }) {

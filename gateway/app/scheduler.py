@@ -48,7 +48,11 @@ PROMOTIONS = Counter("gateway_policy_promotions_total", "Policy promotion outcom
 
 #: trainable modality → the task/metric key the quality window scorer uses (011/013 registry).
 MODALITY_TASK = {"llm": "text-generation", "vision": "image-classification",
-                 "embeddings": "embedding", "asr": "asr"}
+                 "embeddings": "embedding", "asr": "asr",
+                 # 025 US2: without this entry `_default_check`'s direct index raises KeyError for a
+                 # tabular policy, the tick swallows it as `check_error`, and the breach is NEVER
+                 # detected — so the promised retrain never launches (Codex round-4 finding).
+                 "tabular": "tabular"}
 
 
 class Busy(Exception):

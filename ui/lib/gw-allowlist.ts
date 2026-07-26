@@ -16,7 +16,11 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'datasets' },
   { method: 'POST', pattern: 'datasets' }, // upload/register
   { method: 'GET', pattern: 'datasets/:name' }, // idempotency pre-check
-  { method: 'GET', pattern: 'datasets/:name/:version' }, // 021: manifest inspect (FR-215 — no byte download; the download_url presigns the internal store)
+  { method: 'GET', pattern: 'datasets/:name/:version' }, // 021: manifest inspect (025: the manifest no longer carries a presigned download_url)
+  // 025 US3 (FR-355, closes 021 FR-215): byte download PROXIED by the gateway. Not a presigned URL —
+  // that was signed against the internal store endpoint (garage:3900), unresolvable from a browser and
+  // a leaked object-store capability. The BFF injects the key; no credential reaches the browser.
+  { method: 'GET', pattern: 'datasets/:name/:version/download' },
   { method: 'POST', pattern: 'datasets/:name/:version/validate' }, // 014 US2: readiness report (gate vs warn)
   // training stage
   { method: 'POST', pattern: 'runs' }, // launch

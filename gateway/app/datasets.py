@@ -116,7 +116,13 @@ def list_datasets() -> list:
 
 
 def get_dataset(name: str, version: str):
-    """Resolve one dataset version → its manifest plus a presigned download URL (None if absent)."""
+    """Resolve one dataset version → its manifest (None if absent).
+
+    025 US3 (FR-355): this NO LONGER attaches a presigned `download_url`. That URL was signed against
+    the INTERNAL object-store endpoint (`garage:3900` — `platformlib.s3io.S3_ENDPOINT`), so it was
+    unusable from a browser anyway, while still handing every manifest reader a signed object-store
+    capability. Bytes are served by `open_dataset_bytes` through the gateway instead, so no signed URL
+    and no credential reaches the browser."""
     s3 = _s3()
     try:
         m = json.loads(s3.get_object(Bucket=BUCKET, Key=f"{name}/{version}/manifest.json")["Body"].read())
@@ -126,12 +132,40 @@ def get_dataset(name: str, version: str):
         raise DatasetError(str(e)) from e
     except BotoCoreError as e:
         raise DatasetError(str(e)) from e
-    try:
-        m["download_url"] = s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": BUCKET, "Key": f"{name}/{version}/data"},
-            ExpiresIn=3600,
-        )
-    except (ClientError, BotoCoreError):
-        m["download_url"] = None
+    # Belt-and-braces: a manifest written by a pre-025 build may carry a stored `download_url`; never
+    # relay one to a caller (the FR-355 no-signed-URL-in-the-browser guarantee is about what we RETURN).
+    m.pop("download_url", None)
     return m
+
+
+def open_dataset_bytes(name: str, version: str, *, chunk_size: int = 1 << 16):
+    """Stream one dataset version's `data` object THROUGH the gateway (025 US3, FR-355).
+
+    Returns `(iterator_of_chunks, size_or_None)`, or None when the version has no data object. The
+    object body is relayed in bounded chunks rather than read whole, so a large dataset does not have to
+    fit in gateway memory. The caller (the route) turns this into a streaming response; the operator's
+    browser never sees a presigned URL or an object-store credential — the gateway holds those."""
+    s3 = _s3()
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=f"{name}/{version}/data")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise DatasetError(str(e)) from e
+    except BotoCoreError as e:
+        raise DatasetError(str(e)) from e
+    body = obj["Body"]
+
+    def _chunks():
+        try:
+            while True:
+                chunk = body.read(chunk_size)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            close = getattr(body, "close", None)
+            if close:
+                close()  # release the streaming connection even if the client disconnects mid-download
+
+    return _chunks(), obj.get("ContentLength")

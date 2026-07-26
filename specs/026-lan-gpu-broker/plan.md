@@ -1,8 +1,8 @@
 # Implementation Plan: LAN Self-Service GPU Broker
 
-**Branch**: `024-lan-gpu-broker` | **Date**: 2026-07-19 | **Spec**: [spec.md](./spec.md)
+**Branch**: `026-lan-gpu-broker` | **Date**: 2026-07-19 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `specs/024-lan-gpu-broker/spec.md`
+**Input**: Feature specification from `specs/026-lan-gpu-broker/spec.md`
 
 ## Summary
 
@@ -117,7 +117,7 @@ new-runtime amendment + sandbox spike (see below).*
 ### Documentation (this feature)
 
 ```text
-specs/024-lan-gpu-broker/
+specs/026-lan-gpu-broker/
 ├── plan.md              # This file
 ├── research.md          # Phase 0 — decisions R1..R9
 ├── data-model.md        # Phase 1 — tenants/keys/quotas/ledger/jobs/sessions + admission state
