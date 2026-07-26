@@ -102,8 +102,14 @@ implicit via window truncation). Owner may raise/lower the budget any time.
 consumption from the append-only ledger avoids a mutable-balance race.
 
 **Alternatives considered**: mutable credit balance with manual top-up — rejected by clarify; also a
-concurrency hazard (read-modify-write on balance). Per-request hard reservation — deferred; soft check at
-admission is adequate at LAN scale.
+concurrency hazard (read-modify-write on balance).
+
+**Superseded (PR #74 review).** This decision originally deferred per-request hard reservation, calling a
+"soft check at admission adequate at LAN scale." That is **no longer the design** and contradicted R4,
+`data-model.md`'s `usage_reservation` entity, and FR-016, all of which mandate a hard, atomic,
+reject-on-overflow reservation settled to actual on completion. R5 was not updated when R4 was revised
+after the first Codex pass. **The hard reserve→settle reservation is authoritative**; an implementer must
+not build the soft check described above.
 
 ---
 
@@ -115,8 +121,21 @@ Postgres** so ordering survives a host-agent restart). Inference is favored *but
 configurable inference **burst** OR a head-job **wait bound**, the coordinator enters **job-drain mode** —
 it stops admitting NEW inference (running requests finish, never preempted) until the head FIFO job acquires
 the GPU. This actually **prevents starvation** (a mere "starved" warning, in the v1 design, did not). The
-**host-agent coordinator is the SOLE GPU-ordering authority**; the pre-existing `gateway/app/scheduler.py` is
-audited and reduced to a **status/routing facade** (no independent GPU ordering) to avoid split ownership.
+**host-agent coordinator is the SOLE GPU-ordering authority**.
+
+**Correction (PR #74 review).** An earlier revision of this decision claimed `gateway/app/scheduler.py`
+was a competing GPU-ordering authority to be "audited and reduced to a status/routing facade." That was
+a misidentification, confirmed independently by both reviewers and by reading the file: it is
+`PolicyScheduler` from feature 018 — a drift/quality monitoring tick loop that launches retrains and
+parks a `PendingRetrain` on `409 Busy` (FR-182). It has no lane ordering, no VRAM admission, and no
+cross-tenant queue. Reducing it to a facade would delete the monitoring→retrain feedback loop while
+consolidating no scheduling. **It is kept as-is.**
+
+The genuine split-ownership risk it *does* create is different: `PolicyScheduler` calls the host
+agent's `/train` directly, outside any lane, with no tenant identity. Under this design those
+retrains **enqueue onto the jobs lane under a reserved system tenant**, so they queue FIFO by arrival,
+honour the single `exclusive_job` slot, and are metered rather than invisible. Its existing
+`Busy`/park-and-retry path is unaffected — a full jobs lane returns the same `409` it already handles.
 Owner override may pin/pause/reorder queued jobs.
 
 **Rationale**: Matches the clarify decision while fixing the two Codex findings — job starvation and split
@@ -199,7 +218,7 @@ inference; co-resident-with-cull is friendlier and still bounded.
 | Metering unit + capture | R4 — GPU-seconds, agent-emitted, ledger on admission path |
 | Quota model | R5 — recurring window, consumption derived from ledger |
 | Scheduler policy | R6 — inference lane + jobs FIFO lane + owner override |
-| Job isolation | R7 — Kata→gVisor→documented fallback (WSL feasibility spike in P1) |
+| Job isolation | R7 — spike complete: gVisor/Kata infeasible on WSL2; P2 gated on a native-Linux GPU host + runtime constitution amendment (the earlier "documented fallback" was rejected as unsound) |
 | LAN reachability | R8 — mirrored-net (preferred) or portproxy; DHCP-reserved IP |
 | Interactive sessions | R9 — serving-class lease, idle-cull + TTL, notebook-as-job |
 

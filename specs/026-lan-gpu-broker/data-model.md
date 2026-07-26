@@ -112,7 +112,9 @@ here on completion; a GPU op is admitted only if its reservation can be written;
 ### Queue (scheduler — persisted)
 - `inference_lane`: admitted against the budget, interleaved; bounded by burst / job-drain mode.
 - `jobs_lane`: FIFO of exclusive claims, **persisted in Postgres** (survives restart); owner override.
-- Single GPU-ordering authority (host agent); `gateway/app/scheduler.py` = status facade only.
+- Single GPU-ordering authority (host agent). `gateway/app/scheduler.py` is the 018 `PolicyScheduler`
+  (drift/retrain monitoring), not a GPU-ordering authority — kept as-is; its retrains enter the jobs
+  lane under a reserved system tenant.
 
 ## Relationships
 

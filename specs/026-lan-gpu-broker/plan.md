@@ -30,7 +30,8 @@ gateway, Postgres store, engine children, MLflow, Next.js console) are reused as
    active-request ref-counts; generation-token **reserve → load-outside-lock → commit/rollback**;
    **drain-before-evict**) enforcing the corrected **two-bound VRAM check** (accounted set + reservations ≤
    usable budget, AND each load ≤ live free − headroom, reconciled to the real delta). **One** GPU-ordering
-   authority (host agent); `gateway/app/scheduler.py` reduced to a status/routing facade; job queue
+   authority (host agent); `gateway/app/scheduler.py` is the 018 `PolicyScheduler` and is kept as-is —
+   its tenant-less retrains instead enter the jobs lane under a reserved system tenant; job queue
    **persisted** in Postgres; **bounded-burst / job-drain** anti-starvation. (R1, R6)
 4. **Reserve-then-settle metering, atomic quotas, gated sandbox, sessions, console** — idempotent
    **reserve→settle** GPU-seconds accounting with atomic recurring-window quota (R4/R5); arbitrary jobs run in
@@ -143,7 +144,7 @@ gateway/app/                     # FastAPI gateway — the LAN front door
 
 hostagent/                       # GPU host agent — sole GPU authority
 ├── coordinator.py               #   REDESIGN of admission.py: resident-set state machine, reserve→load-outside-lock→commit, drain-before-evict, two-bound VRAM check
-├── scheduler.py                 #   NEW: shape-lane queue (inference vs jobs FIFO) + drain mode + owner override; SOLE GPU-ordering authority (audit/retire gateway/app/scheduler.py's ordering)
+├── scheduler.py                 #   NEW: shape-lane queue (inference vs jobs FIFO) + drain mode + owner override; SOLE GPU-ordering authority (gateway/app/scheduler.py is the 018 PolicyScheduler — unchanged; its retrains enqueue here as system-tenant jobs)
 ├── jobs.py                      #   EXTEND: run jobs in a hardened sandbox runtime (gVisor/Kata)
 ├── sessions.py                  #   NEW: interactive session leases with idle-cull + TTL
 ├── metrics.py / journal.py      #   EXTEND: emit GPU-seconds per request/job for the ledger

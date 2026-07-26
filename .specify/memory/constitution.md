@@ -14,11 +14,18 @@ Templates checked:
   - .specify/templates/plan-template.md — ✅ no change (Constitution Check is generic; no hardcoded Principle II text)
   - .specify/templates/spec-template.md  — ✅ no change (generic)
   - .specify/templates/tasks-template.md — ✅ no change (generic)
+Memory files:
+  - .specify/memory/hardware-profile.md — ✅ UPDATED (PR #74 review). Principle II points here for the
+    VRAM budget, so it is a dependent artifact and was missed by the original v1.6.0/v1.6.1 sync: it
+    still asserted "Live models in VRAM: exactly 1 at a time," contradicting bounded co-residency.
+    Now states the two-bound rule and defines the admission tunables (safety_reserve, safety_headroom,
+    max_admission_attempts, drain_timeout, job_drain_timeout, admission_backoff) that the spec,
+    plan, and contracts/admission-scheduler.md all reference.
 Runtime guidance:
   - README.md — ⚠ PENDING: still describes the as-built SINGLE-TENANT system (≈ lines 56, 77, 287, 291).
     Accurate for today's implementation; update to VRAM-budget co-residency only when feature
-    024-lan-gpu-broker implements it (do not rewrite now — would document unbuilt behavior).
-Follow-up TODOs: implement 024-lan-gpu-broker co-residency, then refresh README's Principle II descriptions.
+    026-lan-gpu-broker implements it (do not rewrite now — would document unbuilt behavior).
+Follow-up TODOs: implement 026-lan-gpu-broker co-residency, then refresh README's Principle II descriptions.
 -->
 
 # MLOps-Lite Constitution
@@ -177,7 +184,7 @@ and III. All plans and task lists are reviewed for compliance with these princip
      PATCH: wording-only — the RULE (every dataset version recorded; if it isn't tracked, it didn't happen)
      is unchanged. Observed by 023's plan (§Constitution errata), processed as its own amendment rather than
      silently folded into a feature change.
-     v1.6.0 (024-lan-gpu-broker): Principle II generalized from "at most ONE GPU tenant resident at any
+     v1.6.0 (026-lan-gpu-broker): Principle II generalized from "at most ONE GPU tenant resident at any
      instant" to "the combined footprint of GPU-resident tenants MUST never exceed the live free VRAM budget"
      — admitting BOUNDED CO-RESIDENCY of multiple SERVING tenants within VRAM_GB through the same single
      race-free admission authority (hostagent/admission.py). PRESERVED unchanged: training/HPO/batch jobs take
@@ -190,7 +197,7 @@ and III. All plans and task lists are reviewed for compliance with these princip
      the principle stays NON-NEGOTIABLE. Rationale: a self-service multi-tenant broker on one GPU serves many
      small models far better when compatible models co-reside within the VRAM budget rather than swapping on
      every modality switch. README Principle II descriptions remain ⚠ pending until 024 implements co-residency.
-     v1.6.1 (024-lan-gpu-broker, Codex architecture review): PATCH — corrected the v1.6.0 VRAM wording, which
+     v1.6.1 (026-lan-gpu-broker, Codex architecture review): PATCH — corrected the v1.6.0 VRAM wording, which
      conflated two distinct checks. "Combined footprint ≤ live free VRAM" double-counted residents (live-free
      already excludes them). Reworded to the correct pair: the accounted resident set ≤ a USABLE budget
      (VRAM_GB − safety reserve), AND each incoming load ≤ live free VRAM (with headroom + post-load delta
