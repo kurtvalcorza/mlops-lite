@@ -168,6 +168,7 @@ each task**, not the ID. T682–T684 are prerequisites of T641 despite their lat
 - [ ] **T686** `[US5]` *(Phase 6, gated)* Split session timers: idle-cull keys on **`last_gpu_activity_at`** (admitted GPU work only); `POST /heartbeat` updates `last_heartbeat_at` and **must not** reset the GPU idle timer. Check: a session heartbeating on its normal client interval with no cells running still releases its GPU lease within `idle_timeout_s` (SC-007).
 - [ ] **T687** `[US1]` *(Phase 2)* Enforce **reservation ownership**: an operation drops its own reservation on **every** exit including the stale path; `evict()` and any other reclaimer remove only the resident entry and bump the generation, never another op's reservation. Check: a load that finds its generation bumped still releases its reserved bytes — `accounted` and `unmaterialized` return to their pre-admission values, and a subsequent admission for the same size succeeds.
 - [ ] **T688** `[US1]` *(Phase 1)* Return **one status per refusal code**: `gpu_busy` → `503` with `Retry-After` on every inference route (exclusive job, contention, exhausted attempts alike); `model_too_large` → `413` only when the estimate exceeds `usable_capacity − safety_headroom`. The host agent's jobs-lane-full `409` (FR-182) stays distinct. Check: a client retrying on 503 eventually succeeds for every transient cause, and no contention case ever surfaces as 413.
+- [ ] **T689** `[US3]` *(Phase 3)* Expose both terms of **both VRAM bounds** on `GET /admin/queue` — `usable_capacity`, `accounted`, `reserved`, `live_free`, `safety_headroom`, plus per-resident `state`/`active_requests`, outstanding `reservations`, and `job_barrier` — named as [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) names them. Check: Drill 3 step 3 can assert invariants 1 and 2 by reading this response alone, with no recourse to agent logs.
 
 ## Traceability
 
@@ -175,7 +176,7 @@ each task**, not the ID. T682–T684 are prerequisites of T641 despite their lat
 |---|---|---|
 | US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649, T674–T677, T681, T682–T684, T687–T688 |
 | US2 — submit-and-queue jobs | P2 (gated) | T658–T664, T679–T680, T685 |
-| US3 — quotas, ledger, visibility | P3 | T628–T631, T649, T671, T678 |
+| US3 — quotas, ledger, visibility | P3 | T628–T631, T649, T671, T678, T689 |
 | US4 — additional modalities | P4 | T653–T657 |
 | US5 — interactive sessions | P5 (gated) | T665–T669, T686 |
 
