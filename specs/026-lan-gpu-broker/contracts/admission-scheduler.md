@@ -320,8 +320,13 @@ memory bound that also holds when *unaccounted external* GPU consumers are prese
 evict(victim, deadline) :
   under lock: victim.state = draining        # stop admitting NEW requests to it
   wait until victim.active_requests == 0     # OUTSIDE lock, bounded by drain_timeout
-      on timeout: under lock: victim.state = resident   # revert; victim was NOT freed
-                  return EvictFailed(busy)
+      on timeout: under lock:
+                    if job_barrier or exclusive_job:
+                        leave victim 'draining'         # ← ownership TRANSFERS to the job's drain,
+                                                        #   which holds the longer job_drain_timeout
+                    else:
+                        victim.state = resident         # revert; victim was NOT freed
+                  return EvictFailed(busy)              # this op is done either way
   under lock: victim.state = evicting        # drained; committed to unload
   unload(victim); verify NVML free rose      # OUTSIDE lock
   under lock: remove victim; bump generation   # ← resident entry + generation ONLY, never a reservation
@@ -331,10 +336,20 @@ Idle-first, then LRU. **Eviction never interrupts in-flight requests.** It also 
 operation's reservation — see *Reservation ownership* above; the generation bump is the whole of how a
 reclaimer signals a displaced owner, and that owner cleans up after itself.
 
+**Why the timeout revert is barrier-aware.** Reverting a stalled victim to `resident` is right when no job
+is waiting — the victim was not freed, so it should go back to being an ordinary serving tenant. Under a
+`job_barrier` it is exactly wrong: the job's marking pass has already run and does not run again, so a
+victim that reverts *after* that pass is a resident nothing will ever mark, and the job can only time out.
+That is the same liveness bug the *Convergence* fix closes, re-entered through a side door. Leaving it
+`draining` hands it to the job's drain, which already owns every other resident and has the longer
+`job_drain_timeout` budget — and if that budget also runs out, `admit_job`'s own timeout reverts every
+surviving victim to `resident` in one place, so the victim is never abandoned in a transient state.
+
 **Caller contract when blocked behind an eviction.** A request whose `EvictThenRetry` returns
 `EvictFailed` does not spin: it consumes one of its `max_admission_attempts`, backs off
 (exponential, jittered, capped), and re-enters stage 1 — where the victim is once again `resident`
-and may no longer be the best choice. When attempts or `deadline` are exhausted the request is
+(unless a barrier rose meanwhile, in which case this request is refused `gpu_busy` at the gate and the
+victim stays with the job's drain) and may no longer be the best choice. When attempts or `deadline` are exhausted the request is
 refused `gpu_busy` with `Retry-After`. **No admission path waits unbounded on another tenant's
 in-flight request.**
 
@@ -388,6 +403,21 @@ entry in `loading` is not a resident yet and must not be marked: its load is in 
 and the operation that owns it is the only thing allowed to end it (which it does, on the barrier — see
 the next section). Entries already `draining`/`evicting`/`rolling_back` are likewise left alone; an owning
 operation is mid-flight and the drain simply waits for them, exactly as `AwaitTransient` does.
+
+**The one way a resident can appear *after* the marking pass — and why it can't.** Skipping transient
+entries is only safe if none of them can turn back into an unmarked `resident`. Exactly one path does
+that: `evict()`'s `drain_timeout` reverting a stalled victim. An ordinary `admit_serving` can mark a
+victim `draining` and start evicting it *before* any job exists; if the barrier then rises, that victim is
+correctly skipped as transient — but its own `drain_timeout` is a separate and typically much shorter
+tunable than `job_drain_timeout`, so it can expire first and revert the victim to `resident` behind the
+pass that already ran. Nothing would re-mark it (the displaced caller re-enters stage 1 and is refused at
+the barrier, so it does not re-evict either), and the job could only time out — the same liveness bug,
+narrower. `evict()`'s revert is therefore **barrier-aware**: under a barrier the victim stays `draining`
+and its ownership transfers to the job's drain. See *Why the timeout revert is barrier-aware* above.
+
+With that path closed, the set of entries that can be in state `resident` after the marking pass is
+**empty**, and the convergence argument holds without qualification. `evicting` and `rolling_back` have no
+revert-to-`resident` path at all — both run to removal — so `draining` was the only one to close.
 
 And convergence follows from the barrier itself. Stage 1 refuses **every** admission while
 `job_barrier` holds — including `Share` on an already-resident model — so no resident can *gain* a
