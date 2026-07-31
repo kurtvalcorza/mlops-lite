@@ -166,12 +166,14 @@ each task**, not the ID. T682–T684 are prerequisites of T641 despite their lat
 - [ ] **T684** `[US1]` *(Phase 2)* Implement the `AwaitLoad` **deadline** exit with its claim tie-break: a waiter that times out deregisters under the lock, **unless** the commit already assigned it a claim, in which case it takes the claim and releases it normally. Check: a stress test that expires waiter deadlines concurrently with commits leaves `active_requests == 0` afterwards, with no model left permanently un-evictable (invariants 4 and 5).
 - [ ] **T685** `[US2]` *(Phase 3)* Carry **`interrupted`** as a distinct terminal `job.state` and report it verbatim from `/jobs/{id}` rather than folding it into `failed`. Check: a host-agent restart mid-job leaves the job `interrupted` with elapsed GPU-seconds settled, and a tenant can distinguish it from a job their own code failed; the pre-broker `hostagent/jobs.py` surface still maps `interrupted → failed`.
 - [ ] **T686** `[US5]` *(Phase 6, gated)* Split session timers: idle-cull keys on **`last_gpu_activity_at`** (admitted GPU work only); `POST /heartbeat` updates `last_heartbeat_at` and **must not** reset the GPU idle timer. Check: a session heartbeating on its normal client interval with no cells running still releases its GPU lease within `idle_timeout_s` (SC-007).
+- [ ] **T687** `[US1]` *(Phase 2)* Enforce **reservation ownership**: an operation drops its own reservation on **every** exit including the stale path; `evict()` and any other reclaimer remove only the resident entry and bump the generation, never another op's reservation. Check: a load that finds its generation bumped still releases its reserved bytes — `accounted` and `unmaterialized` return to their pre-admission values, and a subsequent admission for the same size succeeds.
+- [ ] **T688** `[US1]` *(Phase 1)* Return **one status per refusal code**: `gpu_busy` → `503` with `Retry-After` on every inference route (exclusive job, contention, exhausted attempts alike); `model_too_large` → `413` only when the estimate exceeds `usable_capacity − safety_headroom`. The host agent's jobs-lane-full `409` (FR-182) stays distinct. Check: a client retrying on 503 eventually succeeds for every transient cause, and no contention case ever surfaces as 413.
 
 ## Traceability
 
 | Story | Priority | Tasks |
 |---|---|---|
-| US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649, T674–T677, T681, T682–T684 |
+| US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649, T674–T677, T681, T682–T684, T687–T688 |
 | US2 — submit-and-queue jobs | P2 (gated) | T658–T664, T679–T680, T685 |
 | US3 — quotas, ledger, visibility | P3 | T628–T631, T649, T671, T678 |
 | US4 — additional modalities | P4 | T653–T657 |

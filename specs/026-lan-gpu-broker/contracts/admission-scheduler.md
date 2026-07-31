@@ -129,8 +129,8 @@ admit_serving(model_key, est_bytes, deadline):
                   # Nothing evictable. Distinguish PERMANENT from TRANSIENT before answering:
                   if est_bytes > usable_capacity - safety_headroom:
                       return Refuse(model_too_large)   # 413 — cannot fit even on an empty GPU
-                  return Refuse(gpu_busy, retry_after) # 503/429 — outstanding reservations or an
-                                                       # unaccounted external consumer; retryable
+                  return Refuse(gpu_busy, retry_after) # 503 + Retry-After — outstanding reservations or
+                                                       # an unaccounted external consumer; retryable
               mark each victim 'draining'; record evict_intent{op_id, victims}
               plan = EvictThenRetry
     # ---- stage 2: I/O strictly OUTSIDE the lock ----
@@ -157,10 +157,12 @@ admit_serving(model_key, est_bytes, deadline):
       real_bytes = NVML.used_by_pid(child.pid)  # per-PROCESS, not a device-wide delta
     except spawn failure | readiness timeout | OOM | model missing:
       under lock:
-        waiters = reservation.waiters if it still exists else ∅   # ← captured BEFORE it goes away
+        waiters = reservation.waiters           # ← captured BEFORE the reservation goes away
+        drop reservation                        # ← ALWAYS: an op owns its own reservation (see below)
         if generation unchanged since reservation:
-            drop reservation; remove residents[model_key]; bump generation
-        # else: an eviction already reclaimed the slot — nothing of ours remains to clear
+            remove residents[model_key]; bump generation
+        # else: a reclaimer already removed the entry and bumped — leave ITS state alone, but our
+        #       reservation was still ours to drop and nothing else would have dropped it
       unload(partial child) if one was spawned  # ← OUTSIDE the lock
       dispose(waiters, Refuse(load_failed))     # every joiner gets the loader's own outcome
       return Refuse(load_failed)                # capacity is NOT left reserved
@@ -195,6 +197,21 @@ admit_serving(model_key, est_bytes, deadline):
 lock across child lifecycle I/O — precisely the ABBA deadlock this redesign exists to remove, and the
 one `admission.py`'s own comments record. The lock records the *decision*; the unload happens after
 release; a final short critical section finalizes state.
+
+**Reservation ownership — who is allowed to drop what.** A reservation is keyed by `op_id` and is
+**dropped only by the operation that recorded it**, on every exit without exception. Reclaimers —
+`evict()`, and any future path that takes a slot back — remove the *resident entry* and bump the
+*generation*; they never touch another operation's reservation. Two reasons this asymmetry is the right
+one, both of which an earlier draft got wrong by having the stale branch skip its own cleanup on the
+premise that "an eviction already reclaimed the slot":
+
+- **Nothing else would ever drop it.** `evict()` (below) removes `residents[victim]` and bumps the
+  generation; it has no reservation step, and adding one would mean one operation mutating another's
+  bookkeeping under a lock the owner is not holding. So a skipped drop is a permanent leak of budget in
+  `accounted` and of live-free in `unmaterialized` — capacity that no later admission can ever reclaim.
+- **Over-counting briefly is safe; under-counting never is.** A reservation that outlives its usefulness
+  by a few milliseconds only makes admission more conservative. The reverse — releasing capacity an
+  operation might still be holding — is what invariants 1 and 2 exist to prevent.
 
 **Why `stale` is retained even though nothing currently sets it.** As the contract stands, no path bumps
 the generation of a model still in `loading`: `select_victims` targets `state == resident` only, and
@@ -292,10 +309,12 @@ evict(victim, deadline) :
                   return EvictFailed(busy)
   under lock: victim.state = evicting        # drained; committed to unload
   unload(victim); verify NVML free rose      # OUTSIDE lock
-  under lock: remove victim; bump generation
+  under lock: remove victim; bump generation   # ← resident entry + generation ONLY, never a reservation
   return Evicted
 ```
-Idle-first, then LRU. **Eviction never interrupts in-flight requests.**
+Idle-first, then LRU. **Eviction never interrupts in-flight requests.** It also never drops another
+operation's reservation — see *Reservation ownership* above; the generation bump is the whole of how a
+reclaimer signals a displaced owner, and that owner cleans up after itself.
 
 **Caller contract when blocked behind an eviction.** A request whose `EvictThenRetry` returns
 `EvictFailed` does not spin: it consumes one of its `max_admission_attempts`, backs off
@@ -324,6 +343,12 @@ admit_job(job) :
 granted during the drain window could materialize between "serving set empty" and setting
 `exclusive_job`, so the job would start with a co-resident tenant — violating the exclusivity the
 whole jobs lane depends on.
+
+**Refusal codes on the wire.** Every `Refuse(gpu_busy)` this coordinator returns surfaces as **503 with
+`Retry-After`**, and `Refuse(model_too_large)` as **413** — see
+[inference-openai.md](./inference-openai.md). The `409` that `PolicyScheduler` parks on (FR-182) is the
+host agent's *jobs-lane-full* contract, a different endpoint with a different meaning, and is deliberately
+not reused for GPU contention.
 
 The ownership check is what makes "at most one exclusive job" true rather than merely intended:
 without it a second `admit_job` arriving against an already-empty serving set overwrites the first

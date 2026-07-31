@@ -11,9 +11,22 @@ completion against the calling tenant (FR-016).
 |---|---|---|
 | 401 | `unauthorized` | missing/invalid/revoked key, or disabled tenant (FR-002) |
 | 403 | `quota_exhausted` | tenant's window budget spent (FR-014) |
-| 409 | `gpu_busy` | an exclusive job holds the GPU; inference queued/refused per policy (FR-025) |
-| 413 | `model_too_large` | requested model can't fit live free VRAM even after eviction (FR-024) |
+| 503 | `gpu_busy` | **transient** — an exclusive job holds the GPU, or admission could not fit this model right now (another tenant's outstanding reservation, an unaccounted external consumer, a drain that timed out). Always carries `Retry-After`. (FR-024, FR-025) |
+| 413 | `model_too_large` | **permanent** — the estimate exceeds `usable_capacity − safety_headroom`, i.e. the model would not fit even on an **empty** GPU. Never returned for contention (FR-024) |
 | 503 | `metering_unavailable` | ledger write unavailable → GPU work refused (FR-016) |
+
+**One code, one status.** `gpu_busy` is **503 + `Retry-After`** on every inference route, whatever caused
+it. Earlier revisions of this contract said `409` here while
+[admission-scheduler.md](./admission-scheduler.md) annotated the same refusal `503/429` — three codes for
+one condition, which a client's retry logic cannot act on. 503 is the accurate one: the condition is
+temporary and server-side. `429` would attribute it to the caller's request rate, which is not what
+happened; `409` is reserved for the **host agent's** jobs-lane-full contract that `PolicyScheduler` parks
+on (FR-182, a different endpoint and a different meaning — "the queue is full", not "the GPU is busy").
+Two distinct `code` values share 503; clients branch on `code`, never on the status alone.
+
+**413 vs 503 is permanence, not size.** A model that fits an empty GPU but is blocked right now is
+**always** `gpu_busy` — never `413`. Returning 413 for contention tells a client to give up on a request
+that would have succeeded seconds later.
 
 ## POST /v1/chat/completions  *(chat — LLM)*
 OpenAI-compatible request/response (incl. `stream: true` SSE). Maps to the llm child. → FR-005/006/018.
@@ -33,8 +46,10 @@ Request `{model, image: <base64|url-on-lan>}` → `classify`: `{labels:[{label,s
 ## Concurrency & co-residency semantics
 - Multiple tenants' requests against a **resident** child are interleaved; none dropped (FR-006, SC-002).
 - If the target model isn't resident, admission loads it if it fits the VRAM budget (co-resident), else
-  evicts idle/LRU serving tenants to fit, else `413` (FR-019, FR-023, FR-024).
-- While an exclusive job runs, inference returns `409 gpu_busy` or queues per policy (FR-025).
+  evicts idle/LRU serving tenants to fit. If it still cannot be placed, the answer depends on **why**:
+  `413 model_too_large` only when the estimate cannot fit an empty GPU, otherwise `503 gpu_busy` with
+  `Retry-After` (FR-019, FR-023, FR-024).
+- While an exclusive job runs, inference returns `503 gpu_busy` or queues per policy (FR-025).
 
 ## Metering
 

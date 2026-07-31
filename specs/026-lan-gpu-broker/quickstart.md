@@ -24,7 +24,8 @@ in the local zoo; a second LAN device (or a second shell on another host) for co
 2. Tenant B: submit a second job → `queued, pos 2`.
 3. Watch `/admin/queue`: job A `running` (exclusive), B waits; **no** serving tenant resident during the job.
 4. While A runs, submit a **third** job → it queues; it must **not** displace A's exclusive claim.
-5. While A runs, send an inference request → `409 gpu_busy` (or queued) — job **not** preempted (SC-010).
+5. While A runs, send an inference request → `503 gpu_busy` with `Retry-After` (or queued) — job **not**
+   preempted (SC-010).
 6. On A finish, B starts automatically (FR-009); finetune → registered model version appears in MLflow.
 
 ## Drill 2b — Job sandbox isolation (US2 · SC-011) — **NATIVE-LINUX HOST ONLY, GATED**

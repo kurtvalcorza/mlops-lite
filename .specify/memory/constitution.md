@@ -193,15 +193,15 @@ and III. All plans and task lists are reviewed for compliance with these princip
      ADDED: when a serving model does not fit alongside current tenants, admission MUST evict resident serving
      tenants (idle-first/LRU) or refuse if it cannot fit even alone. MINOR: a material semantic generalization
      of a NON-NEGOTIABLE principle (parallels v1.4.0's one-LLM→one-tenant generalization), enabling concurrent
-     small-model multimodal serving for the 024 LAN GPU broker. The single admission authority is unchanged and
+     small-model multimodal serving for the 026 LAN GPU broker. The single admission authority is unchanged and
      the principle stays NON-NEGOTIABLE. Rationale: a self-service multi-tenant broker on one GPU serves many
      small models far better when compatible models co-reside within the VRAM budget rather than swapping on
-     every modality switch. README Principle II descriptions remain ⚠ pending until 024 implements co-residency.
+     every modality switch. README Principle II descriptions remain ⚠ pending until 026 implements co-residency.
      v1.6.1 (026-lan-gpu-broker, Codex architecture review): PATCH — corrected the v1.6.0 VRAM wording, which
      conflated two distinct checks. "Combined footprint ≤ live free VRAM" double-counted residents (live-free
      already excludes them). Reworded to the correct pair: the accounted resident set ≤ a USABLE budget
      (VRAM_GB − safety reserve), AND each incoming load ≤ live free VRAM (with headroom + post-load delta
      reconciliation). Rule unchanged in intent (never over-commit the one GPU); wording now implementable.
-     No new runtime is introduced by this patch — the 024 job-sandbox runtime (gVisor/Kata) remains OUTSIDE the
+     No new runtime is introduced by this patch — the 026 job-sandbox runtime (gVisor/Kata) remains OUTSIDE the
      permitted runtimes and will require its OWN amendment IF/when a sandbox-feasibility spike proves it works
      on the target host (Development Workflow: "No other runtime is introduced without amendment"). -->
