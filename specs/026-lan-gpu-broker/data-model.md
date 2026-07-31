@@ -124,7 +124,15 @@ jobs are therefore recovered explicitly rather than swept:
 | `last_heartbeat_at` | timestamptz | session/kernel liveness only; never resets the GPU idle timer |
 | `created_at`/`ended_at` | timestamptz | |
 
-**Transitions**: `active ⇄ idle`; `idle →(idle_timeout)→ released`; `active/idle →(ttl)→ expired`.
+**Transitions**: `active ⇄ idle`; `idle →(idle_timeout)→ released`; **`released →(new GPU work, re-admitted)→ active`**;
+`active/idle/released →(ttl)→ expired`.
+
+`released` means **the GPU lease is gone, the session is not** — the kernel is still up and the tenant's
+in-memory work intact; the next GPU cell re-enters admission like any other request (under whatever class
+T665 decides) and may itself be refused or queued. Only `expired` (TTL) and an explicit `DELETE` are
+terminal. Without the `released → active` edge the two-timer split buys nothing: giving the GPU back would
+cost the tenant their session, so they would keep it pinned, which is the behaviour idle-cull exists to
+stop.
 
 **Why two timestamps.** A single `last_activity_at` fed by both signals lets a notebook's automatic
 liveness heartbeat hold the GPU for the full TTL while running nothing — the abandoned-session case

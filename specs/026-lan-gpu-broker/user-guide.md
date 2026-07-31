@@ -188,8 +188,8 @@ broker admin quota set --tenant alice --window daily --gpu-seconds 3600
 |---|---|---|
 | `401 / unauthorized` | Missing/invalid API key | Check the `Authorization: Bearer` header; ask owner to re-issue |
 | `403 / quota exhausted` | Your window budget is used up | Wait for the window reset, or ask the owner to raise the quota |
-| `409 / GPU busy` | An exclusive job holds the GPU | Retry shortly; check `broker queue` |
-| `413 / model too large` | Requested model won't fit live VRAM | Choose a smaller model, or run it as a job when the GPU is free |
+| `503 / gpu_busy` | Something else has the GPU right now — an exclusive job, another tenant's model loading, or not enough free VRAM this instant | **Retry** — this one always clears. Honour the `Retry-After` header; check `broker queue` to see what's ahead of you |
+| `413 / model_too_large` | The model wouldn't fit even on a completely empty GPU | Retrying will not help. Choose a smaller model |
 | Can't reach the broker at all | You're off-LAN, or address changed | Get on the local network; confirm the host IP / `gpu.lan` name |
 
 ---
