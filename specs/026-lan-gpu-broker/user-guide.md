@@ -198,5 +198,5 @@ broker admin quota set --tenant alice --window daily --gpu-seconds 3600
 
 This guide maps to the spec: **US1** inference (§2), **US2** jobs (§3), **US3** quotas/ledger/visibility
 (§5, §7), **US4** modalities (§2), **US5** interactive sessions (§4); single-GPU behavior (§6) reflects the
-amended **Principle II** (constitution v1.6.0) and FR-025 scheduling. Command/endpoint specifics are finalized
+amended **Principle II** (constitution v1.6.1) and FR-025 scheduling. Command/endpoint specifics are finalized
 in `plan.md` contracts.

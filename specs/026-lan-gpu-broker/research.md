@@ -1,7 +1,7 @@
 # Phase 0 Research — LAN Self-Service GPU Broker
 
 Resolves the unknowns in the plan's Technical Context. Each decision is constrained by the constitution
-(v1.6.0) and the existing architecture (host agent = sole GPU authority; slim engine children; Postgres
+(v1.6.1) and the existing architecture (host agent = sole GPU authority; slim engine children; Postgres
 store; MLflow registry; Next.js console).
 
 ---
@@ -9,7 +9,8 @@ store; MLflow registry; Next.js console).
 ## R1 — Co-residency admission & eviction  *(revised after Codex review)*
 
 **Decision**: **Replace** single-slot `admission.py` with a **GPU coordinator state machine** (`coordinator.py`)
-— a resident *set* with per-model lifecycle (`loading/resident/draining/evicting`), active-request ref-counts,
+— a resident *set* with per-model lifecycle (`loading/resident/draining/evicting/rolling_back`),
+active-request ref-counts,
 per-model generation tokens, and one `exclusive_job` slot. Admission uses a **three-stage protocol**: (1) under
 the lock, reserve capacity and mark state — **no I/O**; (2) load/unload the child **outside the lock** in the
 established order; (3) re-enter the lock to commit or roll back via the generation token. **The lock is never

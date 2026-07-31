@@ -220,7 +220,7 @@ A tenant opens an interactive notebook session backed by the shared GPU to do ex
 - **Interactive sessions are not serving models**: a notebook session has unpredictable, bursty VRAM allocation, so it is not treated as an ordinary co-resident serving tenant; P5 must decide whether a session is exclusive, a strongly-sandboxed job, or needs its own admission treatment (see Dependencies) — it is the lowest-priority shape and aggressively idle-culled regardless.
 - **Internal accounting, not payment**: "Rent"/credits are an internal metering and quota mechanism; no real-money billing or payment processing is in scope.
 - **Owner remote access is separate**: The owner's own remote access to their machines (e.g., via a personal VPN overlay) is out of scope for this feature and unrelated to tenant access.
-- **Principle II amendment — DONE**: This feature introduces bounded co-residency of serving models within a VRAM budget. The required amendment to the NON-NEGOTIABLE Principle II has been ratified (constitution v1.6.0, 2026-07-19), so both planning and implementation are unblocked (see Dependencies).
+- **Principle II amendment — DONE**: This feature introduces bounded co-residency of serving models within a VRAM budget. The required amendment to the NON-NEGOTIABLE Principle II has been ratified (constitution v1.6.0, 2026-07-19) and its VRAM wording corrected in **v1.6.1** — build against v1.6.1, whose two-bound rule is the one FR-024 encodes. Both planning and implementation are unblocked (see Dependencies).
 - **Phase-gated delivery**: Stories ship in priority order (P1→P5); each must run end-to-end on the target hardware before the next, consistent with the platform's incremental delivery principle.
 
 ## Dependencies
