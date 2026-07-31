@@ -1,11 +1,11 @@
 ---
 
-description: "Task list for feature 026 — Unified ML Lifecycle Console"
+description: "Task list for feature 027 — Unified ML Lifecycle Console"
 ---
 
 # Tasks: Unified ML Lifecycle Console
 
-**Input**: Design documents from `specs/026-unified-lifecycle-console/`
+**Input**: Design documents from `specs/027-unified-lifecycle-console/`
 
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
 
@@ -74,7 +74,7 @@ than building them into the fetch layer (plan.md Summary).
   `GET /console/capabilities` in `gateway/app/console/` + `routers/console.py`. `mode` resolves from
   **reachability**, never a configured string (research R14). Capabilities (FR-433) is what lets the interface
   **omit** an unsupported control rather than render one that fails — the mechanism behind FR-418.
-- [ ] **T626** Implement the 021→026 redirects for every row of data-model §10 in `ui/app/`, and
+- [ ] **T626** Implement the 021→027 redirects for every row of data-model §10 in `ui/app/`, and
   delete the 021 stage directories (`serving`, `data`, `training`, `models`, `monitoring`,
   `retraining`) per research R12. **Keep** `ui/app/api/gw/` and the 004/005 security guards — they
   are not 021 artifacts.
@@ -124,7 +124,7 @@ explanations, and the journal.
 **Independent Test**: per-device state matches the agent; a refused request is explained in prose
 naming the blocking tenant and the shortfall; the journal pages and filters.
 
-**Note**: the largest net-new backend surface in 026 and the largest unknown — sequenced early so it
+**Note**: the largest net-new backend surface in 027 and the largest unknown — sequenced early so it
 fails early if it is going to.
 
 - [ ] **T634** [P] [US2] Write `tests/test_runtime_api.py` — offline, web-free, over a **fake NVML
@@ -138,7 +138,9 @@ fails early if it is going to.
   a consistent read, never to claim, extend, or release.
 - [ ] **T636** [US2] Add a bounded in-memory decision ring (default 64) to `hostagent/admission.py`,
   written by `acquire()` as it returns, with the server-composed `explanation` templates from
-  data-model §6 (FR-377). **This is a decision history, not a queue** (research R1) — no `pending` value, no
+  data-model §6 (FR-377). Record **both** constitution-v1.6.1 checks (accounted set vs usable budget,
+  incoming load vs live free VRAM) and any **eviction** performed — never merge the two checks into
+  one number. **This is a decision history, not a queue** (research R1) — no `pending` value, no
   queue-position field. The ring append must not perform IO or extend the critical section.
 - [ ] **T637** [US2] Add a paged/filtered read accessor to `hostagent/journal.py` (FR-380) (cursor by
   sequence, hard cap 500, filters by job/engine/event-type/time). Surface `checksum_state` honestly —
@@ -174,9 +176,13 @@ fails early if it is going to.
   `model_identity` differs from the desired pointer **during an in-flight activation** — the one
   moment the two legitimately diverge, and the only real proof the field is agent-sourced.
 - [ ] **T646** [HW] [US2] On hardware: run a real contention event (fine-tune holds the GPU, vision
-  classify refused) and confirm the console shows the correct holder throughout and the refusal reads
-  *"job … holds the GPU. A running job is never preempted."* (SC-187/202). Then force a `vram`
-  refusal and confirm the explanation names the required amount, largest free block, and device.
+  classify refused) and confirm the console shows the correct resident tenant set throughout and the
+  refusal reads *"job … holds the GPU exclusively. A running job is never preempted."* (SC-187/202).
+  Then exercise **each** of the two VRAM-check failures separately — a `budget` refusal (accounted
+  resident set would exceed the usable budget) and a `live-vram` refusal (incoming load exceeds
+  measured free VRAM plus headroom) — confirming the explanation names **which** check failed, and
+  that a model too large for the budget on an empty GPU reads `cannot-fit-alone`. Also confirm a
+  co-residency **eviction** is reported with the tenants evicted and the policy applied.
   Update quickstart.md §3.2 with the recipe actually used.
 
 **Checkpoint**: the runtime console is the increment's differentiator and ships as its own slice.
@@ -200,7 +206,9 @@ compatibility panel distinguishes structural from transient ineligibility for al
 - [ ] **T649** [US3] Implement `GET /console/catalog/{name}/{version}/compatibility` — verdict from
   gateway contracts + live topology (FR-387/388/389). Enforce the three-way distinction: `incompatible`
   (structural — unresolvable adapter base, missing artifact, capability mismatch),
-  `not-currently-eligible` (transient — VRAM or a holder), `unknown` (agent unreachable). **Never
+  `not-currently-eligible` (transient — a failed budget or live-VRAM check while the model still fits
+  alone, or a job holding the GPU), `unknown` (agent unreachable). A model exceeding the usable budget
+  **even on an empty GPU** is `incompatible`, not transient — eviction cannot help. **Never
   collapse `unknown` into either** — an unreachable agent is not a compatibility fact.
 - [ ] **T650** [US3] Build `ui/app/(console)/models/` — catalog list (FR-384), the nine detail tabs
   (FR-386), the compatibility panel, and navigable lineage back to base model and source run
@@ -253,7 +261,7 @@ stopped in turn produces its documented degradation; fixture mode is badged.
   ensure it **always** carries a `StateConflict`, never stands alone (data-model §3).
 - [ ] **T659** [P] [US10] Build the conflict banner component — both source states with observation
   times, last consistent timestamp, and refresh / inspect-journal actions (FR-427). `reconcile` is
-  surfaced but inert in 026 (MVP 3 owns it).
+  surfaced but inert in 027 (MVP 3 owns it).
 - [ ] **T660** [P] [US10] Build the persistent mode badge (`offline` / `live` / `hardware`) from
   `PlatformHealth.mode` (FR-429).
 - [ ] **T661** [US10] Extend `tests/test_ui_resilience.py` with the **full seven-service degradation
@@ -399,7 +407,7 @@ falls back to an external link; the migration ledger is visible and read-only.
 - [ ] **T689** Export the updated OpenAPI to
   `specs/001-mlops-platform/contracts/openapi.json` and confirm **every** new route appears
   (FR-438/SC-203).
-- [ ] **T690** [P] Update `README.md` — the increment-history table (026 row), the console section
+- [ ] **T690** [P] Update `README.md` — the increment-history table (027 row), the console section
   (replace the 021 loop-native description), and the architecture diagram's UI node.
 - [ ] **T691** [P] Verify SC-198 mechanically: `ui/package.json` dependencies are still exactly
   `next`, `react`, `react-dom`; the production build succeeds and adds no runtime package. Confirm no broker, scheduler,
@@ -416,23 +424,23 @@ falls back to an external link; the migration ledger is visible and read-only.
 
 ## Phase 14: Deferred-scope guards (US11 / US12)
 
-**Purpose**: US11 (MVP 2) and US12 (MVP 3) are specified in 026 but **built** in 027/028. Deferral is
-not the absence of work — 026 owes each one a guarantee that the deferral holds and that no
+**Purpose**: US11 (MVP 2) and US12 (MVP 3) are specified in 027 but **built** in 028/029. Deferral is
+not the absence of work — 027 owes each one a guarantee that the deferral holds and that no
 half-built affordance misleads an operator.
 
-- [ ] **T695** [US11] Assert the **read-only guarantee** for every route 026 adds: no
+- [ ] **T695** [US11] Assert the **read-only guarantee** for every route 027 adds: no
   `gateway/app/console/*` or `runtime/*` route mutates state, and the sole write-shaped entry
   (`POST /console/predictions/{id}/payload`) only reveals an existing payload. Add the assertion to
   `tests/test_console_read_api.py` so a future MVP 2 write path cannot land here by accident instead
   of through the sanctioned gated route (FR-435/436). Record the outcome in [deferred.md](./deferred.md) §MVP 2 — **not** in a new
-  `specs/027-*/` directory, which would fail the required `specs` gate: `check_specs.py` demands the
+  `specs/028-*/` directory, which would fail the required `specs` gate: `check_specs.py` demands the
   full six-artifact set per feature directory, so a spec-only stub breaks CI.
-- [ ] **T696** [US12] Assert that MVP 3 affordances surfaced in 026 are **inert and labelled as
+- [ ] **T696** [US12] Assert that MVP 3 affordances surfaced in 027 are **inert and labelled as
   such**: the conflict banner's `reconcile` action (T659) performs no reconciliation, and no
   suggestion is auto-applied or auto-accepted anywhere in the console (FR-437). An affordance that
   looks actionable but does nothing is worse than its absence — it teaches operators the console
   lies. Record the outcome in [deferred.md](./deferred.md) §MVP 3 — same reason: no partial
-  `specs/028-*/` directory.
+  `specs/029-*/` directory.
 
 ---
 
@@ -484,8 +492,8 @@ working ten-area shell, an honest Overview, and no broken paths — a shippable 
 the runtime console that justifies the increment, the catalog that answers its central question, and
 the truthfulness layer without which every other surface can confidently display a falsehood.
 
-**Cut line**: if the increment overruns, **US8 (Phase 11) and US9 (Phase 12) leave 026** and phase to
-027 ahead of MVP 2. Both deepen surfaces that partly exist today, so cutting them degrades rather
+**Cut line**: if the increment overruns, **US8 (Phase 11) and US9 (Phase 12) leave 027** and phase to
+028 ahead of MVP 2. Both deepen surfaces that partly exist today, so cutting them degrades rather
 than breaks the console. Their allowlist entries and routes come out with them.
 
 **Hardware tail**: T645, T646, and T694 cannot run in a container or from hosted CI. They ship as

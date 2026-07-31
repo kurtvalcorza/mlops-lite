@@ -1,4 +1,4 @@
-# Quickstart: Validating 026 Unified ML Lifecycle Console
+# Quickstart: Validating 027 Unified ML Lifecycle Console
 
 Runnable validation for the console and the read surfaces it depends on. Layered by the repository's
 existing test taxonomy — **offline** (no stack), **live** (Compose up), **hardware** (`[HW]`, needs
@@ -33,7 +33,7 @@ Console build and lint:
 cd ui && npm ci && npm run lint && npm run build
 ```
 
-**Expected**: Ruff clean; offline suite green with **no regression** against the pre-026 baseline
+**Expected**: Ruff clean; offline suite green with **no regression** against the pre-027 baseline
 (SC-200); the production build succeeds and reports **no new runtime dependency** — `ui/package.json`
 dependencies must still be exactly `next`, `react`, `react-dom` (SC-198).
 
@@ -139,7 +139,7 @@ observation times and the last consistent timestamp, and actions to refresh and 
 
 ### 2.7 Resident footprint (SC-199 — Principle III)
 
-The constitution caps idle infrastructure at ~3 GB RAM. 026 adds no resident service, so the console
+The constitution caps idle infrastructure at ~3 GB RAM. 027 adds no resident service, so the console
 must not move this number — but "must not" is only a claim until measured.
 
 ```bash
@@ -149,7 +149,7 @@ docker stats --no-stream | awk 'NR>1 {print $4, $5}'   # totals input, sum by ha
 ps -o rss=,comm= -C node | awk '{s+=$1} END {printf "ui(node) RSS: %.0f MB\n", s/1024}'
 ```
 
-**Expected**: total idle Compose memory unchanged versus the pre-026 baseline within noise, and the
+**Expected**: total idle Compose memory unchanged versus the pre-027 baseline within noise, and the
 console's own Node process comparable to the 021 console. **Record both numbers in the increment's
 runbook** — SC-199 is a constitutional criterion, and an unrecorded measurement is not a pass.
 
@@ -234,13 +234,17 @@ preempted."* — the holder and the rule, in prose, not a status code (FR-378). 
 view shows the correct holder (SC-202).
 
 Then exhaust VRAM instead: request a version whose estimated VRAM exceeds the free block. Expect
-reason `vram` and an explanation naming the required amount, the largest free block, and the device.
+reason `live-vram` (or `budget`, if the accounted set is the binding constraint) and an explanation
+naming which of the two checks failed, the required amount, and the device. A model too large for the
+usable budget even on an empty GPU must read `cannot-fit-alone`, not `budget`.
 
 ### 3.3 Compatibility verdicts (SC-188)
 
 For each of the five modalities, open a version's compatibility panel and confirm the verdict
 distinguishes **`incompatible`** (structural — unresolvable adapter base, missing artifact) from
-**`not-currently-eligible`** (transient — VRAM or a holder). Stop the agent and confirm the verdict
+**`not-currently-eligible`** (transient — a failed budget or live-VRAM check while `fitsAlone` holds,
+or a job holding the GPU). Confirm `budgetCheck` and `liveVramCheck` are reported **separately**.
+Stop the agent and confirm the verdict
 becomes **`unknown`**, never `incompatible`.
 
 ### 3.4 Fallback labelling (FR-381)

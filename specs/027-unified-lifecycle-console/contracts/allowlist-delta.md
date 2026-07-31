@@ -1,13 +1,13 @@
-# Contract: BFF Proxy-Surface Delta (026)
+# Contract: BFF Proxy-Surface Delta (027)
 
 **File**: `ui/lib/gw-allowlist.ts` · **Guard**: `ui/app/api/gw/[...path]/route.ts`
 
 The allowlist is the console's **complete** browser-reachable proxy surface: the operator key is
 injected server-side for these entries only, and any other path or method is refused *before* the key
 is attached (004 US1, FR-032). 021 established the discipline that every added proxy route is a
-deliberate, itemized, reviewable entry rather than a wildcard — 026 keeps it.
+deliberate, itemized, reviewable entry rather than a wildcard — 027 keeps it.
 
-**Shape of the change**: 021's delta was 13 additions to endpoints that already existed. 026's is
+**Shape of the change**: 021's delta was 13 additions to endpoints that already existed. 027's is
 larger because the increment is full-stack — most additions are routes this increment also creates.
 
 ---
@@ -121,7 +121,7 @@ download), models, promotion, evaluate/compare, serving state and activation, al
 verbs, batch, monitor read and write, policies, suggestions, and the health probes — all still used
 by the ten-area console, just from different pages.
 
-**Nothing is removed in 026.** MVP 2 (US11) is where the write surface is reconsidered; pruning the
+**Nothing is removed in 027.** MVP 2 (US11) is where the write surface is reconsidered; pruning the
 existing write entries now would break the inference and monitoring pages this increment ships.
 
 ---

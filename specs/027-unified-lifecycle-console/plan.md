@@ -1,8 +1,8 @@
-# Implementation Plan: 026 Unified ML Lifecycle Console
+# Implementation Plan: 027 Unified ML Lifecycle Console
 
 **Branch**: `claude/tech-stack-overview-i0cljp` | **Date**: 2026-07-31 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `specs/026-unified-lifecycle-console/spec.md`
+**Input**: Feature specification from `specs/027-unified-lifecycle-console/spec.md`
 
 ## Summary
 
@@ -17,7 +17,7 @@ Approach: **extend existing seams, add no resident service, add no runtime depen
 migration.** New reads land as thin routes on the gateway and agent; multi-source joins happen in the
 gateway (the only place holding every credential); the console reaches the agent only through the
 gateway, preserving the single trust boundary 023 US2 established. Charts are hand-rolled SVG.
-Endpoints are a synthesized read model rather than a new table, so 026 needs no schema change.
+Endpoints are a synthesized read model rather than a new table, so 027 needs no schema change.
 
 The truthfulness properties (conflict disclosure, per-service degradation, data age, mode badge) are
 treated as **infrastructure written once**, not as per-page polish — they are what makes a
@@ -58,7 +58,8 @@ per-poll subprocess fork (the 018 regression NVML replaced) and must not open a 
 panel against the agent's bounded transport (research R10). Runtime snapshots ride the existing
 1-second-TTL cached GPU reader.
 
-**Constraints**: one GPU tenant (Principle II) — the console **reads** admission and never mutates
+**Constraints**: VRAM-budgeted single-GPU admission (Principle II, constitution v1.6.1 — bounded
+co-residency for serving tenants, exclusive whole-GPU for a job) — the console **reads** admission and never mutates
 it; dependency-light (III); console-only Node (workflow amendment); the agent is reachable only via
 the gateway (023 US2); the agent transport's 1 MiB JSON cap forces paging on journal and prediction
 reads.
@@ -75,12 +76,12 @@ pre-agreed cut line.
 | Principle | Verdict | Notes |
 |---|---|---|
 | I. Local-First, Single-Machine | ✅ Pass | No cloud, no cluster. Multi-host is contract shape only (FR-382); no multi-host orchestration is built. |
-| II. Single-GPU, On-Demand (NON-NEGOTIABLE) | ✅ Pass | The console is **read-only** with respect to admission. FR-379 forbids any job-preempting control. The per-device snapshot is side-effect free and rides the existing cached reader — it never takes the claim path. Naming honesty enforced: admission **refuses**, so no "queue" is shipped (research R1). `[HW]` validation required (SC-201/202). |
+| II. Single-GPU, On-Demand (NON-NEGOTIABLE) | ✅ Pass | Read against **constitution v1.6.1** (bounded co-residency of serving tenants within the usable VRAM budget; a training/HPO/batch job takes the whole GPU and is never preempted). The console is **read-only** with respect to admission: FR-379 forbids any job-preempting control, and the per-device snapshot is side-effect free, riding the existing cached reader without ever taking the claim path. It reports the constitution's **two distinct checks separately** — accounted resident set ≤ usable budget, and each incoming load ≤ live free VRAM — never collapsing them, since that conflation was the v1.6.0 defect v1.6.1 corrected. Naming honesty enforced: admission still **decides immediately**, so no "queue" is shipped; eviction is reported where it occurs (research R1). `[HW]` validation required (SC-201/202). |
 | III. Lightweight Footprint | ✅ Pass | **Zero new runtime dependencies on either plane** (SC-198). No broker, scheduler, analytics store, or serving runtime (FR-434). No new resident service — the new reads are routes on processes that already run. Charts hand-rolled (R11). |
 | IV. Full Lifecycle Coverage | ✅ Pass / advances | No lifecycle stage becomes unreachable; the loop survives as the Overview timeline (FR-363). Three previously-invisible domains — runtime, evaluation-as-activity, and the inference record — gain surfaces. |
 | V. Open-Source & Swappable | ✅ Pass / advances | The normalized type layer (`PlatformModel`/`PlatformJob`/`PlatformHealth`) is exactly the swappability seam: the interface stops depending on vendor payload shapes. FR-366 preserves tracking vocabulary where it is meaningful, which is compatible with swapping the implementation behind it. |
 | VI. Reproducibility & Observability | ✅ Pass / advances | Makes already-tracked state legible. Nothing becomes less tracked. Data age and provenance labelling (FR-381/430) make observability *honest*, not merely present. |
-| VII. Incremental, Phase-Gated | ⚠️ **Pass with justification** | MVP 2/3 are already phased out to 027/028. MVP 1 remains ten stories — larger than a typical slice. Every story is independently shippable and ordered so the increment can stop early. See Complexity Tracking. |
+| VII. Incremental, Phase-Gated | ⚠️ **Pass with justification** | MVP 2/3 are already phased out to 028/029. MVP 1 remains ten stories — larger than a typical slice. Every story is independently shippable and ordered so the increment can stop early. See Complexity Tracking. |
 
 **Result**: no violations. Principle VII carries a documented justification rather than a breach, and
 Principle II's on-hardware verification is flagged `[HW]`, not skipped.
@@ -94,7 +95,7 @@ violation that a naive design would have introduced.
 ### Documentation (this feature)
 
 ```text
-specs/026-unified-lifecycle-console/
+specs/027-unified-lifecycle-console/
 ├── plan.md
 ├── spec.md
 ├── research.md
@@ -139,7 +140,7 @@ ui/
 │                         #      observability, administration
 ├── app/api/gw/           # KEPT + hardened: allowlist, key injection, CSRF/CSP (004/005)
 ├── lib/
-│   ├── gw-allowlist.ts   # re-sectioned to the ten areas + the 026 additions
+│   ├── gw-allowlist.ts   # re-sectioned to the ten areas + the 027 additions
 │   ├── platform-types.ts # NEW: normalized types (FR-433 capability flags)
 │   ├── use-live.ts       # NEW: visibility-gated polling, backoff, last-known-good, data age
 │   └── charts/           # NEW: six hand-rolled SVG primitives (R11)
@@ -173,7 +174,7 @@ Settled in [research.md](./research.md); the load-bearing decisions:
 - **R2** Per-device topology rides the existing 1s-TTL cached NVML reader; every device carries its
   `source` so FR-381's fallback labelling is data, not inference.
 - **R5** The console never reaches the agent directly — one trust boundary, preserved.
-- **R7** Endpoints are synthesized, so 026 needs **no migration**.
+- **R7** Endpoints are synthesized, so 027 needs **no migration**.
 - **R8** Joins live in the gateway; the BFF stays a security boundary.
 - **R9** Conflicts are computed per observation, never persisted.
 - **R10** SSE only where it already exists; disciplined polling elsewhere, because ten live panels
@@ -213,7 +214,7 @@ shippable; then the `[HW]` tail.
 **Mitigation, and the pre-agreed cut line.** Every story is independently shippable and the task
 order is dependency-first, so the increment can stop cleanly at any checkpoint. If it overruns, the
 cut is **US8 (Datasets) and US9 (Observability/Administration)** — both deepen surfaces that partly
-exist today, so cutting them degrades rather than breaks the console — and they phase to 027 ahead
+exist today, so cutting them degrades rather than breaks the console — and they phase to 028 ahead
 of MVP 2. **US1, US2, US3 and US10 are the irreducible core**: the shell, the runtime console that
 justifies the increment, the catalog, and the truthfulness layer without which every other surface
 can confidently display a falsehood.

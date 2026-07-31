@@ -1,4 +1,4 @@
-# Phase 0 Research: 026 Unified ML Lifecycle Console
+# Phase 0 Research: 027 Unified ML Lifecycle Console
 
 **Input**: [spec.md](./spec.md) · **Output**: decisions consumed by [plan.md](./plan.md)
 
@@ -54,9 +54,14 @@ ship anything called a queue.
 
 **Rationale**: the source addendum's navigation says "Admission Queue" and its entity sketch has an
 `age` field, both of which imply pending requests that will later be granted. That is not what this
-platform does. `hostagent/admission.py::acquire()` makes the free-VRAM read, the holder check, and
-the claim under one re-entrant lock and returns a decision **immediately** — admitted or refused
-(`reason` ∈ `held`, `vram`). Nothing waits. A caller that is refused gets a `409` and is done.
+platform does. `hostagent/admission.py::acquire()` makes the VRAM reads, the resident-set check, and
+the claim under one re-entrant lock and returns a decision **immediately** — admitted, admitted after
+eviction, or refused. Nothing waits. A caller that is refused gets a `409` and is done.
+
+**Constitution v1.6.1 does not change this.** Bounded co-residency adds an *eviction* branch
+(idle-first/LRU when a serving model does not fit alongside current tenants) and splits the refusal
+reasons across the two required VRAM checks, but admission still decides in one critical section and
+still never queues. The decision record therefore gains fields; it does not become a queue.
 
 Shipping a "queue" would therefore be exactly the fake-orchestration-semantics failure the addendum
 itself warns against in §23.4 (Prefect) and §23.5 (Alertmanager) — the same error, applied to
@@ -171,7 +176,7 @@ console to a vendor payload shape and pushes normalization into React.
 
 **Decision**: derive the endpoint list in the gateway from data that already exists — the registry's
 tasks/aliases, the active-serving pointer, the activation state machine, and the agent's engine
-states. **No new persisted entity, no migration, in 026.**
+states. **No new persisted entity, no migration, in 027.**
 
 **Rationale**: FR-438 and the repo's own FR-359 discipline say a schema change lands as a new
 numbered migration; the cheapest correct move is to need none. Everything the endpoint list
@@ -180,7 +185,7 @@ runtime and host from the agent, traffic and error rate from Prometheus. Persist
 table would duplicate the serving pointer and create a second thing that can disagree with it —
 manufacturing the conflict class FR-427 exists to *report*.
 
-**Consequence carried into planning**: 026 is expected to need **zero migrations**. If one proves
+**Consequence carried into planning**: 027 is expected to need **zero migrations**. If one proves
 genuinely necessary it lands as a new numbered file and is called out explicitly, exactly as 025's
 T595 did.
 
@@ -209,11 +214,11 @@ Principle III.
 ## R9 — Conflict detection is computed, not stored
 
 **Decision**: `StateConflict` is produced at join time by comparing the sources already fetched, and
-returned inline on the joined entity. Nothing is persisted in 026.
+returned inline on the joined entity. Nothing is persisted in 027.
 
 **Rationale**: a conflict is a statement about *this observation*, not a durable fact. Persisting it
 would require reconciliation, TTLs, and a migration, and it would go stale the moment either source
-moved. Automated reconciliation is explicitly MVP 3 (US12) — 026 only has to *tell the truth about
+moved. Automated reconciliation is explicitly MVP 3 (US12) — 027 only has to *tell the truth about
 what it just read*.
 
 **Rule**: comparison is only meaningful when both sources were observed close together; each joined
@@ -227,7 +232,7 @@ rather than silently compared (the clock-skew edge case).
 **Decision**: reuse the two existing SSE streams (`/platform/events`, `/runs/{id}/events`) and poll
 everything else on the spec's per-resource cadence, gated on tab visibility with exponential backoff.
 
-**Rationale**: the platform has no broker and 026 must not add one (FR-434). SSE already exists for
+**Rationale**: the platform has no broker and 027 must not add one (FR-434). SSE already exists for
 exactly the two highest-churn surfaces. Adding SSE for every runtime read would multiply long-lived
 connections against the agent's **bounded** worker/queue transport (023 US6) — a console with ten
 open streams could plausibly saturate it, which is a self-inflicted denial of service on the control

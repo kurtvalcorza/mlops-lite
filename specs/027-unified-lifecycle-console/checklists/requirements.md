@@ -1,4 +1,4 @@
-# Specification Quality Checklist: 026 Unified ML Lifecycle Console
+# Specification Quality Checklist: 027 Unified ML Lifecycle Console
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-07-31
@@ -44,7 +44,7 @@
 
 2. **Scope bounding across three maturity levels** — the spec covers MVP 1, 2 and 3, which risks an
    unbounded increment. Resolved by making the phase membership explicit per user story (US1–US10 =
-   MVP 1, committed to 026; US11 = MVP 2 → 027; US12 = MVP 3 → 028) and stating the commitment in
+   MVP 1, committed to 027; US11 = MVP 2 → 028; US12 = MVP 3 → 029) and stating the commitment in
    both the Summary and Assumptions.
 
 3. **Untestable "modern UI" framing** — the original request's central adjective is unmeasurable.

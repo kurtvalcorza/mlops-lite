@@ -1,4 +1,4 @@
-# Contract: Gateway Console Read API (026)
+# Contract: Gateway Console Read API (027)
 
 **Plane**: FastAPI gateway (`:8080`) · **Callers**: the console BFF · **Auth**: `X-API-Key`
 (fail-closed, 005 US2) · **Home**: `gateway/app/routers/console.py` over `gateway/app/console/`.

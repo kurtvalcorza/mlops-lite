@@ -1,4 +1,4 @@
-# Phase 1 Data Model: 026 Unified ML Lifecycle Console
+# Phase 1 Data Model: 027 Unified ML Lifecycle Console
 
 **Input**: [spec.md](./spec.md) Key Entities · [research.md](./research.md) · **Consumed by**:
 [contracts/](./contracts/), tasks.md
@@ -137,7 +137,7 @@ interface StateConflict {
 **Detection rule**: only compare observations taken within the skew threshold. Beyond it, emit
 `skewExceeded: true` and **suppress the conflict claim** — a stale read disagreeing with a fresh one
 is not evidence of inconsistency, and reporting it as such would train operators to ignore the
-banner. `reconcile` is surfaced but inert in 026 (MVP 3 owns automated reconciliation).
+banner. `reconcile` is surfaced but inert in 027 (MVP 3 owns automated reconciliation).
 
 ---
 
@@ -167,21 +167,39 @@ interface RuntimeCompatibility {
   requiredComputeCapability?: string;
   artifactAvailable: boolean;
   hostCompatible: boolean;
+
   estimatedVramGb?: number;
-  largestFreeVramGb?: number;
+  usableBudgetGb?: number;       // VRAM_GB less the safety reserve
+  accountedResidentGb?: number;  // current accounted resident set
+  liveFreeVramGb?: number;       // measured; already excludes residents
+  headroomGb?: number;
+
+  budgetCheck: "pass" | "fail" | "unknown";    // est + accounted <= usable budget
+  liveVramCheck: "pass" | "fail" | "unknown";  // est + headroom <= live free
+  fitsAlone: boolean;                          // est <= usable budget on an empty GPU
+  jobExclusive: boolean;                       // a training/HPO/batch job holds the whole GPU
+
   verdict: "eligible" | "not-currently-eligible" | "incompatible" | "unknown";
   reasons: string[];
 }
 ```
 
-**Verdict rule (FR-388)** — the distinction that matters:
+**Verdict rule (FR-388)** — the distinction that matters, expressed against the constitution's two
+checks:
 
 - `incompatible` — **structural**: engine unavailable, compute capability mismatch, artifact missing,
-  adapter base unresolvable. Waiting will not help.
-- `not-currently-eligible` — **transient**: estimated VRAM exceeds the largest free block, or another
-  tenant holds the GPU. Waiting will help.
-- `unknown` — the agent is unreachable. **Never** collapse this into either of the above; an
-  unreachable agent is not a compatibility fact.
+  adapter base unresolvable, **or `fitsAlone === false`** (the model exceeds the usable budget even
+  on an empty GPU, so neither eviction nor waiting can help). Waiting will not help.
+- `not-currently-eligible` — **transient**: `budgetCheck` or `liveVramCheck` fails while
+  `fitsAlone` is true, or `jobExclusive` is true. Eviction, idle-release, or job completion will
+  help.
+- `unknown` — the agent is unreachable, or either check is `unknown`. **Never** collapse this into
+  either of the above; an unreachable agent is not a compatibility fact.
+
+**Both checks are reported separately**, never merged into one number. Telling an operator "not
+enough VRAM" when the real constraint is the accounted budget — or the reverse — sends them to the
+wrong remedy: eviction fixes a budget failure, whereas a live-VRAM failure with headroom exhausted
+usually means a leaked or unaccounted allocation.
 
 `estimatedVramGb` comes from the platform's existing `*_EST_GB` configuration, not a guess.
 `baseResolvable: false` forces `incompatible`, mirroring the platform's actual refusal to promote an
@@ -213,27 +231,57 @@ interface EngineProcess {
 
 interface AdmissionRecord {
   id: string; tenant: string; kind: "serving" | "job"; requestedGb: number;
-  decision: "admitted" | "refused";
-  reason?: "held" | "vram";
-  explanation: string;         // rendered server-side, human-readable (FR-378)
-  holder?: string; holderKind?: "serving" | "job";
-  deviceIndex?: number; largestFreeGb?: number;
-  decidedAt: string;           // a DECISION time, not a queue age (R1)
+  decision: "admitted" | "admitted-after-eviction" | "refused";
+  reason?: "job-exclusive" | "budget" | "live-vram" | "cannot-fit-alone";
+
+  // The co-resident set at decision time. Constitution v1.6.1 admits BOUNDED CO-RESIDENCY of
+  // serving tenants, so this is a list — there is no single "holder" for serving any more.
+  residents?: { tenant: string; kind: "serving" | "job"; vramGb: number }[];
+  evicted?: { tenant: string; policy: "idle-first" | "lru"; freedGb: number }[];
+
+  // The TWO distinct checks the constitution requires. They are not interchangeable.
+  usableBudgetGb?: number;      // VRAM_GB less the safety reserve
+  accountedResidentGb?: number; // sum of the accounted resident set
+  liveFreeGb?: number;          // measured free VRAM (already excludes residents)
+  headroomGb?: number;
+
+  deviceIndex?: number;
+  explanation: string;          // rendered server-side, human-readable (FR-378)
+  decidedAt: string;            // a DECISION time, not a queue age (R1)
 }
 ```
+
+**Two checks, not one (constitution v1.6.1).** A load is admissible only if **both** hold:
+
+1. **Budget** — `accountedResidentGb + requestedGb ≤ usableBudgetGb`, bounding the *accounted set*.
+2. **Live VRAM** — `requestedGb + headroomGb ≤ liveFreeGb`, bounding the *incoming load*.
+
+These must never be collapsed. `liveFreeGb` already excludes current residents, so summing the
+resident set against it double-counts them — that conflation was the v1.6.0 defect corrected by
+v1.6.1, and reproducing it in the console would misreport why a model was refused.
 
 **`explanation` is composed server-side**, from the same values the decision used, so the interface
 cannot drift from admission's real reasoning. Templates:
 
-- refused/`held` by a job → *"Refused: job `{holder}` holds the GPU. A running job is never
-  preempted."*
-- refused/`held` by a serving model → *"Refused: serving model `{holder}` is resident. An
-  operator-confirmed swap can displace it."*
-- refused/`vram` → *"Refused: needs {requestedGb} GB; largest free block is {largestFreeGb} GB on
-  device {deviceIndex}."*
-- admitted → *"Admitted to device {deviceIndex}: capability and available-memory checks passed."*
+- refused/`job-exclusive` → *"Refused: job `{tenant}` holds the GPU exclusively. A running job is
+  never preempted."*
+- refused/`budget` → *"Refused: admitting {requestedGb} GB would take the resident set to {sum} GB,
+  over the {usableBudgetGb} GB usable budget."*
+- refused/`live-vram` → *"Refused: needs {requestedGb} GB plus {headroomGb} GB headroom; live free
+  VRAM is {liveFreeGb} GB on device {deviceIndex}."*
+- refused/`cannot-fit-alone` → *"Refused: {requestedGb} GB exceeds the {usableBudgetGb} GB usable
+  budget even with the GPU empty. Evicting other tenants cannot help."*
+- `admitted-after-eviction` → *"Admitted to device {deviceIndex} after evicting {tenants}
+  ({policy}) to free {freedGb} GB."*
+- `admitted` → *"Admitted to device {deviceIndex}: fits the usable budget and live free VRAM
+  alongside {n} resident tenant(s)."*
 
-The wording deliberately teaches the platform's non-negotiable rule at the moment it bites.
+`cannot-fit-alone` is deliberately distinguished from `budget`: the former is **structural** — no
+amount of eviction or waiting helps — while the latter is **transient**. That distinction is the
+same one the compatibility verdict makes (§5), and the two must agree.
+
+The wording deliberately teaches the platform's rules at the moment they bite: that a job takes the
+whole GPU and is never preempted, and that serving tenants share a bounded budget.
 
 ```typescript
 interface JournalEntry {
@@ -349,7 +397,7 @@ interface DriftReport {
 
 Every retired path resolves. Each row is one test case in `tests/test_ui_redirects.py`.
 
-| Retired path (021 and pre-021) | → 026 area |
+| Retired path (021 and pre-021) | → 027 area |
 |---|---|
 | `/` | `/overview` (was: `serving`) |
 | `/serving` | `/deployments` |
@@ -364,7 +412,7 @@ Every retired path resolves. Each row is one test case in `tests/test_ui_redirec
 
 `/retraining` → `/evaluations/drift` is the one judgement call: the retraining stage's real content
 was policies, the cycle board, and suggestions, which in the ten-area IA split between Evaluations
-(drift, gates) and MVP 3's suggestion review. Drift is the closest live destination in 026.
+(drift, gates) and MVP 3's suggestion review. Drift is the closest live destination in 027.
 
 ---
 

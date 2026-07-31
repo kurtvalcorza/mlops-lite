@@ -1,4 +1,4 @@
-# Contract: Host-Agent Runtime API (026)
+# Contract: Host-Agent Runtime API (027)
 
 **Plane**: GPU host agent (`:8100`, stdlib transport) · **Callers**: the gateway **only**
 (research R5) · **Auth**: `X-Agent-Key` required — these are not public probes (023 US2).
@@ -50,15 +50,16 @@ Recent admission decisions (FR-377/378).
 ```json
 {
   "observed_at": "2026-07-31T09:14:02Z",
-  "holder": "job_3842", "holder_kind": "job",
+  "residents": [{ "tenant": "job_3842", "kind": "job", "vram_gb": 10.1 }],
+  "usable_budget_gb": 11.4, "accounted_resident_gb": 10.1, "live_free_gb": 1.6,
   "capacity": 64,
   "records": [
     {
       "id": "adm_01J…", "tenant": "vision", "kind": "serving",
-      "requested_gb": 3.2, "decision": "refused", "reason": "held",
-      "holder": "job_3842", "holder_kind": "job",
-      "device_index": 0, "largest_free_gb": 7.4,
-      "explanation": "Refused: job job_3842 holds the GPU. A running job is never preempted.",
+      "requested_gb": 3.2, "decision": "refused", "reason": "job-exclusive",
+      "residents": [{ "tenant": "job_3842", "kind": "job", "vram_gb": 10.1 }],
+      "device_index": 0, "usable_budget_gb": 11.4, "accounted_resident_gb": 10.1, "live_free_gb": 1.6,
+      "explanation": "Refused: job job_3842 holds the GPU exclusively. A running job is never preempted.",
       "decided_at": "2026-07-31T09:13:58Z"
     }
   ]
@@ -67,9 +68,14 @@ Recent admission decisions (FR-377/378).
 
 **Rules**
 
-- This is a **decision history**, not a queue. Admission refuses immediately; nothing waits
+- This is a **decision history**, not a queue. Admission decides immediately; nothing waits
   (research R1). There is no `pending` decision value and no queue-position field, and the console
-  must not present one.
+  must not present one. Constitution v1.6.1's eviction branch does not change that — an eviction is
+  part of the decision, not a wait.
+- The **two VRAM checks are reported separately** (`accounted_resident_gb` vs `usable_budget_gb`, and
+  the incoming load vs `live_free_gb` + headroom). They MUST NOT be merged: `live_free_gb` already
+  excludes residents, so summing the resident set against it double-counts them — the exact v1.6.0
+  defect corrected by v1.6.1.
 - Backed by a **bounded in-memory ring** (default 64) written by `Admission.acquire()` as it
   returns. Bounded because it must not grow unboundedly in a long-lived agent, and in-memory because
   a decision history is diagnostic, not durable — losing it on restart is acceptable, and persisting
@@ -132,7 +138,7 @@ Paged durable-journal read (FR-380).
 | `active_requests` | `int?` | in-flight count |
 
 **Compatibility requirement**: every field is `Optional` with a default, so the 018/019 `/health` and
-`/engines` conformance tests continue to pass **unchanged**. A consumer written before 026 sees the
+`/engines` conformance tests continue to pass **unchanged**. A consumer written before 027 sees the
 same payload shape it always did. This is the reason for extending `EngineState` rather than
 introducing a parallel engine contract that would fork the validated shape both runtimes exchange.
 

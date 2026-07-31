@@ -1,4 +1,4 @@
-# Feature Specification: 026 Unified ML Lifecycle Console
+# Feature Specification: 027 Unified ML Lifecycle Console
 
 **Feature Branch**: `claude/tech-stack-overview-i0cljp`
 
@@ -22,7 +22,7 @@ the durable journal), evaluation as a first-class activity, and the inference re
 traces, captures, labels). Operators route around the console into raw logs, the MLflow UI, and
 Grafana precisely where the platform is most differentiated.
 
-026 replaces the loop navigation with a **ten-area operational console** organized by *what the
+027 replaces the loop navigation with a **ten-area operational console** organized by *what the
 operator is doing*, not by which backend owns the datum. The lifecycle loop survives as a
 **visualization** — the Overview's normalized activity timeline and per-stage progress — rather than
 as navigation.
@@ -34,15 +34,15 @@ traces. The object store owns artifacts. Prometheus owns time series. The consol
 critically — **where two sources disagree it shows the disagreement rather than silently picking
 one**.
 
-Unlike 021 (front-end only, zero backend change), 026 is **full-stack**: the read surfaces the
+Unlike 021 (front-end only, zero backend change), 027 is **full-stack**: the read surfaces the
 console needs and the platform does not yet expose (per-device GPU topology, admission state as an
 inspectable record, journal reads, trace reads, joined job state, endpoint records) are built as part
 of this increment rather than rendered as "not available".
 
-Scope is phase-gated per Principle VII. This spec defines all three maturity levels; **026 commits
+Scope is phase-gated per Principle VII. This spec defines all three maturity levels; **027 commits
 to MVP 1 (the unified read console) built full-stack**, and specifies MVP 2 (lifecycle write actions)
 and MVP 3 (operational intelligence) so the information architecture and contracts are designed
-whole — those phase to 027/028.
+whole — those phase to 028/029.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -93,10 +93,10 @@ An operator inspects the GPU runtime directly: which hosts are alive, what each 
 engine processes are resident, what is waiting for admission and **why**, and what the durable
 journal recorded. Admission decisions are rendered as human-readable explanations, not status codes.
 
-**Why this priority**: The host agent's in-process admission and single-tenant GPU discipline is the
+**Why this priority**: The host agent's in-process admission and VRAM-budgeted GPU discipline is the
 platform's defining constraint (Principle II) and today has no operator surface beyond a status
 pill. This is the single largest capability gain over a reskinned MLflow interface, and the largest
-net-new backend surface in 026.
+net-new backend surface in 027.
 
 **Independent Test**: With the agent running, open Runtime; confirm host and per-device state
 (index, name, UUID, compute capability, total/free/used VRAM, utilization, resident processes), the
@@ -111,10 +111,12 @@ blocking tenant and the VRAM shortfall.
    with its process id, modality, model identity, and device.
 2. **Given** a training job holds the GPU and a vision inference request arrives, **When** the
    operator views the admission surface, **Then** the refusal is stated in prose — naming the
-   holding job and that a running job is never preempted — not as a bare status code.
-3. **Given** a job requests more VRAM than any device has free, **When** the operator inspects the
-   decision, **Then** the explanation names the required amount, the largest free block, and the
-   device evaluated.
+   holding job and that a running job takes the whole GPU and is never preempted — not as a bare
+   status code.
+3. **Given** a load fails one of the two VRAM checks, **When** the operator inspects the decision,
+   **Then** the explanation names **which** check failed — the accounted resident set against the
+   usable budget, or the incoming load against live free VRAM — with the amounts and the device
+   evaluated, and reports any eviction performed to make room.
 4. **Given** the agent restarted mid-job, **When** the operator opens the journal, **Then** the
    interrupted job's transitions are visible in sequence with the replay outcome, and the entry is
    not silently absent.
@@ -136,8 +138,9 @@ host topology, never inferred from modality alone.
 
 **Independent Test**: Open the catalog; confirm rows join registry, artifact, deployment, and
 evaluation facts across all five modalities. Open a text-generation version and confirm the
-compatibility panel reports required engine, hardware requirements, artifact availability, estimated
-VRAM against the largest free block, and a resulting eligibility verdict.
+compatibility panel reports required engine, hardware requirements, artifact availability, and both
+VRAM checks — the accounted resident set against the usable budget and the load against live free
+VRAM — with a resulting eligibility verdict.
 
 **Acceptance Scenarios**:
 
@@ -147,9 +150,10 @@ VRAM against the largest free block, and a resulting eligibility verdict.
 2. **Given** an adapter version whose base model cannot be resolved from lineage, **When** the
    operator opens it, **Then** the compatibility panel reports the artifact as not servable and names
    the unresolvable base, matching the platform's refusal behaviour.
-3. **Given** a version whose estimated VRAM exceeds the largest free block, **When** the operator
-   views compatibility, **Then** the verdict is `not currently eligible` with the shortfall stated,
-   and it is distinguished from a structural incompatibility.
+3. **Given** a version that fails a VRAM check but would fit on an empty GPU, **When** the operator
+   views compatibility, **Then** the verdict is `not currently eligible` with the failing check and
+   shortfall stated; **and given** a version too large for the usable budget even on an empty GPU,
+   the verdict is instead structurally `incompatible`, because eviction cannot help.
 4. **Given** a registered version whose artifact is missing from the object store, **When** the
    operator opens it, **Then** the console reports the missing artifact rather than rendering a
    broken download.
@@ -358,7 +362,7 @@ fixture mode and confirm the mode badge is unmistakable.
 
 ---
 
-### User Story 11 - Lifecycle write actions (Priority: P3) — MVP 2, phases to 027
+### User Story 11 - Lifecycle write actions (Priority: P3) — MVP 2, phases to 028
 
 The operator acts from the console: start and cancel supported jobs, register versions, assign
 aliases, create endpoint assignments, submit labels, approve review items, and manage capture and
@@ -381,7 +385,7 @@ optimistic-update rollback on failure.
 
 ---
 
-### User Story 12 - Operational intelligence (Priority: P3) — MVP 3, phases to 028
+### User Story 12 - Operational intelligence (Priority: P3) — MVP 3, phases to 029
 
 Drift workflows, suggestion review with evidence, quality-gate authoring, automated cross-system
 reconciliation, controlled rollout and rollback, and audit views.
@@ -468,9 +472,12 @@ policy and suggestion records.
 - **FR-376**: The console MUST expose resident engine processes with engine identifier, modality,
   model identity, process identifier, device, VRAM, start time, health, and active request count.
 - **FR-377**: The console MUST expose admission requests and decisions with the required engine,
-  requested VRAM, device evaluated, decision, reason, and age.
+  requested VRAM, the co-resident tenant set, device evaluated, decision, reason, any eviction
+  performed, and age. The two VRAM checks — accounted resident set against the usable budget, and
+  incoming load against live free VRAM — MUST be reported **separately** and never merged.
 - **FR-378**: Every admission decision MUST be rendered as a human-readable explanation naming the
-  determining factor — the blocking tenant, the VRAM shortfall, or the checks that passed.
+  determining factor — the exclusive job holder, which VRAM check failed and by how much, the tenants
+  evicted to make room, or the checks that passed.
 - **FR-379**: The console MUST NOT offer any control that would preempt a running job; refusal
   semantics MUST be presented as the platform's designed behaviour.
 - **FR-380**: The console MUST expose the durable journal as a paged, filterable diagnostic view with
@@ -495,10 +502,13 @@ policy and suggestion records.
   Training, Inference, Artifacts, Lineage, and Activity.
 - **FR-387**: The compatibility panel MUST derive its verdict from gateway contracts and live host
   topology — required engine, accelerator requirement, required compute capability, artifact
-  availability, host compatibility, estimated VRAM, largest free VRAM block, admission result — and
+  availability, host compatibility, estimated VRAM, the usable-budget check, the live-free-VRAM
+  check, whether the model fits alone, admission result — and
   MUST NOT infer compatibility from modality alone.
 - **FR-388**: The compatibility verdict MUST distinguish `not currently eligible` (a transient
-  resource condition) from `incompatible` (a structural mismatch).
+  resource condition that eviction, idle-release, or job completion resolves) from `incompatible` (a
+  structural mismatch, including a model that exceeds the usable VRAM budget even on an empty GPU,
+  where eviction cannot help).
 - **FR-389**: For adapter versions, the console MUST resolve and display the base model from lineage,
   and MUST report an unresolvable base as not servable, matching platform refusal behaviour.
 - **FR-390**: Model lineage MUST be navigable from a fine-tuned version back through its chain to a
@@ -571,8 +581,9 @@ policy and suggestion records.
   draining, stopped, failed, or unknown.
 - **FR-416**: Desired assignment and resident runtime state MUST be displayed separately; an endpoint
   MUST NOT be reported healthy on the basis of desired state alone.
-- **FR-417**: An endpoint whose model is not resident because the GPU is held elsewhere MUST be
-  presented as on-demand, not as failed.
+- **FR-417**: An endpoint whose model is not resident because a job holds the GPU exclusively, or
+  because it did not fit the VRAM budget alongside current tenants, MUST be presented as on-demand,
+  not as failed.
 - **FR-418**: Only rollout controls the gateway actually implements may be displayed; no decorative
   traffic-splitting control may be rendered.
 
@@ -705,21 +716,22 @@ policy and suggestion records.
 - **SC-199**: Idle platform memory remains within the constitution's footprint budget with the new
   console running.
 - **SC-200**: The full offline test suite, linting, interface build, compose render, and spec checks
-  all pass, with no regression against the pre-026 baseline.
+  all pass, with no regression against the pre-027 baseline.
 - **SC-201**: **[HW]** On the target GPU machine, live per-device VRAM, resident engine identity, and
   admission decisions displayed by the console match the agent's own reported state exactly.
-- **SC-202**: **[HW]** During a real single-tenant contention event, the console's runtime view
-  reflects the correct holder and the correct refusal reason throughout.
+- **SC-202**: **[HW]** During a real GPU contention event, the console's runtime view reflects the
+  correct resident tenant set and the correct refusal reason throughout, distinguishing an
+  exclusive-job refusal from each of the two VRAM-check failures.
 - **SC-203**: Every new externally observable endpoint introduced by this feature has a corresponding
   contract entry.
 
 ## Assumptions
 
-- **Increment numbering**: this is increment 026, continuing the global sequence at FR-362, SC-184,
+- **Increment numbering**: this is increment 027, continuing the global sequence at FR-362, SC-184,
   and T618. 025's outstanding hardware task is unrelated and remains open on its own.
-- **Scope commitment**: 026 delivers MVP 1 — the unified read console — built full-stack, meaning the
+- **Scope commitment**: 027 delivers MVP 1 — the unified read console — built full-stack, meaning the
   read endpoints it requires are implemented rather than stubbed. MVP 2 (US11) and MVP 3 (US12) are
-  specified here for architectural coherence and phase to 027/028 per Principle VII.
+  specified here for architectural coherence and phase to 028/029 per Principle VII.
 - **The loop is retained as meaning, not navigation**: no lifecycle stage becomes unreachable, so
   Principle IV is preserved; the change is organizational.
 - **Single operator, no user accounts**: the platform authenticates with a shared API key and has no
