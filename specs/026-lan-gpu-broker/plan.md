@@ -213,6 +213,7 @@ and the sequencing is explicit. Three gates remain open before those phases can 
 | **New-runtime constitution amendment** (gVisor/Kata) | P2 | Not raised |
 | **Session admission class** decision (T665) | P5 (T666–T669, T686) | Open — see [research.md](./research.md) R9 |
 
-Two further **design** decisions gate T642 specifically (the `job_barrier` drain): convergence, and the
-TOCTOU for reservations already past stage 1 when the barrier rises — recorded in
-[contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Jobs. P1/P3/P4 are unblocked.
+The two **design** decisions that previously gated T642 (the `job_barrier` drain) are **closed** — drain
+convergence and the in-flight-load TOCTOU are both settled in
+[contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Jobs, so nothing in the coordinator
+contract is left OPEN and T642 is implementable. P1/P3/P4 are unblocked.
