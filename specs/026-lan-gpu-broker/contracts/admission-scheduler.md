@@ -35,6 +35,17 @@ per child PID;
 (k) `admit_job` overwrote an existing `exclusive_job` rather than refusing;
 (l) transient contention was reported as the permanent-looking `model_too_large`.
 
+**Round 4 (PR #74 re-review)** closes the corner the round-3 claim lifecycle itself opened:
+(m) `AwaitLoad` joiners were well-handled on the success and spawn-exception paths but **silently
+abandoned by the commit-time rollback** (drift, and nominally stale) — and `drift` is an ordinary
+concurrent-load outcome, not a hypothetical, so a joiner was left with no signal until its own deadline;
+(n) no **waiter registry** was ever defined, yet both `:154`'s "waiters joining" and `:141`'s "fail every
+waiter" require enumerating exactly who awaits a given `model_key` — there was no structure to enumerate;
+(o) `AwaitLoad` had no **deadline-exceeded** branch, and its "on failure: continue" contradicted the
+failure path's "fail every waiter with the same outcome"; a waiter that had given up but not deregistered
+could still be counted among the joiners at commit and handed a claim it would never release — precisely
+the invariant-4 leak round 3 exists to close.
+
 **Still open — deliberately not resolved here** (they are design decisions, not corrections): the
 `job_barrier` drain-convergence and the TOCTOU for reservations already past stage 1 when the barrier
 rises. See *Jobs (exclusive)* below.
@@ -56,9 +67,14 @@ residents: model_key -> ResidentModel {
 }
 exclusive_job: None | { job_id, started_at }     # at most one; whole GPU
 job_barrier: bool                                 # set during job drain; refuses NEW serving admits
-reservations: op_id -> { model_key, est_bytes, generation, materialized: bool }
+reservations: op_id -> { model_key, est_bytes, generation, materialized: bool,
+                         waiters: ordered set of waiter handles }
                                                   # idempotent, keyed by request/job id
                                                   # materialized=false until reconciled to a real delta
+                                                  # waiters = the AwaitLoad joiners this load owns; the
+                                                  #   single-flight rule means at most ONE reservation per
+                                                  #   model_key is in `loading`, so it is unambiguous which
+                                                  #   load a joiner is registered against
 generation: monotonically increasing token per model_key (guards commit/rollback)
 lock: RLock                                       # guards STATE ONLY, never held across lifecycle I/O
 load_gate: Semaphore                              # serializes load+measure so a per-PID reading is
@@ -91,6 +107,7 @@ admit_serving(model_key, est_bytes, deadline):
         resident:
             active_requests += 1; return Share(claim)           # shared child, no new VRAM
         loading:
+            register op_id in the in-flight load's reservation.waiters   # ← under THIS lock
             plan = AwaitLoad                                    # coalesce; never double-load
         draining | evicting | rolling_back:
             plan = AwaitTransient   # an owning op is mid-flight; do NOT create a competing entry
@@ -100,7 +117,7 @@ admit_serving(model_key, est_bytes, deadline):
           fits_budget    = accounted + est_bytes <= usable_capacity
           fits_live      = est_bytes <= effective_free - safety_headroom
           if fits_budget and fits_live:
-              record reservation{op_id, model_key, est_bytes, generation}
+              record reservation{op_id, model_key, est_bytes, generation, waiters: {}}
               residents[model_key].state = loading
               plan = Load
           else:
@@ -118,9 +135,15 @@ admit_serving(model_key, est_bytes, deadline):
               plan = EvictThenRetry
     # ---- stage 2: I/O strictly OUTSIDE the lock ----
     case plan:
-      AwaitLoad:       await the in-flight load (bounded by deadline)
-                       on success: the loader hands this waiter a claim (see Request claims); return Share(claim)
-                       on failure: continue                     # the loader cleaned up; re-evaluate
+      AwaitLoad:       await the load's DISPOSITION (bounded by deadline) — see Load waiters
+                       on Grant:     the loader assigned this waiter a claim; return Share(claim)
+                       on Refuse(x): return Refuse(x)            # the loader's own terminal outcome, verbatim
+                       on Retry:     continue                    # consumes one attempt; re-derive both bounds
+                       on deadline:  under lock:
+                                       if a disposition was ALREADY assigned to this waiter:
+                                           take it and handle it as above   # never abandon an assigned claim
+                                       deregister op_id from reservation.waiters (if it still exists)
+                                     return Refuse(gpu_busy, retry_after)
       AwaitTransient:  await the owning op to finalize (bounded by deadline); continue
       EvictThenRetry:  evict_all(victims)      # completes: drain -> unload -> NVML verified
                        continue                # ← next attempt re-derives BOTH bounds
@@ -134,31 +157,37 @@ admit_serving(model_key, est_bytes, deadline):
       real_bytes = NVML.used_by_pid(child.pid)  # per-PROCESS, not a device-wide delta
     except spawn failure | readiness timeout | OOM | model missing:
       under lock:
+        waiters = reservation.waiters if it still exists else ∅   # ← captured BEFORE it goes away
         if generation unchanged since reservation:
             drop reservation; remove residents[model_key]; bump generation
         # else: an eviction already reclaimed the slot — nothing of ours remains to clear
       unload(partial child) if one was spawned  # ← OUTSIDE the lock
-      fail every AwaitLoad waiter on this model_key with the same outcome
+      dispose(waiters, Refuse(load_failed))     # every joiner gets the loader's own outcome
       return Refuse(load_failed)                # capacity is NOT left reserved
 
   under lock:
-    stale  = generation changed since reservation (model evicted meanwhile)
+    stale  = generation changed since reservation (model evicted meanwhile — see note below)
     others = Σ est_bytes of reservations OTHER than this op        # ← retained, not dropped
     drift  = Σ residents.vram_accounted + real_bytes + others > usable_capacity
+    waiters = reservation.waiters                  # ← read in the SAME section that decides, either way
     if stale or drift:
-        residents[model_key].state = rolling_back      # record INTENT only
+        residents[model_key].state = rolling_back  # record INTENT only
         drop reservation
         rollback = true
     else:
         residents[model_key] = resident, vram_accounted = real_bytes
-        active_requests += 1 + (number of AwaitLoad waiters joining)   # ← claims, atomic with commit
-        drop reservation
+        active_requests += 1 + |waiters|           # ← claims, atomic with commit
+        assign a claim to each waiter              #    (registry read + assignment are one section, so a
+        drop reservation                           #     waiter cannot deregister between count and assign)
   if rollback:                                  # ← unload happens OUTSIDE the lock
     unload(child); verify NVML free rose
     under lock: remove residents[model_key]; bump generation
-    return Retry if stale
-           else Refuse(model_too_large if real_bytes > usable_capacity - safety_headroom
-                       else gpu_busy)           # drift caused by contention is retryable
+    outcome = Retry if stale
+              else Refuse(model_too_large if real_bytes > usable_capacity - safety_headroom
+                          else gpu_busy)        # drift caused by contention is retryable
+    dispose(waiters, outcome)                   # ← rollback owns its joiners exactly as the failure path does
+    return outcome
+  dispose(waiters, Grant)                       # wake the joiners that were just handed claims
   return Grant(claim)
 ```
 
@@ -166,6 +195,17 @@ admit_serving(model_key, est_bytes, deadline):
 lock across child lifecycle I/O — precisely the ABBA deadlock this redesign exists to remove, and the
 one `admission.py`'s own comments record. The lock records the *decision*; the unload happens after
 release; a final short critical section finalizes state.
+
+**Why `stale` is retained even though nothing currently sets it.** As the contract stands, no path bumps
+the generation of a model still in `loading`: `select_victims` targets `state == resident` only, and
+`admit_job`'s drain marks only *idle residents*. The `stale` branches are therefore **unreachable today —
+deliberately defensive**, kept because every future path that reclaims a loading slot (the barrier-recheck
+option under OPEN 2, an operator force-unload, a crash-recovery sweep) must go through generation bumping
+rather than inventing a second reclamation mechanism. Two consequences worth stating so they are not
+assumed away: the branch is **not** exercised by any current test, and it is **not** the same check as a
+barrier re-check — `job_barrier`/`exclusive_job` are global flags with nothing tying them to a per-model
+`generation`, so resolving OPEN 2 that way means adding a genuinely new condition alongside `stale`/`drift`
+(with the same `dispose(waiters, …)` treatment), not wiring up something that is already half-present.
 
 **Why measurement is per-PID.** Two reserved models can load concurrently, so a device-wide pre/post
 free-memory delta is not attributable to either: each reading may include the other's allocation or
@@ -187,11 +227,46 @@ eviction block (leak) or an eviction racing a live request (early release).
   use, which is exactly the window in which a concurrent admission would have picked it as an idle
   victim and unloaded a model that was already serving a request.
 - **`AwaitLoad` waiters** are handed their claim by the loader in that same commit section. A waiter
-  never increments on its own afterwards; if the load fails, every waiter fails with it.
+  never increments on its own afterwards. If the load does *not* commit — failure **or** rollback — the
+  loader disposes of every waiter with its own outcome rather than leaving them to time out; see
+  *Load waiters* below.
 - **Release is mandatory and `finally`-style.** Every terminal path — success, error, client
   disconnect, deadline — releases exactly once, under lock, updating `last_used_at`.
 
-Four invariants (assert-tested):
+### Load waiters (`AwaitLoad` joiners)
+
+Single-flight coalescing means a second request for a model already `loading` does not start its own
+load — it *joins* the one in flight. That makes the loader responsible for a set of requests it did not
+originate, so the set has to be enumerable and every exit from it has to be defined. `reservation.waiters`
+is that registry; **registration, deregistration, and claim assignment all happen under the state lock**,
+which is what makes the count-then-assign at commit indivisible.
+
+`dispose(waiters, outcome)` hands each registered waiter the loading operation's own disposition:
+
+| Loader outcome | Waiter receives | Waiter does |
+|---|---|---|
+| `Grant` | a claim, assigned at commit | returns `Share(claim)` — releases it like any other claim |
+| `Refuse(load_failed)` | the same terminal refusal | returns it; does **not** retry — a missing model, spawn error, or OOM recurs, and N waiters re-racing it would only burn their attempts |
+| `Refuse(model_too_large)` | the same terminal refusal | returns it — the model does not fit an empty GPU; nothing to retry |
+| `Refuse(gpu_busy)` (drift from contention) | `Retry` | consumes one attempt, backs off, re-enters stage 1 — contention is transient, and the waiter's own bounds may now differ |
+| `Retry` (stale) | `Retry` | same |
+
+The rule is: **a waiter adopts the loader's disposition**, except that dispositions the loader itself
+treats as retryable make the waiter re-enter stage 1 rather than return — bounded by its own
+`max_admission_attempts` and `deadline`, so no waiter outlives the caller contract. This resolves the
+round-3 ambiguity between "on failure: continue" and "fail every waiter with the same outcome": *both*
+happen, selected by which outcome the loader reached, and never left to the waiter to guess.
+
+**Deadline is a third exit, and it is the one that could leak.** A waiter whose own deadline expires
+deregisters **under lock** — but if a disposition was already assigned to it, deregistration finds that
+disposition instead and the waiter takes it, claim included (and releases the claim like any other).
+Without that tie-break a waiter could walk away from a claim already counted into `active_requests`,
+permanently blocking every later eviction of that model: the exact invariant-4 defect the claim lifecycle
+exists to prevent, reintroduced through the one path round 3 did not enumerate. Because assignment and
+deregistration contend for the same lock, exactly one of them wins, and both outcomes are defined —
+which is the whole reason the registry lives under the state lock rather than beside it.
+
+Five invariants (assert-tested):
 
 1. `Σ residents.vram_accounted + Σ reservations ≤ usable_capacity` — bounds the accounted set.
 2. Every individual load fits `live_free − unmaterialized − safety_headroom` — bounds the incoming
@@ -201,6 +276,9 @@ Four invariants (assert-tested):
    replacement reservation is recorded.
 4. `active_requests` equals the number of outstanding claims for that model, and is never negative.
    A model in `resident` state with `active_requests == 0` is genuinely idle and evictable.
+5. Every registered `AwaitLoad` waiter reaches **exactly one** disposition — a claim, a terminal refusal,
+   or a retry — and no reservation is dropped while its `waiters` set is non-empty and undisposed. No
+   load-owning path (commit, rollback, failure) may exit without disposing of its joiners.
 
 Invariants 1 and 2 are **distinct**: the first is a budget accounting bound, the second a physical
 memory bound that also holds when *unaccounted external* GPU consumers are present.
@@ -268,6 +346,14 @@ job's claim, both workloads run, and whichever finishes first clears the other's
 >    granted — the exact co-residency the barrier exists to prevent. Options: have the drain wait on
 >    `reservations` to empty as well as `residents`, or have stage 3's commit re-check the barrier and
 >    roll back if it is set. These differ in which side pays the latency, which is why it is a choice.
+>
+>    **Two constraints bind whichever option is chosen**, so they are not rediscovered at implementation
+>    time: (i) a commit-time barrier re-check is a **new** condition — `if job_barrier or exclusive_job:
+>    rollback` — sitting alongside `stale`/`drift`, not a reuse of the generation check (see *Why `stale`
+>    is retained* above); and (ii) any rollback it triggers owns the load's `AwaitLoad` joiners under
+>    invariant 5 and MUST `dispose(waiters, Refuse(gpu_busy))` — a barrier rollback is contention, so the
+>    joiners retry rather than fail. The waiting-drain option carries the same obligation via whatever
+>    path eventually resolves those reservations.
 
 ## Scheduler — single authority, bounded fairness
 - **The host-agent coordinator is the SOLE GPU-ordering authority.** Every path that can occupy the

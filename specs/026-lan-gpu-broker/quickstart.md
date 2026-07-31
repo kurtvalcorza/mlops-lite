@@ -50,6 +50,12 @@ Once P2 is unblocked on native Linux:
    - accounted set: at no instant `Σ residents.vram_accounted + Σ reservations > usable_capacity`;
    - per load: every recorded load passed its *contemporaneous* `live_free − unmaterialized −
      safety_headroom` check at the moment it was admitted.
+4. **Coalescing and waiter disposal**: fire N simultaneous first-requests for one cold model → exactly one
+   load happens and all N are served. Repeat with the load forced to fail (point at a missing model) →
+   every one of the N is refused promptly, none waits out its deadline, and the model does not stay
+   `loading`. Then repeat against a near-full GPU so the load rolls back on drift → the joined waiters are
+   likewise answered inside the loader's own timeframe, and `active_requests` settles to 0 with the model
+   evictable afterwards (invariants 4 and 5).
 
 ## Drill 4 — Quotas & ledger (US3 · SC-004/005/012)
 1. Owner: `broker admin quota set --tenant alice --window daily --gpu-seconds 30`.
@@ -58,9 +64,15 @@ Once P2 is unblocked on native Linux:
 3. `GET /admin/usage` → ledger totals reconcile with work done within 5% (SC-004).
 4. Simulate window rollover (advance window / test hook) → Alice's budget auto-resets, work resumes (SC-012).
 
-## Drill 5 — Interactive session guard rails (US5 · SC-007)
+## Drill 5 — Interactive session guard rails (US5 · SC-007) — **GATED on T665**
+> The session **admission class** is undecided (exclusive · sandboxed job · distinct class) and gates all
+> of P5 — see [research.md](./research.md) R9. Run this drill only after T665 closes; how a session
+> acquires the GPU in step 1 is exactly what that decision determines.
+
 1. `broker session start --ttl 2h --idle 5m` → notebook URL.
-2. Leave idle > 5 min → GPU lease auto-released (`state=released`); `/admin/queue` shows GPU freed (SC-007).
+2. Leave idle > 5 min **with the notebook client open and heartbeating normally** (do not close the tab —
+   an automatic liveness heartbeat must not hold the GPU) → GPU lease auto-released (`state=released`);
+   `/admin/queue` shows GPU freed (SC-007).
 3. Start a session, submit a finetune **as a job** from a cell → GPU held only for the run, not the session.
 
 ## Drill 6 — Owner visibility (US3 · SC-009)
@@ -69,8 +81,9 @@ Open the console → confirm live queue depth, resident tenants + VRAM headroom,
 ---
 
 **Pass criteria**: every **ungated** drill green on the target hardware (Drill 2b is native-Linux-only and
-is *not* waivable on WSL2 — see above); the four coordinator invariants hold throughout — accounted set +
+is *not* waivable on WSL2 — see above); the five coordinator invariants hold throughout — accounted set +
 reservations ≤ `usable_capacity`, each load within `live_free − unmaterialized − safety_headroom`, no
-reservation backed by a still-resident victim, and `active_requests` balanced — plus an empty serving set
+reservation backed by a still-resident victim, `active_requests` balanced, and every `AwaitLoad` waiter
+disposed of exactly once — plus an empty serving set
 during any job; zero job preemptions; 100% of unauthorized/over-quota requests refused; broker unreachable
 off-LAN.

@@ -21,6 +21,13 @@ Rejections: `400 invalid_spec` (malformed/oversized, before touching GPU); `403 
 
 ## GET /jobs/{id}  *(status)* → FR-012
 `{ id, state, queue_pos?, sandbox, gpu_seconds?, artifact_ref?, model_version? }`.
+`state` ∈ `queued|running|succeeded|failed|cancelled|interrupted`. **`interrupted` is reported verbatim,
+not folded into `failed`**: it means the broker lost the job to a host-agent restart, which is the
+broker's fault and not the tenant's code failing. Since the job was metered against the tenant's quota,
+that distinction is what lets them tell a broker outage apart from their own bug — and it is not
+recoverable from the state alone once collapsed. `gpu_seconds` on an `interrupted` job is the settled
+elapsed time, with the reservation remainder released (see [data-model.md](../data-model.md) restart
+recovery). The pre-broker `hostagent/jobs.py` surface keeps its existing `interrupted → failed` mapping.
 
 ## GET /jobs/{id}/logs?follow=true  *(logs)* → FR-012
 Streams stdout/stderr (SSE/chunked) while `running`.

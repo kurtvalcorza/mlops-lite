@@ -63,13 +63,13 @@ review. Read that contract before starting — the ordering constraints below ar
       phase in execution order but carry later IDs to keep task IDs strictly increasing.
 - [ ] **T639** Implement `evict()` with a **bounded** drain: `draining` → wait `active_requests == 0` up to `drain_timeout` → `evicting` → unload → verify NVML free rose. On timeout revert the victim to `resident` and return `EvictFailed`. Check: eviction never interrupts an in-flight request, and a stuck victim does not wedge the coordinator.
 - [ ] **T640** Implement caller backoff on `EvictFailed`: consume an attempt, exponential jittered backoff capped per config, re-enter stage 1; refuse `gpu_busy` with `Retry-After` when attempts or deadline are exhausted. Check: no admission path waits unbounded on another tenant's request.
-- [ ] **T641** Implement request **coalescing** for a `loading` model (`AwaitLoad`) so concurrent requests for the same model never double-load. Check: N simultaneous first-requests for one model produce exactly one load.
+- [ ] **T641** Implement request **coalescing** for a `loading` model (`AwaitLoad`) so concurrent requests for the same model never double-load. Check: N simultaneous first-requests for one model produce exactly one load. The waiter registry and disposition rules this depends on are **T682–T683**.
 - [ ] **T642** Implement `admit_job()` with the **`job_barrier` set before draining**, and assert `residents`/`reservations` empty under the lock before setting `exclusive_job`. It MUST first return `Wait(retry_after)` when an `exclusive_job` or another `job_barrier` owner already exists — never overwrite a live claim. Check: a serving admission racing a job start cannot become co-resident with the job; and of two jobs admitted against an already-empty serving set, exactly one runs while the other waits. **Blocked on the two OPEN design decisions** recorded in [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Jobs (drain convergence; in-flight-reservation TOCTOU) — do not implement the drain until they are closed.
-- [ ] **T643** Assert-test all **four** coordinator invariants continuously in CI, not just at admission. Check: randomized concurrent admit/evict/job workload holds all four, including the claim-count invariant (4).
+- [ ] **T643** Assert-test all **five** coordinator invariants continuously in CI, not just at admission. Check: randomized concurrent admit/evict/job workload holds all five, including the claim-count invariant (4) and the waiter-disposition invariant (5).
 - [ ] **T644** `[P]` Reconcile estimates to the **real** measured size via a **per-PID** NVML reading (`used_by_pid(child.pid)`) taken under `load_gate`, not a device-wide free-memory delta — with concurrent loads a device-wide delta is unattributable and can double-account one model while under-accounting another. Roll back when drift breaks the budget bound. Check: a deliberately under-estimating model triggers rollback rather than budget violation; and two models loading concurrently are each accounted their own size.
 - [ ] **T645** Enable **bounded co-residency** on the serving path behind the corrected bounds. Check: two small models serve concurrently; a third that would breach either bound is refused or triggers eviction.
 
-**P3 exit**: SC-006, SC-010 demonstrable; the four invariants hold under concurrency.
+**P3 exit**: SC-006, SC-010 demonstrable; the five invariants hold under concurrency.
 
 ---
 
@@ -154,15 +154,28 @@ phase noted on each**, not the ID — IDs are late only because task IDs must be
 - [ ] **T680** `[US2]` *(Phase 3)* Implement **restart recovery** for the persisted jobs lane: `queued` jobs stay `queued` in `queue_pos` order (they must not be swept to `interrupted` by `hostagent/journal.py`'s existing startup rewrite), the formerly-`running` job resolves to a terminal state, and its reservation is settled-to-elapsed with the remainder released. Check: a restart mid-queue preserves FIFO order and leaves no reservation stranded in `reserved`.
 - [ ] **T681** `[US1]` *(Phase 1)* Emit settled usage for **streaming** completions as a terminal `usage` SSE event before `[DONE]`, and do **not** send `X-GPU-Seconds` on streamed responses (headers precede the body, so no settled value exists yet). Check: a streamed completion reports final GPU-seconds without buffering the body; a non-streamed one still carries the header.
 
+---
+
+## Phase 9 — Round-4 review corrections
+
+Findings from the PR #74 round-4 re-review. As with Phase 8, **execution order follows the phase noted on
+each task**, not the ID. T682–T684 are prerequisites of T641 despite their later IDs.
+
+- [ ] **T682** `[US1]` *(Phase 2)* Add the **waiter registry**: `reservation.waiters`, with registration (stage 1, `loading` branch), deregistration (waiter deadline), and claim assignment (stage 3 commit) all performed **under the state lock**. Check: the commit's count-of-joiners and assignment-of-claims occur in one critical section, so a waiter cannot deregister between them; and no code path enumerates waiters outside the lock.
+- [ ] **T683** `[US1]` *(Phase 2)* Implement **`dispose(waiters, outcome)`** on **every** load-owning exit — commit, spawn-failure, *and the commit-time rollback* (drift/stale), which round 3 left abandoning its joiners. Waiters adopt the loader's disposition; retryable outcomes (`Retry`, `gpu_busy`) make the waiter consume an attempt and re-enter stage 1, terminal ones (`load_failed`, `model_too_large`) are returned verbatim. Check: with a load forced to roll back on drift, every joined waiter is woken with a retryable outcome inside the loader's own timeframe — none waits out its deadline; and a forced spawn failure returns `load_failed` to all joiners without any of them re-attempting the same failing load.
+- [ ] **T684** `[US1]` *(Phase 2)* Implement the `AwaitLoad` **deadline** exit with its claim tie-break: a waiter that times out deregisters under the lock, **unless** the commit already assigned it a claim, in which case it takes the claim and releases it normally. Check: a stress test that expires waiter deadlines concurrently with commits leaves `active_requests == 0` afterwards, with no model left permanently un-evictable (invariants 4 and 5).
+- [ ] **T685** `[US2]` *(Phase 3)* Carry **`interrupted`** as a distinct terminal `job.state` and report it verbatim from `/jobs/{id}` rather than folding it into `failed`. Check: a host-agent restart mid-job leaves the job `interrupted` with elapsed GPU-seconds settled, and a tenant can distinguish it from a job their own code failed; the pre-broker `hostagent/jobs.py` surface still maps `interrupted → failed`.
+- [ ] **T686** `[US5]` *(Phase 6, gated)* Split session timers: idle-cull keys on **`last_gpu_activity_at`** (admitted GPU work only); `POST /heartbeat` updates `last_heartbeat_at` and **must not** reset the GPU idle timer. Check: a session heartbeating on its normal client interval with no cells running still releases its GPU lease within `idle_timeout_s` (SC-007).
+
 ## Traceability
 
 | Story | Priority | Tasks |
 |---|---|---|
-| US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649, T674–T677, T681 |
-| US2 — submit-and-queue jobs | P2 (gated) | T658–T664, T679–T680 |
+| US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649, T674–T677, T681, T682–T684 |
+| US2 — submit-and-queue jobs | P2 (gated) | T658–T664, T679–T680, T685 |
 | US3 — quotas, ledger, visibility | P3 | T628–T631, T649, T671, T678 |
 | US4 — additional modalities | P4 | T653–T657 |
-| US5 — interactive sessions | P5 (gated) | T665–T669 |
+| US5 — interactive sessions | P5 (gated) | T665–T669, T686 |
 
 Requirements coverage: FR-001–FR-026 and SC-001–SC-012 are traced through the phase exits above and
 the per-contract traceability sections in [contracts/](./contracts/).
