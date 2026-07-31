@@ -151,10 +151,10 @@ fails early if it is going to.
   pointer would manufacture the exact falsehood FR-427 exists to prevent. Verify the 018/019
   `/health` + `/engines` conformance tests still pass **unchanged**.
 - [ ] **T639** [US2] Add agent routes `GET /runtime/devices`, `GET /runtime/admission`,
-  `GET /journal` in `hostagent/main.py` per contracts/runtime-api.md. All behind `X-Agent-Key` —
+  `GET /journal` in `hostagent/main.py` per contracts/runtime-api.md (FR-374/375/377/380). All behind `X-Agent-Key` —
   these are not public probes (023 US2). All read-only.
 - [ ] **T640** [US2] Create `gateway/app/runtime.py` — the agent proxy holding `X-Agent-Key`, the
-  **only** path to `:8100` (research R5). On agent loss return `200` with `data: null` and
+  **only** path to `:8100` (FR-432, research R5). On agent loss return `200` with `data: null` and
   `degraded: ["agent"]`; **never an empty list**, which the console would legitimately render as "no
   devices".
 - [ ] **T641** [US2] Add gateway routes `GET /runtime/hosts`, `/runtime/hosts/{host}/devices`,
@@ -211,7 +211,32 @@ compatibility panel distinguishes structural from transient ineligibility for al
 
 ---
 
-## Phase 6: User Story 10 — Truthful state (Priority: P2) 🎯 core
+## Phase 6: User Story 4 — Training workspace (Priority: P2)
+
+**Goal**: one unit of work with three identifiers becomes one view.
+
+**Independent Test**: a fine-tune shows a normalized state alongside all three native states, an
+execution timeline, a resource panel, and streaming logs.
+
+- [ ] **T652** [P] [US4] Write the job-normalization half of `tests/test_console_joins.py` — every
+  row of the data-model §3 table maps to exactly one normalized state **and** retains each native
+  state (FR-392/SC-190).
+- [ ] **T653** [US4] Implement `gateway/app/console/jobs.py` + `GET /console/jobs`,
+  `GET /console/jobs/{id}` — the three-way join (FR-391), timeline (FR-393), and resource panel (FR-394).
+- [ ] **T654** [P] [US4] Implement `GET /console/runs`, `GET /console/experiments`,
+  `GET /console/studies/{id}/trials` — run and experiment **listing is net-new**; only
+  `GET /runs/{id}` existed.
+- [ ] **T655** [US4] Build `ui/app/(console)/training/` — experiments, runs, studies, jobs. Each job cross-links to its
+  gateway record, agent execution, and tracking run in one interaction (SC-189). Logs
+  reuse the existing `/runs/{id}/events` SSE; **no new streaming surface** (research R10). An
+  interrupted stream is reported, never silently truncated (FR-395). Studies render parallel
+  coordinates, history, importance, and trials (FR-396) **without implying a persistent search
+  service exists** (FR-397).
+- [ ] **T656** [US4] Extend the allowlist with the five training entries.
+
+---
+
+## Phase 7: User Story 10 — Truthful state (Priority: P2) 🎯 core
 
 **Goal**: conflicts are disclosed, degradation is per-domain, and mode is unmistakable.
 
@@ -220,50 +245,26 @@ stopped in turn produces its documented degradation; fixture mode is badged.
 
 **Note**: the fetch-layer half lands in Phase 2; this phase is the detection logic and its proofs.
 
-- [ ] **T652** [US10] Implement `StateConflict` detection in `gateway/app/console/jobs.py` per
+- [ ] **T657** [US10] Implement `StateConflict` detection in `gateway/app/console/jobs.py` per
   data-model §4. **Only compare observations within the skew threshold** — beyond it emit
   `skewExceeded` and *suppress the conflict claim*, because a stale read disagreeing with a fresh one
   is not evidence of inconsistency and reporting it would train operators to ignore the banner.
-- [ ] **T653** [US10] Derive the `Orphaned` state (gateway says running, agent has no process) and
+- [ ] **T658** [US10] Derive the `Orphaned` state (gateway says running, agent has no process) and
   ensure it **always** carries a `StateConflict`, never stands alone (data-model §3).
-- [ ] **T654** [P] [US10] Build the conflict banner component — both source states with observation
+- [ ] **T659** [P] [US10] Build the conflict banner component — both source states with observation
   times, last consistent timestamp, and refresh / inspect-journal actions (FR-427). `reconcile` is
   surfaced but inert in 026 (MVP 3 owns it).
-- [ ] **T655** [P] [US10] Build the persistent mode badge (`offline` / `live` / `hardware`) from
+- [ ] **T660** [P] [US10] Build the persistent mode badge (`offline` / `live` / `hardware`) from
   `PlatformHealth.mode` (FR-429).
-- [ ] **T656** [US10] Extend `tests/test_ui_resilience.py` with the **full seven-service degradation
+- [ ] **T661** [US10] Extend `tests/test_ui_resilience.py` with the **full seven-service degradation
   matrix** (data-model §11, SC-193). The load-bearing case: with the agent down, runtime reads `unknown` and
   **jobs are NOT reported stopped** (FR-428). An empty `devices: []` here is a **failing** assertion,
   not a pass.
-- [ ] **T657** [US10] Add a conflict-detection test to `tests/test_console_joins.py` — an induced
+- [ ] **T662** [US10] Add a conflict-detection test to `tests/test_console_joins.py` — an induced
   disagreement produces a disclosure in 100% of cases, never a silently chosen answer (SC-194).
 
 **Checkpoint**: every other surface can now be trusted not to confidently lie.
 
----
-
-## Phase 7: User Story 4 — Training workspace (Priority: P2)
-
-**Goal**: one unit of work with three identifiers becomes one view.
-
-**Independent Test**: a fine-tune shows a normalized state alongside all three native states, an
-execution timeline, a resource panel, and streaming logs.
-
-- [ ] **T658** [P] [US4] Write the job-normalization half of `tests/test_console_joins.py` — every
-  row of the data-model §3 table maps to exactly one normalized state **and** retains each native
-  state (FR-392/SC-190).
-- [ ] **T659** [US4] Implement `gateway/app/console/jobs.py` + `GET /console/jobs`,
-  `GET /console/jobs/{id}` — the three-way join (FR-391), timeline (FR-393), and resource panel (FR-394).
-- [ ] **T660** [P] [US4] Implement `GET /console/runs`, `GET /console/experiments`,
-  `GET /console/studies/{id}/trials` — run and experiment **listing is net-new**; only
-  `GET /runs/{id}` existed.
-- [ ] **T661** [US4] Build `ui/app/(console)/training/` — experiments, runs, studies, jobs. Each job cross-links to its
-  gateway record, agent execution, and tracking run in one interaction (SC-189). Logs
-  reuse the existing `/runs/{id}/events` SSE; **no new streaming surface** (research R10). An
-  interrupted stream is reported, never silently truncated (FR-395). Studies render parallel
-  coordinates, history, importance, and trials (FR-396) **without implying a persistent search
-  service exists** (FR-397).
-- [ ] **T662** [US4] Extend the allowlist with the five training entries.
 
 ---
 
@@ -305,7 +306,7 @@ revealed and never appear in a URL; traces render as a generic span waterfall.
   `/console/predictions/{id}` — **from the gateway record, not reconstructed from traces**
   (FR-407). Detail (FR-408) returns `PayloadPreview` **without** `preview`, making default-hidden structural:
   a component cannot render a payload it was never sent.
-- [ ] **T670** [US6] Implement `POST /console/predictions/{id}/payload` — the explicit reveal, with
+- [ ] **T670** [US6] Implement `POST /console/predictions/{id}/payload` — the explicit reveal (FR-409/SC-192), with
   the identifier in the **body**. It is a `POST` specifically so no payload reference lands in a URL,
   where it would reach logs, history, and referrers (contracts/console-read-api.md).
 - [ ] **T671** [P] [US6] Implement `GET /console/captures` and `GET /console/review-queue` —
@@ -423,12 +424,15 @@ half-built affordance misleads an operator.
   `gateway/app/console/*` or `runtime/*` route mutates state, and the sole write-shaped entry
   (`POST /console/predictions/{id}/payload`) only reveals an existing payload. Add the assertion to
   `tests/test_console_read_api.py` so a future MVP 2 write path cannot land here by accident instead
-  of through the sanctioned gated route (FR-435/436). Record the MVP 2 handoff in the 027 spec stub.
+  of through the sanctioned gated route (FR-435/436). Record the outcome in [deferred.md](./deferred.md) §MVP 2 — **not** in a new
+  `specs/027-*/` directory, which would fail the required `specs` gate: `check_specs.py` demands the
+  full six-artifact set per feature directory, so a spec-only stub breaks CI.
 - [ ] **T696** [US12] Assert that MVP 3 affordances surfaced in 026 are **inert and labelled as
-  such**: the conflict banner's `reconcile` action (T654) performs no reconciliation, and no
+  such**: the conflict banner's `reconcile` action (T659) performs no reconciliation, and no
   suggestion is auto-applied or auto-accepted anywhere in the console (FR-437). An affordance that
   looks actionable but does nothing is worse than its absence — it teaches operators the console
-  lies. Record the MVP 3 handoff in the 028 spec stub.
+  lies. Record the outcome in [deferred.md](./deferred.md) §MVP 3 — same reason: no partial
+  `specs/028-*/` directory.
 
 ---
 
@@ -440,8 +444,8 @@ Phase 1 (T618-T619)
           ├─> Phase 3  US1  (T628-T633)   P1 core
           ├─> Phase 4  US2  (T634-T646)   P1 core  ← largest unknown, sequenced early
           ├─> Phase 5  US3  (T647-T651)   P1 core   [needs US2's device data for compatibility]
-          ├─> Phase 6  US10 (T652-T657)   P2 core   [needs US2 + US4 join surfaces]
-          ├─> Phase 7  US4  (T658-T662)   P2
+          ├─> Phase 6  US4  (T652-T656)   P2       [creates console/jobs.py]
+          ├─> Phase 7  US10 (T657-T662)   P2 core   [needs US2 + US4, which now precede it]
           ├─> Phase 8  US5  (T663-T667)   P2
           ├─> Phase 9  US6  (T668-T674)   P2
           ├─> Phase 10 US7  (T675-T678)   P2
