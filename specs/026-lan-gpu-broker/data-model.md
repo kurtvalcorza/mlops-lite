@@ -79,7 +79,7 @@ from reservations and ledger rows **bearing that `window_start`**, not from comp
 | `tenant_id` | uuid FK→tenant | |
 | `kind` | enum(`batch`,`finetune`,`hpo`) | |
 | `spec` | jsonb | image/entrypoint or finetune spec (base, data ref, params) |
-| `state` | enum(`queued`,`running`,`succeeded`,`failed`,`cancelled`) | |
+| `state` | enum(`queued`,`running`,`succeeded`,`failed`,`cancelled`,`interrupted`) | `interrupted` = the broker lost the job (host-agent restart), **not** a tenant-code failure — see restart recovery |
 | `queue_pos` | int null | while queued |
 | `sandbox` | text | resolved sandbox runtime (kata/runsc/fallback) |
 | `artifact_ref` / `model_version` | text null | outputs; finetune → MLflow version |
@@ -87,7 +87,8 @@ from reservations and ledger rows **bearing that `window_start`**, not from comp
 | `created_at`/`started_at`/`ended_at` | timestamptz | |
 
 **State transitions**: `queued → running → (succeeded|failed)`; `queued → cancelled`;
-`running → cancelled` (tenant/owner). `running` is never forced to `queued` (no preemption).
+`running → cancelled` (tenant/owner); `running → interrupted` (restart recovery only — never a
+tenant-visible action). `running` is never forced to `queued` (no preemption).
 
 **Restart recovery (FR-025).** Persisting the lane is not by itself enough for FIFO to survive a
 restart: the existing host-agent startup path (`hostagent/journal.py`) atomically rewrites **every**
@@ -96,9 +97,18 @@ jobs are therefore recovered explicitly rather than swept:
 
 - `queued` jobs **stay `queued`, in their original `queue_pos` order** — they never occupied the GPU,
   so there is nothing to reconcile.
-- The single formerly-`running` job is resolved to a terminal state (`failed`, or `interrupted` if the
-  enum is extended to carry it) — never silently re-queued, since its sandbox is gone and re-running it
-  is the tenant's decision, not the broker's.
+- The single formerly-`running` job is resolved to **`interrupted`** — never silently re-queued, since
+  its sandbox is gone and re-running it is the tenant's decision, not the broker's.
+
+  *Decided rather than left open:* the enum above now carries `interrupted` as a distinct terminal
+  state. Collapsing it into `failed` would make every broker-caused restart indistinguishable from a
+  genuine tenant-code failure — and in a metered multi-tenant broker that difference is the tenant's
+  basis for disputing a charge, so it cannot be inferred from logs after the fact. `interrupted` is
+  already the vocabulary `hostagent/journal.py` uses for exactly this event, so the broker stores the
+  same word rather than a second one. It diverges from `hostagent/jobs.py`'s legacy surface, which maps
+  `interrupted → status:failed` for the pre-broker API; that mapping stays as-is for that surface, and
+  the broker's own `/jobs/{id}` reports `interrupted` verbatim (see
+  [contracts/jobs-api.md](./contracts/jobs-api.md)).
 - Its `usage_reservation` is **settled to elapsed GPU-seconds and the remainder released** against its
   stored `window_start`. Left `reserved`, it would hold quota against the tenant forever.
 - `exclusive_job` and the resident set start empty; VRAM accounting is rebuilt from NVML, not restored.
@@ -110,10 +120,16 @@ jobs are therefore recovered explicitly rather than swept:
 | `tenant_id` | uuid FK→tenant | |
 | `state` | enum(`active`,`idle`,`released`,`expired`) | |
 | `idle_timeout_s` / `ttl_s` | int | guard rails |
-| `last_activity_at` | timestamptz | drives idle-cull |
+| `last_gpu_activity_at` | timestamptz | **drives idle-cull** — set only by GPU work the coordinator admitted |
+| `last_heartbeat_at` | timestamptz | session/kernel liveness only; never resets the GPU idle timer |
 | `created_at`/`ended_at` | timestamptz | |
 
 **Transitions**: `active ⇄ idle`; `idle →(idle_timeout)→ released`; `active/idle →(ttl)→ expired`.
+
+**Why two timestamps.** A single `last_activity_at` fed by both signals lets a notebook's automatic
+liveness heartbeat hold the GPU for the full TTL while running nothing — the abandoned-session case
+SC-007 exists to bound. Idle-cull keys on `last_gpu_activity_at` alone; see
+[contracts/sessions-api.md](./contracts/sessions-api.md).
 
 ## Runtime state (host agent, in-process — not persisted)
 
@@ -121,18 +137,24 @@ jobs are therefore recovered explicitly rather than swept:
 - `residents: model_key → { state: loading|resident|draining|evicting|rolling_back, vram_accounted_bytes, active_requests, last_used_at }`
   — `rolling_back` is the record-intent state of the split rollback; a model in any transient state
   (`draining`/`evicting`/`rolling_back`) is **not** eligible as a fresh-load target or an eviction victim.
-- `reservations: op_id → { model_key, est_bytes, generation, materialized }`
+- `reservations: op_id → { model_key, est_bytes, generation, materialized, waiters }`
 - `active_requests` is a **claim** count with a mandatory balanced release — see
   [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Request claims.
+- `waiters` is the registry of `AwaitLoad` joiners a single-flight load owns. Registration,
+  deregistration, and claim assignment are all under the state lock, so the commit's count-then-assign is
+  indivisible and a waiter that has given up cannot still be handed a claim. Every load-owning exit —
+  commit, rollback, failure — disposes of its joiners; see §Load waiters.
 - `exclusive_job: None | {job_id}`  ·  `generation` token per model_key
 - `usable_capacity = min(configured_budget, NVML_total − safety_reserve)`
-- **Four invariants** (assert-tested; authoritative text in
+- **Five invariants** (assert-tested; authoritative text in
   [contracts/admission-scheduler.md](./contracts/admission-scheduler.md)):
   (1) `Σ residents.vram_accounted + Σ reservations ≤ usable_capacity`;
   (2) each incoming load `≤ live_free − unmaterialized − safety_headroom` (the v1 `Σ ≤ live_free`
   double-count is removed, and concurrent not-yet-visible loads are deducted);
   (3) no reservation is backed by a victim still resident;
-  (4) `active_requests` equals the outstanding claim count and is never negative.
+  (4) `active_requests` equals the outstanding claim count and is never negative;
+  (5) every registered `AwaitLoad` waiter reaches exactly one disposition, and no reservation is dropped
+  leaving undisposed joiners behind.
 - `vram_accounted_bytes` is reconciled from a **per-PID** NVML reading, not a device-wide delta — with
   concurrent loads a device-wide delta is not attributable to either operation.
 - The lock guards **state only**, never held across load/unload (ABBA lesson). Empty during any exclusive job.

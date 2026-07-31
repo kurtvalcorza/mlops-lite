@@ -199,19 +199,46 @@ portproxy is zero-risk and already proven on this machine.
 
 ## R9 — Interactive sessions
 
-**Decision**: A session is a special **serving-class lease** with an **idle-cull** (release GPU after N
-minutes of 0% GPU activity) and a hard **TTL**. Under co-residency it occupies budget like any serving tenant
-but, because interactive use is bursty and unpredictable, it is **culled aggressively** and is the lowest
-priority to keep resident under contention. Training from a notebook is steered to the **submit-as-job** path
-(FR-022) so the GPU is held only during the run; an optional `%%gpu`/`broker.finetune()` helper wraps job
-submission from a cell. Hosting mechanism (JupyterHub vs a minimal kernel gateway) is chosen at P5 build time;
-the contract is the session lease + idle/TTL, not the notebook UI.
+**Decision — PARTIAL. The admission class is deliberately NOT decided here; it is a P5 gate (T665).**
 
-**Rationale**: Directly implements FR-020/021/022 and the single-GPU guard rails; keeps the greediest shape
-boxed.
+Decided now, because none of it depends on the class:
 
-**Alternatives considered**: sessions holding an exclusive lease (like jobs) — rejected: needlessly blocks
-inference; co-resident-with-cull is friendlier and still bounded.
+- a session is bounded by an **idle-cull** (GPU lease released after N minutes of no GPU activity) and a
+  hard **TTL** — FR-020/021;
+- training from a notebook is steered to the **submit-as-job** path (FR-022) so the GPU is held only for
+  the run; an optional `%%gpu`/`broker.finetune()` helper wraps job submission from a cell;
+- hosting mechanism (JupyterHub vs a minimal kernel gateway) is chosen at P5 build time — the contract is
+  the session lease + idle/TTL, not the notebook UI;
+- whatever the class, a session is the **lowest priority** GPU holder under contention.
+
+**Explicitly open — the admission class itself.** An earlier draft of this decision recorded "a special
+serving-class lease, co-resident and evictable like any other serving tenant." That is withdrawn: it
+contradicts `spec.md`'s own dependency ("whether a session is exclusive, a sandboxed job, or a distinct
+admission class must be decided at P5"), `plan.md`'s P5 ordering, and the T665 gate — all three say the
+class is undecided and gates every other session task. Stating it here anyway would have let an
+implementer satisfy T666 against a classification that the gate exists to produce.
+
+It also would have been substantively wrong to assume. Co-residency accounting (FR-024) rests on a
+**fixed, measurable footprint per resident**: a reservation estimated up front, reconciled to a per-PID
+reading, and thereafter stable. A notebook kernel has no such footprint — a tenant can allocate
+arbitrarily in any cell, at any time, after admission. Treating one as an ordinary evictable co-resident
+therefore either overcommits VRAM (its accounted size stops reflecting reality the moment a cell runs) or
+destroys live tenant state when eviction picks it (a kernel is not restartable the way a serving child
+is). The three candidate classes each answer that differently and are not interchangeable:
+
+| Candidate | Handles the unbounded footprint by | Cost |
+|---|---|---|
+| Exclusive lease (like a job) | giving the session the whole GPU | blocks all inference for the session's life — the reason the earlier draft rejected it |
+| Sandboxed job | running cells as metered jobs | loses interactivity; largely subsumed by FR-022's notebook-as-job path |
+| Distinct admission class | a hard per-session VRAM cap enforced at the CUDA level, re-measured continuously | needs a mechanism that does not exist yet, and likely a constitution amendment |
+
+**Rationale for deferring rather than picking**: the third option is the only one that preserves both
+interactivity and co-residency, and it is precisely the one whose feasibility is unestablished — the same
+shape as R7, where assuming feasibility would have been the error. P5 is the last priority; nothing in
+P1–P4 depends on this, so the decision costs nothing to hold and would cost a redesign to get wrong.
+
+**Alternatives considered**: deciding "serving-class lease" now on the grounds that it is the friendliest
+option — rejected as above: it is the one option the VRAM accounting cannot actually support unmodified.
 
 ---
 
@@ -227,7 +254,8 @@ inference; co-resident-with-cull is friendlier and still bounded.
 | Scheduler policy | R6 — inference lane + jobs FIFO lane + owner override |
 | Job isolation | R7 — spike complete: gVisor/Kata infeasible on WSL2; P2 gated on a native-Linux GPU host + runtime constitution amendment (the earlier "documented fallback" was rejected as unsound) |
 | LAN reachability | R8 — mirrored-net (preferred) or portproxy; DHCP-reserved IP |
-| Interactive sessions | R9 — serving-class lease, idle-cull + TTL, notebook-as-job |
+| Interactive sessions | R9 — **PARTIAL**: idle-cull + TTL + notebook-as-job decided; the **admission class is open** and gates P5 (T665) |
 
-No `NEEDS CLARIFICATION` markers remain. One **flagged risk**: R7 sandbox GPU passthrough on WSL — spiked in
-Phase 1 before P2 job execution is built.
+No `NEEDS CLARIFICATION` markers remain in P1–P4. Two **open items**, both gating a low-priority phase and
+neither blocking P1: R7 sandbox GPU passthrough — spiked, infeasible on WSL2, P2 gated on a native-Linux
+host; and R9's session admission class — gates P5 only (T665).
