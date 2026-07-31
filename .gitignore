@@ -12,3 +12,6 @@ __pycache__/
 
 # 020 US2 (R6): golden request/response sets are per-machine session artifacts, never fixtures.
 tests/goldens/
+
+# spec-kit extension download cache is a local artifact, not project state.
+.specify/extensions/.cache/
