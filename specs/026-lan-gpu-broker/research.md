@@ -61,9 +61,16 @@ agent's existing `auth.py` (agent↔gateway trust) is unchanged; tenant identity
 **Rationale**: Matches the LAN-only, key-based model (FR-002/003/004); keeps the agent's internal trust
 boundary intact; no external IdP needed on a LAN.
 
-**Alternatives considered**: mTLS per tenant — rejected: heavier cert management for a home LAN; keys are
-sufficient and TLS is an optional transport nicety (assumptions). Reusing tailnet identity — out of scope
-(LAN-only decision).
+**TLS is MANDATORY for multi-tenant deployments** (FR-002a, T626) — not the "optional transport nicety"
+this decision originally called it. A bearer key is a *reusable* credential replayed on every request:
+over plaintext HTTP any device on the LAN can capture one and impersonate that tenant indefinitely. A
+shared LAN is precisely a network with observers you do not control — that is the threat this feature
+introduces by opening the GPU to independent tenants. Plaintext `http://` is acceptable **only** for the
+single-owner localhost deployment, where there is no second tenant to impersonate and no LAN hop.
+Documented examples MUST use `https://` wherever a key is sent (see [user-guide.md](./user-guide.md)).
+
+**Alternatives considered**: mTLS per tenant — rejected: heavier cert management for a home LAN; bearer
+keys **over TLS** are sufficient. Reusing tailnet identity — out of scope (LAN-only decision).
 
 ---
 

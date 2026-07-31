@@ -57,12 +57,20 @@ here on completion; a GPU op is admitted only if its reservation can be written;
 |---|---|---|
 | `op_id` | text PK | request id / job id (idempotency key) |
 | `tenant_id` | uuid FK→tenant | |
+| `window_start` | timestamptz | **the window this reservation is charged against** — see rule below |
 | `est_gpu_seconds` | numeric | estimated/max charge held against quota before work |
 | `state` | enum(`reserved`,`settled`,`released`) | settled → a `usage_ledger` row written; released → unused |
 | `created_at` / `settled_at` | timestamptz | |
 
 **Rule**: reserve (atomic, rejects if it would exceed the window budget) → do work → settle actual to
 `usage_ledger` + release remainder. Durable settlement via outbox/WAL if the store is briefly unavailable.
+
+**Window binding.** `window_start` is stamped at *reserve* time and reserve/settle/release all charge
+**that** window — never the window in force at completion. A queued job reserved near a boundary can
+finish after the reset; without the stored window its authorization is checked against the old window
+while its ledger row lands in the new one, and the tenant can meanwhile reserve the new window's full
+budget before the old job settles — overshooting it. Consumption for a window is therefore derived
+from reservations and ledger rows **bearing that `window_start`**, not from completion timestamps.
 
 ### job
 | Field | Type | Notes |
@@ -81,6 +89,20 @@ here on completion; a GPU op is admitted only if its reservation can be written;
 **State transitions**: `queued → running → (succeeded|failed)`; `queued → cancelled`;
 `running → cancelled` (tenant/owner). `running` is never forced to `queued` (no preemption).
 
+**Restart recovery (FR-025).** Persisting the lane is not by itself enough for FIFO to survive a
+restart: the existing host-agent startup path (`hostagent/journal.py`) atomically rewrites **every**
+`queued` and `running` job to `interrupted`, which would silently empty the lane on every boot. Broker
+jobs are therefore recovered explicitly rather than swept:
+
+- `queued` jobs **stay `queued`, in their original `queue_pos` order** — they never occupied the GPU,
+  so there is nothing to reconcile.
+- The single formerly-`running` job is resolved to a terminal state (`failed`, or `interrupted` if the
+  enum is extended to carry it) — never silently re-queued, since its sandbox is gone and re-running it
+  is the tenant's decision, not the broker's.
+- Its `usage_reservation` is **settled to elapsed GPU-seconds and the remainder released** against its
+  stored `window_start`. Left `reserved`, it would hold quota against the tenant forever.
+- `exclusive_job` and the resident set start empty; VRAM accounting is rebuilt from NVML, not restored.
+
 ### session
 | Field | Type | Notes |
 |---|---|---|
@@ -96,12 +118,23 @@ here on completion; a GPU op is admitted only if its reservation can be written;
 ## Runtime state (host agent, in-process — not persisted)
 
 ### GPU coordinator state  *(state machine — corrected per Codex review)*
-- `residents: model_key → { state: loading|resident|draining|evicting, vram_accounted_bytes, active_requests, last_used_at }`
-- `reservations: op_id → { model_key, est_bytes, generation }`
+- `residents: model_key → { state: loading|resident|draining|evicting|rolling_back, vram_accounted_bytes, active_requests, last_used_at }`
+  — `rolling_back` is the record-intent state of the split rollback; a model in any transient state
+  (`draining`/`evicting`/`rolling_back`) is **not** eligible as a fresh-load target or an eviction victim.
+- `reservations: op_id → { model_key, est_bytes, generation, materialized }`
+- `active_requests` is a **claim** count with a mandatory balanced release — see
+  [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Request claims.
 - `exclusive_job: None | {job_id}`  ·  `generation` token per model_key
 - `usable_capacity = min(configured_budget, NVML_total − safety_reserve)`
-- **Two invariants** (assert-tested): `Σ residents.vram_accounted + Σ reservations ≤ usable_capacity` **and**
-  each incoming load `≤ live_free − safety_headroom` (the v1 `Σ ≤ live_free` double-count is removed).
+- **Four invariants** (assert-tested; authoritative text in
+  [contracts/admission-scheduler.md](./contracts/admission-scheduler.md)):
+  (1) `Σ residents.vram_accounted + Σ reservations ≤ usable_capacity`;
+  (2) each incoming load `≤ live_free − unmaterialized − safety_headroom` (the v1 `Σ ≤ live_free`
+  double-count is removed, and concurrent not-yet-visible loads are deducted);
+  (3) no reservation is backed by a victim still resident;
+  (4) `active_requests` equals the outstanding claim count and is never negative.
+- `vram_accounted_bytes` is reconciled from a **per-PID** NVML reading, not a device-wide delta — with
+  concurrent loads a device-wide delta is not attributable to either operation.
 - The lock guards **state only**, never held across load/unload (ABBA lesson). Empty during any exclusive job.
 - Identity = model instance (shared across tenants), not tenant.
 

@@ -74,9 +74,13 @@ to the **LAN interface** (not just localhost) reachable by LAN peers; console on
 ms overhead); ≥5 concurrent tenants interleave on one resident child without dropped requests; a queued job
 starts within seconds of the GPU freeing; co-residency admission decisions are O(resident set).
 
-**Constraints**: Principle II amended (v1.6.0) — resident serving tenants' combined VRAM ≤ live free VRAM;
-jobs exclusive + never preempted; admission stays a single race-free critical section. LAN-only (no public
-route). Idle control-plane footprint ≤ ~3 GB (Principle III) — models load on demand; sandbox runtime is
+**Constraints**: Principle II amended (v1.6.1) — **two distinct bounds**: the accounted set
+(`Σ residents + Σ reservations`) stays within `usable_capacity`, and each *incoming* load fits
+`live_free − unmaterialized − safety_headroom`. The v1 wording ("combined VRAM ≤ live free VRAM")
+double-counted: live free already excludes residents, so 6 GiB resident on a 10 GiB usable device
+leaves 4 GiB free and the old constraint would declare a perfectly valid state invalid, forcing
+needless eviction. Jobs exclusive + never preempted; admission decides under one race-free critical
+section but **never holds it across load/unload**. LAN-only (no public route). Idle control-plane footprint ≤ ~3 GB (Principle III) — models load on demand; sandbox runtime is
 job-time only. Requirement IDs FR-001..026, SC-001..012.
 
 **Scale/Scope**: a handful of LAN tenants (people + a few services/devices); one GPU; a small model zoo

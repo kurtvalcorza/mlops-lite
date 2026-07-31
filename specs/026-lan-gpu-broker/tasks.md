@@ -40,7 +40,12 @@ are ready to build.
 - [ ] **T632** `[US1]` Single-resident-model serving path (no co-residency yet), preserving current behaviour. Check: existing inference integration tests pass unchanged.
 - [ ] **T633** `[US1]` `[P]` Refuse unauthenticated and cross-tenant access on every route. Check: a tenant's key cannot read another tenant's usage or keys (IDOR probe suite).
 
-**P1 exit**: SC-001, SC-002, SC-011 demonstrable; US1 Independent Test passes.
+**P1 exit**: SC-001, SC-002, SC-003 demonstrable; US1 Independent Test passes.
+
+> SC-011 (hardened job sandbox) is **not** a P1 exit criterion. P1 contains no job implementation, and
+> SC-011 is the arbitrary-job isolation outcome the spike proved infeasible on WSL2 — it is gated on the
+> P2 migration to a native-Linux GPU host. Requiring it here made P1 unable to satisfy its own exit
+> despite being fully deliverable. **SC-011 moves to the P2 exit**, alongside Drill 2b.
 
 ---
 
@@ -51,18 +56,20 @@ review. Read that contract before starting — the ordering constraints below ar
 
 - [ ] **T634** Replace single-slot `admission.py` with the coordinator state machine (`residents` map with `loading|resident|draining|evicting|rolling_back`, `exclusive_job`, `job_barrier`, `reservations` with `materialized`, per-`model_key` `generation`). Check: T622's characterization tests still pass or their intentional deltas are documented.
 - [ ] **T635** Implement stage 1 admission **under lock with no I/O**, computing `accounted`, `unmaterialized`, and `effective_free = live_free − unmaterialized`. Check: a static assertion (or lint) proves no lifecycle call is reachable inside the lock.
-- [ ] **T636** Implement the **evict-then-recompute** loop: when either bound fails, select victims, mark `draining`, release the lock, complete eviction, then **re-derive both bounds** on the next bounded attempt. Check: a reservation is never recorded while a victim is still resident and accounted (assert on invariant 3).
+- [ ] **T636** Implement the **evict-then-recompute** loop: when either bound fails, select victims, mark `draining`, release the lock, complete eviction, then **re-derive both bounds** on the next bounded attempt. `select_victims` MUST consider only residents in state `resident` — never one already `draining`/`evicting`/`rolling_back` for another operation. Check: a reservation is never recorded while a victim is still resident and accounted (invariant 3); and two sequential admissions cannot both select the same victim and race two `unload()`s against it.
 - [ ] **T637** Implement the **live-free deduction** of unmaterialized reservations. Check: a test with two concurrent admissions, each individually fitting live-free but jointly exceeding it, grants exactly one.
-- [ ] **T638** Implement stage 3 commit and the **split rollback** — record `rolling_back` intent under the lock, `unload()` **outside** it, reacquire only to finalize and bump `generation`. Check: a deadlock-detection test that would trip on an unload-inside-lock implementation passes.
+- [ ] **T638** Implement stage 3 commit and the **split rollback** — record `rolling_back` intent under the lock, `unload()` **outside** it, reacquire only to finalize and bump `generation`. The drift check MUST retain **all other outstanding reservations** (`Σ accounted + real_bytes + Σ other reservations`), not just this load's real bytes, or it can commit a load that breaks invariant 1. Check: a deadlock-detection test that would trip on an unload-inside-lock implementation passes; and a commit is refused when this load fits alone but breaches the budget together with a concurrent reservation.
+      Three further stage-3 corrections are tracked as **T674–T676** (Phase 8) — they belong to this
+      phase in execution order but carry later IDs to keep task IDs strictly increasing.
 - [ ] **T639** Implement `evict()` with a **bounded** drain: `draining` → wait `active_requests == 0` up to `drain_timeout` → `evicting` → unload → verify NVML free rose. On timeout revert the victim to `resident` and return `EvictFailed`. Check: eviction never interrupts an in-flight request, and a stuck victim does not wedge the coordinator.
 - [ ] **T640** Implement caller backoff on `EvictFailed`: consume an attempt, exponential jittered backoff capped per config, re-enter stage 1; refuse `gpu_busy` with `Retry-After` when attempts or deadline are exhausted. Check: no admission path waits unbounded on another tenant's request.
 - [ ] **T641** Implement request **coalescing** for a `loading` model (`AwaitLoad`) so concurrent requests for the same model never double-load. Check: N simultaneous first-requests for one model produce exactly one load.
-- [ ] **T642** Implement `admit_job()` with the **`job_barrier` set before draining**, and assert `residents`/`reservations` empty under the lock before setting `exclusive_job`. Check: a serving admission racing a job start cannot become co-resident with the job.
-- [ ] **T643** Assert-test all three coordinator invariants continuously in CI, not just at admission. Check: randomized concurrent admit/evict/job workload holds all three.
-- [ ] **T644** `[P]` Reconcile estimates to the **real post-load delta**, rolling back when drift breaks the budget bound. Check: a deliberately under-estimating model triggers rollback rather than budget violation.
+- [ ] **T642** Implement `admit_job()` with the **`job_barrier` set before draining**, and assert `residents`/`reservations` empty under the lock before setting `exclusive_job`. It MUST first return `Wait(retry_after)` when an `exclusive_job` or another `job_barrier` owner already exists — never overwrite a live claim. Check: a serving admission racing a job start cannot become co-resident with the job; and of two jobs admitted against an already-empty serving set, exactly one runs while the other waits. **Blocked on the two OPEN design decisions** recorded in [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Jobs (drain convergence; in-flight-reservation TOCTOU) — do not implement the drain until they are closed.
+- [ ] **T643** Assert-test all **four** coordinator invariants continuously in CI, not just at admission. Check: randomized concurrent admit/evict/job workload holds all four, including the claim-count invariant (4).
+- [ ] **T644** `[P]` Reconcile estimates to the **real** measured size via a **per-PID** NVML reading (`used_by_pid(child.pid)`) taken under `load_gate`, not a device-wide free-memory delta — with concurrent loads a device-wide delta is unattributable and can double-account one model while under-accounting another. Roll back when drift breaks the budget bound. Check: a deliberately under-estimating model triggers rollback rather than budget violation; and two models loading concurrently are each accounted their own size.
 - [ ] **T645** Enable **bounded co-residency** on the serving path behind the corrected bounds. Check: two small models serve concurrently; a third that would breach either bound is refused or triggers eviction.
 
-**P3 exit**: SC-006, SC-010 demonstrable; the three invariants hold under concurrency.
+**P3 exit**: SC-006, SC-010 demonstrable; the four invariants hold under concurrency.
 
 ---
 
@@ -104,6 +111,10 @@ NOT ship on WSL2 under a weaker rootless-namespace posture presented as complian
 - [ ] **T663** `[US2]` Per-job GPU-seconds reserved and settled through the same reserve→settle path as inference. Check: each job's metered seconds reconcile against wall-clock lease duration within tolerance.
 - [ ] **T664** `[US2]` Verify the US2 Independent Test: two tenants' jobs run in order, artifacts produced, **at no point are two GPU tenants resident**, and both jobs are metered.
 
+**P2 exit**: SC-011 demonstrable via Drill 2b on the native-Linux host (moved here from the P1 exit,
+where it was unsatisfiable — P1 ships no job code), plus US2's Independent Test. This exit is reachable
+only once all three gate conditions above are met.
+
 ---
 
 ## Phase 6 — P5: interactive sessions [US5] — **GATED, DO NOT START**
@@ -129,13 +140,27 @@ serving nor the job model cleanly covers. Decide before building.
 
 ---
 
+## Phase 8 — Round-3 review corrections
+
+Findings from the PR #74 re-review that have no home in an existing task. **Execution order follows the
+phase noted on each**, not the ID — IDs are late only because task IDs must be strictly increasing.
+
+- [ ] **T674** `[US1]` *(Phase 2)* Implement the **load-failure** path: on spawn error, readiness timeout, OOM, or missing model, drop the reservation and the `loading` entry under the lock (guarded by `generation`), unload any partial child **outside** the lock, and fail every `AwaitLoad` waiter with the same outcome. Check: a model whose load always fails does not permanently reserve capacity, and a later request for it attempts a fresh load rather than awaiting a load that no longer exists.
+- [ ] **T675** `[US1]` *(Phase 2)* Implement the **transient-state branch** (`AwaitTransient`): a request whose `model_key` is `draining`, `evicting`, or `rolling_back` awaits the owning operation instead of falling through to a fresh load. Check: a request arriving mid-rollback does not create a competing `loading` entry that the rollback finalizer then deletes.
+- [ ] **T676** `[US1]` *(Phase 2)* Distinguish **transient contention from a genuinely oversized model**: `413 model_too_large` only when the estimate exceeds `usable_capacity − safety_headroom`; otherwise retryable `gpu_busy` with `Retry-After`. Check: a model that fits alone but is blocked by another tenant's outstanding reservation gets a retryable answer, not a permanent 413.
+- [ ] **T677** `[US1]` *(Phase 2)* Implement the **request-claim lifecycle**: `Share` increments under the observing critical section; `Grant` and every `AwaitLoad` joiner increment in stage 3's commit section atomically with `state = resident`; release is `finally`-style on every terminal path (success, error, disconnect, deadline), exactly once, updating `last_used_at`. Check: a freshly loaded model is never observed idle while its triggering request runs (an eviction racing a cold `Grant` cannot unload it); and a randomized request workload leaves `active_requests == 0` with no model left permanently un-evictable.
+- [ ] **T678** `[US3]` *(Phase 1)* Bind every `usage_reservation` to its **`window_start`** at reserve time, and charge reserve/settle/release against that stored window rather than the window in force at completion. Check: a job reserved just before a window boundary and completing after it is charged to the *old* window, and cannot be double-spent against the new one's budget.
+- [ ] **T679** `[US2]` *(Phase 5, gated)* Release or settle the reservation on **job cancellation**, atomically with the state change: `queued → cancelled` releases in full; `running → cancelled` settles elapsed GPU-seconds and releases the remainder. Idempotent under repeated cancel. Check: cancelling jobs in a loop does not progressively exhaust a tenant's quota.
+- [ ] **T680** `[US2]` *(Phase 3)* Implement **restart recovery** for the persisted jobs lane: `queued` jobs stay `queued` in `queue_pos` order (they must not be swept to `interrupted` by `hostagent/journal.py`'s existing startup rewrite), the formerly-`running` job resolves to a terminal state, and its reservation is settled-to-elapsed with the remainder released. Check: a restart mid-queue preserves FIFO order and leaves no reservation stranded in `reserved`.
+- [ ] **T681** `[US1]` *(Phase 1)* Emit settled usage for **streaming** completions as a terminal `usage` SSE event before `[DONE]`, and do **not** send `X-GPU-Seconds` on streamed responses (headers precede the body, so no settled value exists yet). Check: a streamed completion reports final GPU-seconds without buffering the body; a non-streamed one still carries the header.
+
 ## Traceability
 
 | Story | Priority | Tasks |
 |---|---|---|
-| US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649 |
-| US2 — submit-and-queue jobs | P2 (gated) | T658–T664 |
-| US3 — quotas, ledger, visibility | P3 | T628–T631, T649, T671 |
+| US1 — private multi-tenant inference | P1 | T624–T627, T632–T633, T634–T645 (coordinator), T646–T649, T674–T677, T681 |
+| US2 — submit-and-queue jobs | P2 (gated) | T658–T664, T679–T680 |
+| US3 — quotas, ledger, visibility | P3 | T628–T631, T649, T671, T678 |
 | US4 — additional modalities | P4 | T653–T657 |
 | US5 — interactive sessions | P5 (gated) | T665–T669 |
 

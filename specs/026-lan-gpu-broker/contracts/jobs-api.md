@@ -28,6 +28,17 @@ Streams stdout/stderr (SSE/chunked) while `running`.
 ## POST /jobs/{id}/cancel  *(cancel)*
 `queued → cancelled` immediately; `running → cancelled` stops the sandbox and frees the GPU.
 
+**Cancellation MUST resolve the job's `usage_reservation` in the same atomic step as the state change.**
+GPU-seconds are reserved at *submission*, so a cancelled job never reaches the completion settlement
+path — left alone, its reservation stays `reserved` forever and permanently withholds that much quota
+from the tenant, refusing work they are entitled to run:
+
+- `queued → cancelled`: mark the reservation `released` in full — no GPU time was consumed.
+- `running → cancelled`: **settle elapsed** GPU-seconds to `usage_ledger` and release the remainder,
+  charged against the reservation's stored `window_start` (see [data-model.md](../data-model.md)).
+
+Both are idempotent under a repeated cancel, keyed by the job id.
+
 ## Guarantees
 - A queued job acquires the lease automatically when the serving set can be drained; no manual step (FR-009).
 - A finetune registers a model version with lineage + eval-gates (FR-011); batch produces artifacts.

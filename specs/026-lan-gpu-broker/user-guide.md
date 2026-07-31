@@ -32,10 +32,17 @@ There are two audiences:
 ## 1. Getting access *(traces to US1 · FR-002/003/004)*
 
 1. Ask the **owner** to create a tenant and issue you an **API key**.
-2. You'll receive: the **broker address** (a LAN URL, e.g. `http://gpu.lan:8080` or `http://192.168.0.212:8080`)
-   and your **key**.
+2. You'll receive: the **broker address** (a LAN URL over **HTTPS**, e.g. `https://gpu.lan:8443`) and your
+   **key**. The owner also gives you the broker's **CA certificate** to trust — a home-LAN broker normally
+   uses a private CA, so your client needs it (`curl --cacert broker-ca.pem`, or install it in your OS/
+   Python trust store) rather than disabling verification.
 3. Put the key in an `Authorization: Bearer <key>` header on every request. Requests without a valid key
    are refused and never touch the GPU.
+
+> **Always HTTPS.** Your key is a reusable credential sent on every request — over plaintext `http://`
+> anyone on the LAN can capture it and use your quota as you, indefinitely. Never pass `-k` /
+> `verify=False` to "make it work": that silently discards the protection. Plain `http://` is acceptable
+> only when the owner runs single-tenant on `localhost`, where nothing leaves the machine.
 
 > The broker is **LAN-only** — it is not reachable from the public internet. You must be on the local
 > network (the owner's remote-access setup is separate and not for tenants).
@@ -48,15 +55,18 @@ Inference speaks an **OpenAI-compatible API**, so existing tools/SDKs work by ju
 
 **Chat (LLM):**
 ```bash
-curl http://gpu.lan:8080/v1/chat/completions \
+curl --cacert broker-ca.pem https://gpu.lan:8443/v1/chat/completions \
   -H "Authorization: Bearer $BROKER_KEY" \
   -d '{"model":"qwen","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 **From code (Python, OpenAI SDK):**
 ```python
+import httpx
 from openai import OpenAI
-client = OpenAI(base_url="http://gpu.lan:8080/v1", api_key=BROKER_KEY)
+# Trust the broker's private CA — do NOT set verify=False, which discards the protection entirely.
+client = OpenAI(base_url="https://gpu.lan:8443/v1", api_key=BROKER_KEY,
+                http_client=httpx.Client(verify="broker-ca.pem"))
 client.chat.completions.create(model="qwen", messages=[{"role":"user","content":"Hi"}])
 client.embeddings.create(model="bge", input=["text to embed"])                 # embeddings
 client.audio.transcriptions.create(model="whisper", file=open("clip.wav","rb")) # speech-to-text

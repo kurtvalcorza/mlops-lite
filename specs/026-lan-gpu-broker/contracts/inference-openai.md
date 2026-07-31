@@ -37,4 +37,22 @@ Request `{model, image: <base64|url-on-lan>}` → `classify`: `{labels:[{label,s
 - While an exclusive job runs, inference returns `409 gpu_busy` or queues per policy (FR-025).
 
 ## Metering
-Response headers echo `X-GPU-Seconds` (this request) and `X-Quota-Remaining` (window, GPU-seconds).
+
+**Non-streaming** (`stream:false`): response headers echo `X-GPU-Seconds` (this request, settled) and
+`X-Quota-Remaining` (window, GPU-seconds). The work is complete before headers are written, so both are
+final.
+
+**Streaming** (`stream:true`): headers are flushed *before* the SSE body, and therefore before this
+request's GPU-seconds exist. `X-GPU-Seconds` is consequently **not** sent on streamed responses — filling
+it would mean either buffering the whole completion (defeating streaming) or labelling an estimate as
+settled usage. Final usage arrives as a **terminal SSE event** immediately before `[DONE]`:
+
+```
+event: usage
+data: {"gpu_seconds": 4.13, "quota_remaining": 1205.9, "window_start": "2026-07-31T00:00:00Z"}
+
+data: [DONE]
+```
+
+`X-Quota-Remaining` MAY still be sent on a streamed response as the value **at admission time**, and is
+documented as such — it is a pre-flight hint, not a post-settlement figure.
