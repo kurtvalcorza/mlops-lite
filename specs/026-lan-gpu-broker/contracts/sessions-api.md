@@ -47,7 +47,7 @@ client-supplied liveness.
 Releasing the GPU lease does **not** by itself kill the session: a `released` session keeps its kernel and
 re-acquires a lease on the next GPU cell (`released → active`), subject to admission like any other
 request — so it may be queued or refused, and whatever T665 decides applies. Only TTL expiry and an
-explicit `DELETE` are terminal; see [data-model.md](../data-model.md) §session transitions. This is the
+explicit `DELETE` are terminal; see [data-model.md](../data-model.md) §session. This is the
 point of separating the timers — an idle notebook gives back the GPU without losing the tenant's in-memory
 work, so giving it back is not a decision the tenant has to weigh.
 
