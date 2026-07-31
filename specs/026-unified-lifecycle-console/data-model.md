@@ -94,7 +94,11 @@ interface PlatformJob {
 }
 ```
 
-### Normalization table (FR-392)
+### Normalization table (FR-392 / SC-190)
+
+Every row maps to exactly one normalized state, and each source's native string is preserved
+alongside it — SC-190 requires both halves: total mapping coverage *and* the native state remaining
+inspectable.
 
 | Gateway | Agent | Tracking run | → normalized |
 |---|---|---|---|
@@ -142,11 +146,15 @@ banner. `reconcile` is surfaced but inert in 026 (MVP 3 owns automated reconcili
 ```typescript
 interface PlatformModel {
   id: string; name: string;
+  // FR-385: all five served modalities, plus `unknown` so an unrecognized or missing
+  // task tag renders as unknown rather than being filtered out of the catalog.
   modality: "text-generation" | "image-classification" | "embedding" | "asr" | "tabular" | "unknown";
   loggedModelId?: string; registeredModelName?: string; version?: string;
   aliases: string[]; sourceRunId?: string;
   artifactUri: string; artifactDigest?: string; artifactSizeBytes?: number;
   artifactPresent: boolean;                     // object-store existence, not assumed (FR-384)
+  // FR-402: a version with no logged metric that is not the serving version is
+  // `not-evaluated` — the platform's documented refusal to score it, never an error.
   evaluationState: "passed" | "failed" | "warning" | "not-evaluated" | "incomplete";
   deploymentIds: string[];
   lineage?: { baseModel?: string; baseResolvable: boolean; parentRunId?: string };
@@ -245,6 +253,7 @@ interface Endpoint {
   id: string; modality: string;
   desired: { modelName?: string; version?: string; alias?: string; activationState?: string };
   resident: { modelIdentity?: string; registryVersion?: string; engineId?: string; host?: string };
+  // FR-415: the complete endpoint status vocabulary.
   status: "unconfigured" | "pending" | "starting" | "healthy" | "degraded"
         | "draining" | "stopped" | "failed" | "unknown";
   traffic?: { requestCount?: number; errorRate?: number; latencyP95Ms?: number; windowSeconds: number };
@@ -310,6 +319,9 @@ interface EvaluationResult {
   id: string; modelName: string; version: string; modality: string;
   datasetRef?: string; benchmarkName?: string; benchmarkDigest?: string;
   metrics: { name: string; value: number; direction: "higher-better" | "lower-better" }[];
+  // FR-400 / SC-191: a failure MUST carry the rule that produced it, the observed value,
+  // and the incumbent it was compared against — all reachable without leaving the
+  // evaluation view. FR-401: an override travels with its recorded reason.
   gate: {
     outcome: "passed" | "failed" | "warning" | "not-evaluated" | "incomplete";
     failedRule?: GateRule; observedValue?: number;
@@ -369,3 +381,163 @@ Machine-readable, driving both `PlatformHealth.services[].required` and the resi
 | object store | degraded | everything else | artifact previews, downloads, dataset bytes |
 | metrics | degraded | current direct state everywhere | historical charts, alert state |
 | dashboard embed | healthy | everything | embedded panel → external link |
+
+---
+
+## 12. Datasets and artifacts (US8)
+
+```typescript
+interface DatasetVersion {
+  name: string; version: string;
+  contentDigest: string;                 // content-addressed identity — the platform's own scheme
+  sizeBytes: number; objectCount: number; format?: string;
+  schemaStatus: "known" | "unknown" | "mismatch";
+  validation: {
+    status: "passed" | "failed" | "warning" | "not-validated";
+    checks?: { name: string; outcome: "pass" | "fail" | "warn"; detail?: string }[];
+    validatedAt?: string;
+  };
+  createdAt: string;
+  referencedBy: { runIds: string[]; modelVersions: string[] };   // FR-419
+}
+
+interface Artifact {
+  uri: string;                           // logical reference — NEVER a presigned or credentialed URL
+  kind: "model" | "dataset" | "eval-result" | "capture" | "other";
+  sizeBytes?: number;
+  digest?: string;
+  integrity: "verified" | "verification-failed" | "not-verified" | "verification-unavailable";
+  present: boolean;                      // actual existence check, not inferred from the URI
+  observedAt: string;
+}
+```
+
+**Integrity rule (FR-420)** — the four states are genuinely distinct and must not collapse:
+
+- `verified` — a recorded checksum exists and was recomputed to match.
+- `verification-failed` — a recorded checksum exists and did **not** match. This is a data-integrity
+  incident and must surface in the attention panel (FR-373), not sit quietly in a detail view.
+- `not-verified` — a checksum exists but was not recomputed for this response (verification is
+  opt-in per request, because rehashing a multi-gigabyte object on every page render is not viable).
+- `verification-unavailable` — no checksum was ever recorded for this object.
+
+Collapsing the last two into a single "unverified" would conflate *"we did not check"* with *"there
+is nothing to check against"* — materially different facts when an operator is deciding whether to
+trust an artifact.
+
+**Access rule (FR-421/422)**: `uri` is a **logical** reference. Byte access always goes through the
+gateway's existing proxied download route, which validates the path against an allowlist of
+permitted prefixes **before** any upstream request. No presigned URL is ever generated — 025 US3
+removed presigned URLs precisely because they were signed against the internal store endpoint
+(unresolvable from a browser) and constituted a leaked object-store capability. No credential
+reaches the browser under any circumstance.
+
+---
+
+## 13. Observability and administration (US9)
+
+```typescript
+interface MetricPanel {
+  key: "request-rate" | "error-rate" | "latency-percentiles" | "active-jobs" | "queue-depth"
+     | "gpu-utilization" | "gpu-vram" | "engine-restarts"
+     | "tracking-health" | "objectstore-health" | "database-health";        // FR-423
+  series: { label: string; points: [number, number][] }[];
+  unit?: string;
+  windowSeconds: number;
+  observedAt: string;
+  degraded?: boolean;                    // metrics unreachable → no points, NOT zero points
+}
+
+interface AlertRule {
+  name: string; severity?: string; expression?: string;
+  state: "inactive" | "pending" | "firing" | "unknown";                     // FR-424
+  activeSince?: string;
+  runbookUrl?: string;                   // the 023 US7 runbooks in monitoring/README.md
+  // NOTE: there is deliberately NO delivery/notification field. See rule below.
+}
+
+interface DashboardEmbed {
+  id: string; title: string;
+  embedUrl?: string;                     // omitted when embedding is unavailable
+  externalUrl: string;                   // ALWAYS present — the fallback target
+  embeddable: boolean;                   // resolved server-side from frame policy
+  reason?: string;                       // why embedding is unavailable, when it is
+}
+
+interface AdminInfo {                                                       // FR-426
+  storage: { bucket: string; objectCount?: number; sizeBytes?: number; reachable: boolean }[];
+  database: {
+    schemaVersion: string;
+    migrations: { id: string; appliedAt?: string;
+                  checksumState: "ok" | "mismatch" | "unapplied" }[];
+    reachable: boolean;
+  };
+  integrations: { name: string; endpoint?: string; reachable: boolean; version?: string }[];
+  apiAccess: { keyConfigured: boolean; failClosed: boolean };  // never the key itself
+  system: { platformVersion?: string; constitutionVersion?: string; host?: string;
+            uptimeSeconds?: number };
+}
+```
+
+**Alert honesty rule (FR-424)**: `AlertRule` carries **no** delivery, notification, recipient, or
+acknowledgement field, and none may be added. The platform has no Alertmanager and no notification
+channel (023 US7 shipped rules deliberately without one). A delivery field would invite the
+interface to imply someone was told — the same fake-semantics failure class as an admission queue
+(research R1) or a persistent orchestration control plane (FR-397). The surface states rule state
+only, and says plainly that no notification was sent.
+
+**Embed rule (FR-425)**: `embeddable` is resolved **server-side** from the configured frame policy,
+not discovered by the browser failing to render a frame. `externalUrl` is always populated so the
+fallback is structural rather than an error path. The embed carries no administrative controls and
+is explicitly labelled as an external dashboard — the platform's dashboard tool runs anonymous and
+read-only with a CSP scoped to the console origin (004 US1), and the console must not present it as
+a native surface.
+
+**Credential rule (FR-426)**: `apiAccess` reports *whether* a key is configured and whether the
+gateway is fail-closed. It never returns key material, and `integrations[].endpoint` is a host
+identity, never a credentialed URL.
+
+---
+
+## 14. Console shell (US1)
+
+```typescript
+interface NavArea {
+  id: "overview" | "models" | "training" | "evaluations" | "deployments"
+    | "inference" | "datasets" | "runtime" | "observability" | "administration";
+  label: string;
+  secondary: { id: string; label: string; href: string }[];
+  badge?: { kind: "count" | "state"; value: number | string; severity?: "info" | "warn" | "error" };
+}
+
+interface HeaderModel {                                                     // FR-367
+  sidebarCollapsed: boolean;
+  productName: string;
+  mode: "offline" | "live" | "hardware";       // FR-429 — from reachability (R14)
+  search: { enabled: boolean };                // FR-368
+  health: PlatformHealth;                      // FR-369
+  activeJobCount: number | null;               // null = unknown, never 0 on degradation
+  notifications: { unread: number; items: AttentionItem[] };
+  operator: { authenticated: boolean };        // single operator — no account model (R13)
+}
+
+interface AttentionItem {                                                   // FR-373
+  id: string;
+  kind: "engine-crash" | "gpu-memory-pressure" | "failed-training-run"
+      | "evaluation-gate-failure" | "drift-significant" | "unlabeled-backlog"
+      | "version-unsigned" | "missing-artifact" | "stale-agent-heartbeat";
+  severity: "critical" | "warning" | "info";
+  subject: string; detail: string; href: string; observedAt: string;
+}
+```
+
+**Naming rule (FR-365)**: exactly ten `NavArea.id` values, and every one is a **workflow noun**, not
+a backend. No navigation item — primary or secondary — may be named after the tracking server, the
+database, the object store, the metrics store, the dashboard tool, the gateway, or the host agent.
+`Runtime` and `Administration` are the two that could drift toward vendor naming and must not:
+`Runtime` is where GPU *work* is inspected, and `Administration` groups platform-level settings
+regardless of which service backs each one.
+
+**Degradation rule**: `activeJobCount` is `number | null`. On gateway or agent loss it is `null`,
+rendered as `unknown` — **never** `0`, which would read as "nothing is running" at exactly the
+moment the console cannot tell (FR-430, and the reason SC-195 exists).

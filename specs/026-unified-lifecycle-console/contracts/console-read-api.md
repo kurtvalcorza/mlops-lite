@@ -136,6 +136,7 @@ control is never rendered.
 | `GET /console/metrics/summary` | Curated native panels (FR-423). |
 | `GET /console/metrics/series` | Bounded range queries for charts. |
 | `GET /console/alerts` | Rule state ∈ inactive, pending, firing, unknown (FR-424). |
+| `GET /console/dashboards` | `DashboardEmbed[]` — `embeddable` + `externalUrl` resolved server-side (FR-425). |
 
 `GET /console/alerts` MUST NOT include any notification/delivery field. There is no Alertmanager;
 a delivery field would invite the console to claim something the platform cannot do (FR-424).
@@ -143,12 +144,54 @@ a delivery field would invite the console to claim something the platform cannot
 `GET /console/metrics/series` bounds the time range and step server-side, so a console panel cannot
 issue an unbounded query against the metrics store.
 
+`GET /console/dashboards` decides embeddability **server-side** from the configured frame policy, so
+the fallback is a designed state rather than the browser silently failing to render a frame.
+`externalUrl` is always populated (FR-425).
+
+---
+
+## Datasets and artifacts
+
+| Route | Notes |
+|---|---|
+| `GET /console/datasets` | `DatasetVersion[]` — digest, size, object count, format, schema and validation status, referencing runs and models (FR-419). Paged. |
+| `GET /console/datasets/{name}/{version}` | Detail + full validation check list. |
+| `GET /console/artifacts` | `Artifact[]` for a model version or run — kind, size, digest, integrity, presence (FR-420). |
+
+**Integrity is opt-in per request.** These routes return `integrity: "not-verified"` by default and
+recompute only when asked (`?verify=true`), because rehashing multi-gigabyte objects on every page
+render is not viable on this hardware. The distinction between `not-verified` ("we did not check")
+and `verification-unavailable` ("no checksum was ever recorded") is preserved — see
+[data-model.md §12](../data-model.md).
+
+**Bytes do not flow through these routes.** Downloads continue to use the existing gateway-proxied
+dataset download path, which validates against permitted prefixes before any upstream call
+(FR-421/422). No presigned URL is minted and no object-store credential reaches the browser.
+
+---
+
+## Administration
+
+| Route | Notes |
+|---|---|
+| `GET /console/admin/storage` | Buckets, object counts, sizes, reachability (FR-426). |
+| `GET /console/admin/database` | Schema version + applied migrations with checksum state (FR-426). |
+| `GET /console/admin/integrations` | Backing services, endpoints, reachability, versions. |
+| `GET /console/admin/system` | Platform/constitution version, host, uptime. |
+
+**These routes never return credential material.** `apiAccess` reports only whether a key is
+configured and whether the gateway is fail-closed; `integrations[].endpoint` is a host identity, not
+a credentialed URL. The migration view reads the existing checksummed ledger (023 US4) — it is
+strictly read-only and never triggers an apply.
+
 ---
 
 ## Cross-cutting rules
 
-1. **Every projection names its sources and their observation times.** Data age (FR-430) and conflict
-   detection (FR-427) are impossible without this, and retrofitting it is expensive.
+1. **Every projection names its sources and their observation times.** Data age (FR-430 / SC-195) and
+   conflict detection (FR-427) are impossible without this, and retrofitting it is expensive. The
+   envelope is what makes SC-195 verifiable: a surface cannot render an age it was never sent, and a
+   `null` under `degraded` is unambiguously *unknown* rather than *zero*.
 2. **Degradation is per-projection, never global.** One unreachable source degrades the fields it
    owns; the rest of the response is still served.
 3. **Paging is mandatory** on journal, predictions, captures, traces, and catalog — unbounded reads

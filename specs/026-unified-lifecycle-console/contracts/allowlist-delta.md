@@ -81,12 +81,25 @@ console/endpoints
 console/endpoints/:id
 ```
 
+**Datasets and artifacts** (US8)
+
+```
+console/datasets
+console/datasets/:name/:version
+console/artifacts
+```
+
 **Observability / Administration** (US9)
 
 ```
 console/metrics/summary
 console/metrics/series
 console/alerts
+console/dashboards
+console/admin/storage
+console/admin/database
+console/admin/integrations
+console/admin/system
 ```
 
 **Shell** (US1/US10)

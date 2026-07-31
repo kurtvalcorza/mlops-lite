@@ -137,7 +137,64 @@ process directly. Open the job.
 observation times and the last consistent timestamp, and actions to refresh and inspect the journal
 (FR-427). A silently-chosen single answer is a failure.
 
-### 2.7 Polling discipline (SC-196)
+### 2.7 Resident footprint (SC-199 — Principle III)
+
+The constitution caps idle infrastructure at ~3 GB RAM. 026 adds no resident service, so the console
+must not move this number — but "must not" is only a claim until measured.
+
+```bash
+# idle: stack up, no jobs running, console open on Overview
+docker stats --no-stream                     # per-container MEM USAGE column
+docker stats --no-stream | awk 'NR>1 {print $4, $5}'   # totals input, sum by hand or with awk
+ps -o rss=,comm= -C node | awk '{s+=$1} END {printf "ui(node) RSS: %.0f MB\n", s/1024}'
+```
+
+**Expected**: total idle Compose memory unchanged versus the pre-026 baseline within noise, and the
+console's own Node process comparable to the 021 console. **Record both numbers in the increment's
+runbook** — SC-199 is a constitutional criterion, and an unrecorded measurement is not a pass.
+
+A regression here means a polling or retention defect (the live-fetch layer holding unbounded
+history), not a rendering cost — check `use-live.ts` retention bounds first.
+
+### 2.8 Normalized state and gate evidence (SC-190 / SC-191)
+
+```bash
+curl -s -H "$K" localhost:8080/console/jobs | head -c 600
+```
+
+**Expected (SC-190)**: every row carries a `normalizedState` from the closed vocabulary **and**
+retains `gatewayState` / `agentState` / `trackingRunState` — both halves, not one.
+
+Then open a version that failed its gate:
+
+**Expected (SC-191)**: the failing rule, its threshold, the observed value, and the incumbent
+compared against are all visible **without leaving the evaluation view** (FR-400).
+
+### 2.9 Datasets, artifact integrity, administration (US8/US9)
+
+```bash
+curl -s -H "$K" localhost:8080/console/datasets | head -c 400
+curl -s -H "$K" "localhost:8080/console/artifacts?verify=true" | head -c 400
+curl -s -H "$K" localhost:8080/console/admin/database | head -c 400
+```
+
+**Expected**: datasets show digest, validation status, and referencing runs/models (FR-419);
+artifacts distinguish all four integrity states — in particular `not-verified` ("we did not check")
+must be distinct from `verification-unavailable` ("no checksum was ever recorded"), never collapsed
+(FR-420); the database view lists applied migrations with checksum state and never triggers an apply
+(FR-426).
+
+Alerts must carry **no** delivery field (FR-424):
+
+```bash
+curl -s -H "$K" localhost:8080/console/alerts | grep -iE 'notified|delivered|recipient|acknowledg' \
+  && echo "FAIL: delivery claim present" || echo "ok: no delivery claim"
+```
+
+Dashboard fallback (FR-425): block the embed (or set a restrictive frame policy) and confirm the
+console renders the external-open fallback rather than an empty frame.
+
+### 2.10 Polling discipline (SC-196)
 
 With a live surface open, hide the browser tab; confirm in the network panel that polling **ceases
 entirely** (FR-431), and that on return the surface refreshes before presenting anything as current.
@@ -198,7 +255,7 @@ Force the static-budget path (make the live read fail). Confirm the console labe
 | Layer | Proves | Criteria |
 |---|---|---|
 | Offline | Builds, no new dependency, joins and redirects correct | SC-186, SC-198, SC-200 |
-| Live | Ten areas, degradation, conflicts, payload safety, polling | SC-184/185, SC-189→197, SC-203 |
+| Live | Ten areas, degradation, conflicts, payload safety, polling, footprint | SC-184/185, SC-189→197, SC-199, SC-203 |
 | Hardware | Device truth, admission explanations, compatibility | SC-187, SC-188, SC-201, SC-202 |
 
 **A green offline+live run is not a complete pass.** SC-201 and SC-202 gate on hardware and remain
