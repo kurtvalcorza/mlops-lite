@@ -45,7 +45,8 @@ Once P2 is unblocked on native Linux:
 2. Request a **large** model that doesn't fit → admission evicts idle/LRU serving tenants; if still too big →
    `413 model_too_large`. If the refusal is caused by another tenant's in-flight reservation or an external
    GPU consumer rather than the model's own size, expect a **retryable `gpu_busy`**, not `413`.
-3. Assert (agent logs/metrics) the **two bounds separately** — the single `Σ resident.vram ≤ live_free_vram`
+3. Assert (via `/admin/queue`'s `vram` block, or agent logs/metrics) the **two bounds separately** — the
+   single `Σ resident.vram ≤ live_free_vram`
    assertion this drill used to make was the rejected v1 condition and fails on valid states (live free
    already excludes the residents, so any model over half the device trips it):
    - accounted set: at no instant `Σ residents.vram_accounted + Σ reservations > usable_capacity`;

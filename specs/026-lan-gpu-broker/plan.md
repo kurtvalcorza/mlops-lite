@@ -10,7 +10,7 @@ Turn the platform's existing single-authority GPU host agent into a **multi-tena
 that other people, devices, and services **on the LAN** use directly — for inference, jobs, and interactive
 sessions — with per-tenant API keys, GPU-seconds quotas (recurring windows), a usage ledger, and a
 shape-lane scheduler. The core admission primitive (`hostagent/admission.py`) is generalized from
-one-resident-tenant to **VRAM-budget-bounded co-residency of serving tenants** (constitution v1.6.0), while
+one-resident-tenant to **VRAM-budget-bounded co-residency of serving tenants** (constitution v1.6.1), while
 training/batch jobs stay exclusive and never-preempted.
 
 Technical approach — **reuse the surrounding platform; redesign the GPU control-plane core.** *(Revised after
@@ -26,7 +26,8 @@ gateway, Postgres store, engine children, MLflow, Next.js console) are reused as
    `/v1/embeddings`, `/v1/audio/transcriptions`, and a task-typed CV endpoint, mapping to existing children;
    concurrent tenants interleave against resident children. (R2)
 3. **GPU coordinator + single-authority scheduler (REDESIGN)** — replace single-slot `admission.py` with a
-   coordinator **state machine** (resident set; per-model lifecycle `loading/resident/draining/evicting`;
+   coordinator **state machine** (resident set; per-model lifecycle
+   `loading/resident/draining/evicting/rolling_back`;
    active-request ref-counts; generation-token **reserve → load-outside-lock → commit/rollback**;
    **drain-before-evict**) enforcing the corrected **two-bound VRAM check** (accounted set + reservations ≤
    usable budget, AND each load ≤ live free − headroom, reconciled to the real delta). **One** GPU-ordering
@@ -186,8 +187,10 @@ P2 gated.*
   rule** (accounted ≤ usable budget AND load ≤ live-free − headroom, reconciled) and a **reserve →
   load-outside-lock → commit** protocol so the lock is never held across lifecycle I/O; serving set empty
   during a job; jobs never preempted — all assert-tested. ✅
-- **Development Workflow (runtime)**: ⚠ **P2 GATED** — the job sandbox is a new runtime needing an amendment
-  + a WSL2 feasibility spike before arbitrary-job execution ships. P1/P3/P4 unaffected.
+- **Development Workflow (runtime)**: ⚠ **P2 GATED** — the job sandbox is a new runtime needing an
+  amendment. The WSL2 spike is **complete and negative** (not pending): it proved gVisor/Kata GPU isolation
+  infeasible on this host, so the gate is now the native-Linux migration + a **passing re-run** there +
+  the amendment. P1/P3/P4 unaffected.
 - **III**: no always-resident engine added; control plane lightweight; sandbox is job-time only. ✅
 - **I / IV / V / VI / VII**: unchanged — LAN-only single machine, full lifecycle, swappable OSS, everything
   ledgered (now reserve→settle), phased. ✅
@@ -200,5 +203,16 @@ P2 gated.*
 - **P4** — additional modalities (ASR/CV) + console controls.
 - **P5** — interactive sessions, only after deciding their admission class (exclusive vs sandboxed-job vs another amendment).
 
-Two prerequisites remain before `/speckit-tasks` can encode P2/P5 fully: the **sandbox feasibility spike**
-and its **runtime amendment**. P1/P3/P4 tasks can be generated now.
+[tasks.md](./tasks.md) now encodes all five phases. P2 and P5 are present but **gated**, not deferred —
+they carry their blockers in the task text rather than being left unwritten, so story coverage is complete
+and the sequencing is explicit. Three gates remain open before those phases can be *executed*:
+
+| Gate | Blocks | State |
+|---|---|---|
+| Native-Linux GPU host + a **passing** sandbox re-run | P2 (T658–T664, T679) | Spike done — WSL2 proven infeasible; migration not started |
+| **New-runtime constitution amendment** (gVisor/Kata) | P2 | Not raised |
+| **Session admission class** decision (T665) | P5 (T666–T669, T686) | Open — see [research.md](./research.md) R9 |
+
+Two further **design** decisions gate T642 specifically (the `job_barrier` drain): convergence, and the
+TOCTOU for reservations already past stage 1 when the barrier rises — recorded in
+[contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Jobs. P1/P3/P4 are unblocked.

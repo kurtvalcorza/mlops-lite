@@ -15,7 +15,10 @@ Templates checked:
   - .specify/templates/spec-template.md  — ✅ no change (generic)
   - .specify/templates/tasks-template.md — ✅ no change (generic)
 Memory files:
-  - .specify/memory/hardware-profile.md — ✅ UPDATED (PR #74 review). Principle II points here for the
+  - .specify/memory/hardware-profile.md — ✅ UPDATED 2026-07-26 (PR #74 review), i.e. AFTER the v1.6.1
+    ratification below. This is a dependent-artifact sync, not an amendment: no principle text changed, so
+    the version stays 1.6.1 and "Last Amended" stays 2026-07-19 (it dates the last change to the principles
+    themselves, not to the artifacts they reference). Principle II points here for the
     VRAM budget, so it is a dependent artifact and was missed by the original v1.6.0/v1.6.1 sync: it
     still asserted "Live models in VRAM: exactly 1 at a time," contradicting bounded co-residency.
     Now states the two-bound rule and defines the admission tunables (safety_reserve, safety_headroom,
