@@ -727,8 +727,10 @@ policy and suggestion records.
 
 ## Assumptions
 
-- **Increment numbering**: this is increment 027, continuing the global sequence at FR-362, SC-184,
-  and T618. 025's outstanding hardware task is unrelated and remains open on its own.
+- **Increment numbering**: this is increment 027. FR-362 and SC-184 continue the global sequence after
+  025; task IDs continue after **026**, which took T618–T690, so 027 begins at **T691**. (Both this
+  branch and 026 were cut from `ebcf7e3` and both originally claimed T618; 026 merged first.) 025's
+  outstanding hardware task is unrelated and remains open on its own.
 - **Scope commitment**: 027 delivers MVP 1 — the unified read console — built full-stack, meaning the
   read endpoints it requires are implemented rather than stubbed. MVP 2 (US11) and MVP 3 (US12) are
   specified here for architectural coherence and phase to 028/029 per Principle VII.
