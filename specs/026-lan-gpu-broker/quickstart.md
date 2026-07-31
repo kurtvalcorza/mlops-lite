@@ -27,6 +27,13 @@ in the local zoo; a second LAN device (or a second shell on another host) for co
 5. While A runs, send an inference request → `503 gpu_busy` with `Retry-After` (or queued) — job **not**
    preempted (SC-010).
 6. On A finish, B starts automatically (FR-009); finetune → registered model version appears in MLflow.
+7. **Drain convergence**: with a model *actively serving* (keep a stream of requests in flight), submit a
+   job → the job acquires the GPU once those in-flight requests finish. It must **not** sit until
+   `job_drain_timeout`; a busy resident is drained, not skipped.
+8. **In-flight load vs. the barrier**: start a cold-model request (one that must load) and submit a job
+   immediately after, so the load is in flight when the barrier rises → the load rolls back, the request
+   gets a retryable `503 gpu_busy`, the job starts with an empty serving set, and the retried request
+   succeeds once the job ends. No model is ever resident alongside the job.
 
 ## Drill 2b — Job sandbox isolation (US2 · SC-011) — **NATIVE-LINUX HOST ONLY, GATED**
 > **Do not run this drill on the WSL2 host, and do not substitute weaker isolation to make it pass.**

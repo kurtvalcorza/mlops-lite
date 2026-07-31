@@ -46,9 +46,19 @@ failure path's "fail every waiter with the same outcome"; a waiter that had give
 could still be counted among the joiners at commit and handed a claim it would never release — precisely
 the invariant-4 leak round 3 exists to close.
 
-**Still open — deliberately not resolved here** (they are design decisions, not corrections): the
-`job_barrier` drain-convergence and the TOCTOU for reservations already past stage 1 when the barrier
-rises. See *Jobs (exclusive)* below.
+**Round 5 (owner decision)** closes the two items rounds 2–4 deliberately left open, because they were
+design choices rather than corrections:
+(p) **drain convergence** — the drain marked only *idle* residents while its exit condition was *serving
+set empty*, so a resident busy at that instant was never re-marked and the drain could only ever time out.
+Now **every** resident is marked; the barrier already refuses new admissions, so the counts strictly
+decrease and the one-shot pass converges without a hook or a re-scan;
+(q) **the in-flight-load TOCTOU** — a load already past stage 1 when the barrier rose could commit a new
+resident after the drain saw an empty set. Stage 3's commit now re-checks the barrier and rolls back,
+refusing the request with retryable `gpu_busy`. Together these make the closing `assert residents empty
+and reservations empty` provable rather than hopeful.
+
+**Nothing in this contract is now marked OPEN.** See *Jobs (exclusive)* for both decisions and the
+trade-off each accepts.
 
 ## Why a coordinator, not an extended lease
 Today `admission.py` is structurally **single-slot** (`_holder`, `_swap_target`) and its own comments record
@@ -168,11 +178,12 @@ admit_serving(model_key, est_bytes, deadline):
       return Refuse(load_failed)                # capacity is NOT left reserved
 
   under lock:
+    barred = job_barrier or exclusive_job          # ← a job claimed the GPU while we were loading
     stale  = generation changed since reservation (model evicted meanwhile — see note below)
     others = Σ est_bytes of reservations OTHER than this op        # ← retained, not dropped
     drift  = Σ residents.vram_accounted + real_bytes + others > usable_capacity
     waiters = reservation.waiters                  # ← read in the SAME section that decides, either way
-    if stale or drift:
+    if barred or stale or drift:
         residents[model_key].state = rolling_back  # record INTENT only
         drop reservation
         rollback = true
@@ -184,7 +195,8 @@ admit_serving(model_key, est_bytes, deadline):
   if rollback:                                  # ← unload happens OUTSIDE the lock
     unload(child); verify NVML free rose
     under lock: remove residents[model_key]; bump generation
-    outcome = Retry if stale
+    outcome = Refuse(gpu_busy, retry_after) if barred   # a job owns the GPU; transient
+              else Retry if stale
               else Refuse(model_too_large if real_bytes > usable_capacity - safety_headroom
                           else gpu_busy)        # drift caused by contention is retryable
     dispose(waiters, outcome)                   # ← rollback owns its joiners exactly as the failure path does
@@ -213,16 +225,19 @@ premise that "an eviction already reclaimed the slot":
   by a few milliseconds only makes admission more conservative. The reverse — releasing capacity an
   operation might still be holding — is what invariants 1 and 2 exist to prevent.
 
-**Why `stale` is retained even though nothing currently sets it.** As the contract stands, no path bumps
-the generation of a model still in `loading`: `select_victims` targets `state == resident` only, and
-`admit_job`'s drain marks only *idle residents*. The `stale` branches are therefore **unreachable today —
-deliberately defensive**, kept because every future path that reclaims a loading slot (the barrier-recheck
-option under OPEN 2, an operator force-unload, a crash-recovery sweep) must go through generation bumping
-rather than inventing a second reclamation mechanism. Two consequences worth stating so they are not
-assumed away: the branch is **not** exercised by any current test, and it is **not** the same check as a
-barrier re-check — `job_barrier`/`exclusive_job` are global flags with nothing tying them to a per-model
-`generation`, so resolving OPEN 2 that way means adding a genuinely new condition alongside `stale`/`drift`
-(with the same `dispose(waiters, …)` treatment), not wiring up something that is already half-present.
+**Why `stale` is retained even though nothing currently sets it.** No path bumps the generation of a model
+still in `loading` *on behalf of another operation*: `select_victims` targets `state == resident` only, and
+`admit_job`'s drain likewise touches only entries in state `resident` (see below). The barrier re-check
+does end a loading model's life, but that is the **owning** operation rolling itself back and bumping its
+own generation — not a third party reclaiming the slot underneath it, which is what `stale` detects.
+
+The `stale` branches are therefore **unreachable today — deliberately defensive**, kept because every
+future path that reclaims a loading slot from outside (an operator force-unload, a crash-recovery sweep)
+must go through generation bumping rather than inventing a second reclamation mechanism. Two consequences
+worth stating so they are not assumed away: the branch is **not** exercised by any current test, and it is
+**not** the same check as `barred` — `job_barrier`/`exclusive_job` are global flags with nothing tying them
+to a per-model `generation`, which is exactly why closing the barrier TOCTOU required a genuinely new
+condition alongside `stale`/`drift` rather than reusing one that was already there.
 
 **Why measurement is per-PID.** Two reserved models can load concurrently, so a device-wide pre/post
 free-memory delta is not attributable to either: each reading may include the other's allocation or
@@ -305,8 +320,13 @@ memory bound that also holds when *unaccounted external* GPU consumers are prese
 evict(victim, deadline) :
   under lock: victim.state = draining        # stop admitting NEW requests to it
   wait until victim.active_requests == 0     # OUTSIDE lock, bounded by drain_timeout
-      on timeout: under lock: victim.state = resident   # revert; victim was NOT freed
-                  return EvictFailed(busy)
+      on timeout: under lock:
+                    if job_barrier or exclusive_job:
+                        leave victim 'draining'         # ← ownership TRANSFERS to the job's drain,
+                                                        #   which holds the longer job_drain_timeout
+                    else:
+                        victim.state = resident         # revert; victim was NOT freed
+                  return EvictFailed(busy)              # this op is done either way
   under lock: victim.state = evicting        # drained; committed to unload
   unload(victim); verify NVML free rose      # OUTSIDE lock
   under lock: remove victim; bump generation   # ← resident entry + generation ONLY, never a reservation
@@ -316,10 +336,20 @@ Idle-first, then LRU. **Eviction never interrupts in-flight requests.** It also 
 operation's reservation — see *Reservation ownership* above; the generation bump is the whole of how a
 reclaimer signals a displaced owner, and that owner cleans up after itself.
 
+**Why the timeout revert is barrier-aware.** Reverting a stalled victim to `resident` is right when no job
+is waiting — the victim was not freed, so it should go back to being an ordinary serving tenant. Under a
+`job_barrier` it is exactly wrong: the job's marking pass has already run and does not run again, so a
+victim that reverts *after* that pass is a resident nothing will ever mark, and the job can only time out.
+That is the same liveness bug the *Convergence* fix closes, re-entered through a side door. Leaving it
+`draining` hands it to the job's drain, which already owns every other resident and has the longer
+`job_drain_timeout` budget — and if that budget also runs out, `admit_job`'s own timeout reverts every
+surviving victim to `resident` in one place, so the victim is never abandoned in a transient state.
+
 **Caller contract when blocked behind an eviction.** A request whose `EvictThenRetry` returns
 `EvictFailed` does not spin: it consumes one of its `max_admission_attempts`, backs off
 (exponential, jittered, capped), and re-enters stage 1 — where the victim is once again `resident`
-and may no longer be the best choice. When attempts or `deadline` are exhausted the request is
+(unless a barrier rose meanwhile, in which case this request is refused `gpu_busy` at the gate and the
+victim stays with the job's drain) and may no longer be the best choice. When attempts or `deadline` are exhausted the request is
 refused `gpu_busy` with `Retry-After`. **No admission path waits unbounded on another tenant's
 in-flight request.**
 
@@ -330,11 +360,14 @@ admit_job(job) :
     if exclusive_job or job_barrier:         # ← another job owns the GPU or the transition
         return Wait(retry_after)             # exactly one owner; never overwrite a live claim
     job_barrier = true                       # ← closes the door FIRST; no new serving reservations
-    mark all idle residents 'draining'
+    mark EVERY entry in state 'resident' as 'draining'   # ← all of them, not just idle (see Convergence)
+                                             #   entries in `loading` are NOT touched — their owning op
+                                             #   rolls them back on the barrier (see The in-flight load)
   drain + unload (outside lock) until serving set empty, bounded by job_drain_timeout
-      on timeout: under lock: job_barrier = false; return Wait(retry_after)   # release the door
+      on timeout: under lock: revert each surviving victim to 'resident'
+                              job_barrier = false; return Wait(retry_after)   # release the door
   under lock:
-    assert residents empty and reservations empty      # see OPEN below — this can still race
+    assert residents empty and reservations empty      # now guaranteed, not hoped for — see below
     exclusive_job = job                                # whole GPU; blocks all co-residency
     job_barrier = false                                # exclusive_job now blocks admission
   # NEVER preempted (FR-010, FR-023a); on end: under lock exclusive_job = None
@@ -354,31 +387,86 @@ The ownership check is what makes "at most one exclusive job" true rather than m
 without it a second `admit_job` arriving against an already-empty serving set overwrites the first
 job's claim, both workloads run, and whichever finishes first clears the other's ownership.
 
-> **OPEN — two design decisions, deliberately unresolved.** Both concern the barrier's *drain*, not
-> its entry gate, and each admits more than one defensible answer; they are recorded here rather than
-> settled unilaterally, and must be closed before `/speckit-implement`.
->
-> 1. **Convergence.** "Mark all idle residents `draining`" is a one-shot pass, but the exit condition
->    is *serving set empty*. A resident that is busy at that instant is correctly not interrupted —
->    but nothing re-marks it once its last request finishes, so it stays `resident` forever and the
->    drain can only ever hit `job_drain_timeout`. Options: make eviction **barrier-driven** (while
->    `job_barrier` holds, every resident transitions to `draining` as soon as it becomes eligible), or
->    re-scan on each release. This is a *liveness* bug, not a safety one.
-> 2. **TOCTOU for in-flight reservations.** The barrier gates stage 1, so no *new* reservation is
->    granted — but a request already past stage 1 when the barrier rose is still loading, and stage 3's
->    commit does not re-check `job_barrier`/`exclusive_job` before writing a new resident. The closing
->    `assert` can therefore fire with no defined recovery, or the load commits after the job is
->    granted — the exact co-residency the barrier exists to prevent. Options: have the drain wait on
->    `reservations` to empty as well as `residents`, or have stage 3's commit re-check the barrier and
->    roll back if it is set. These differ in which side pays the latency, which is why it is a choice.
->
->    **Two constraints bind whichever option is chosen**, so they are not rediscovered at implementation
->    time: (i) a commit-time barrier re-check is a **new** condition — `if job_barrier or exclusive_job:
->    rollback` — sitting alongside `stale`/`drift`, not a reuse of the generation check (see *Why `stale`
->    is retained* above); and (ii) any rollback it triggers owns the load's `AwaitLoad` joiners under
->    invariant 5 and MUST `dispose(waiters, Refuse(gpu_busy))` — a barrier rollback is contention, so the
->    joiners retry rather than fail. The waiting-drain option carries the same obligation via whatever
->    path eventually resolves those reservations.
+### Convergence — why marking *every* resident is the whole fix
+
+An earlier revision marked only **idle** residents `draining`, while the exit condition was *serving set
+empty*. A resident busy at that instant was never re-marked, so it stayed `resident` and the drain could
+only ever reach `job_drain_timeout` — a liveness bug that made an exclusive job unstartable whenever any
+model happened to be serving when the barrier rose.
+
+The restriction was protecting nothing. `draining` means **stop admitting new requests to this model**;
+it never interrupts in-flight work — `evict()` waits for `active_requests == 0` before it unloads
+anything. Marking a busy resident `draining` therefore costs its in-flight requests exactly nothing.
+
+"Every resident" means every entry in state **`resident`** — not every key in the `residents` map. An
+entry in `loading` is not a resident yet and must not be marked: its load is in flight outside the lock,
+and the operation that owns it is the only thing allowed to end it (which it does, on the barrier — see
+the next section). Entries already `draining`/`evicting`/`rolling_back` are likewise left alone; an owning
+operation is mid-flight and the drain simply waits for them, exactly as `AwaitTransient` does.
+
+**The one way a resident can appear *after* the marking pass — and why it can't.** Skipping transient
+entries is only safe if none of them can turn back into an unmarked `resident`. Exactly one path does
+that: `evict()`'s `drain_timeout` reverting a stalled victim. An ordinary `admit_serving` can mark a
+victim `draining` and start evicting it *before* any job exists; if the barrier then rises, that victim is
+correctly skipped as transient — but its own `drain_timeout` is a separate and typically much shorter
+tunable than `job_drain_timeout`, so it can expire first and revert the victim to `resident` behind the
+pass that already ran. Nothing would re-mark it (the displaced caller re-enters stage 1 and is refused at
+the barrier, so it does not re-evict either), and the job could only time out — the same liveness bug,
+narrower. `evict()`'s revert is therefore **barrier-aware**: under a barrier the victim stays `draining`
+and its ownership transfers to the job's drain. See *Why the timeout revert is barrier-aware* above.
+
+With that path closed, the set of entries that can be in state `resident` after the marking pass is
+**empty**, and the convergence argument holds without qualification. `evicting` and `rolling_back` have no
+revert-to-`resident` path at all — both run to removal — so `draining` was the only one to close.
+
+And convergence follows from the barrier itself. Stage 1 refuses **every** admission while
+`job_barrier` holds — including `Share` on an already-resident model — so no resident can *gain* a
+request during the drain. Every `active_requests` count is therefore monotonically decreasing, each
+reaches 0 in bounded time (bounded by the longest in-flight request, not by new arrivals), and each
+resident then unloads. The one-shot pass converges on its own; no release-path hook and no re-scan loop
+are needed, because there is no such thing as a resident becoming *newly* eligible — they are all
+eligible the moment the barrier is up.
+
+On timeout, every surviving victim reverts to `resident`, exactly as the single-victim `evict()` path
+does. A job that cannot get the GPU must leave the serving set as it found it.
+
+### The in-flight load — stage 3's commit re-checks the barrier
+
+A request already past stage 1 when the barrier rose is still loading, and its commit would otherwise
+write a new resident *after* the drain observed an empty set. Stage 3's commit therefore adds a **third**
+rollback condition alongside `stale` and `drift`:
+
+```
+  under lock:
+    barred = job_barrier or exclusive_job          # ← NEW condition, not a reuse of `stale`
+    stale  = generation changed since reservation
+    drift  = ...
+    if barred or stale or drift:
+        residents[model_key].state = rolling_back
+        ...
+    if barred:  outcome = Refuse(gpu_busy, retry_after)   # transient — the job will finish
+```
+
+The load is unloaded and its joiners disposed with a **retryable** `gpu_busy` (invariant 5 applies to
+this path exactly as to the others — a barrier rollback is contention, not failure, so waiters retry
+rather than give up).
+
+**This costs a completed model load, and that is the accepted trade.** The alternative — having the drain
+also wait for `reservations` to empty — wastes nothing, but makes the job's start wait on load + service +
+unload of work it never asked for, spending the `job_drain_timeout` budget on another tenant's request,
+and turns the closing assert into a two-phase settle (reservations drain into residents, which then drain
+again). The race is narrow: a load must have passed stage 1 in the moments before the barrier rose. For a
+rare race, a barrier that means exactly one thing — **once up, nothing new becomes resident** — is worth
+more than the salvaged work.
+
+Note this is a genuinely new condition, not the `stale` branch wearing a different hat: `job_barrier` and
+`exclusive_job` are global flags with nothing tying them to a per-model `generation` (see *Why `stale` is
+retained* above). Both branches now exist, and they fire on different things.
+
+**Together these two make the closing `assert` provable rather than hopeful.** `residents` empties because
+every resident was marked and none can gain requests; `reservations` empties because every in-flight load
+either commits before the barrier (and is then drained like any other resident) or rolls back on seeing
+it. Nothing is left in flight that the assert could trip over.
 
 ## Scheduler — single authority, bounded fairness
 - **The host-agent coordinator is the SOLE GPU-ordering authority.** Every path that can occupy the
