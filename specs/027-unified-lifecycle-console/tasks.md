@@ -28,6 +28,13 @@ US9 are the pre-agreed cut line if the increment overruns (plan.md Complexity Tr
   · US7 deployments · US8 datasets · US9 observability/admin · US10 truthful-state
 - **[HW]**: requires the target GPU hardware to validate
 
+**Requirement citations are slash-compressed.** A task covering consecutive requirements cites them
+as `FR-374/375/377/380`, not as four separate `FR-` tokens. Any tooling that computes
+requirement→task coverage MUST expand these runs before matching — a naive `\bFR-\d{3}\b` scan
+reports false negatives, since only the first id in a run carries the `FR-` prefix. Expand with
+`FR-(\d{3}(?:/\d{3})*)` (and the same for `SC-`). This is not hypothetical: the first coverage
+script written for this feature reported 19 phantom uncovered requirements before it expanded runs.
+
 ---
 
 ## Phase 1: Setup
