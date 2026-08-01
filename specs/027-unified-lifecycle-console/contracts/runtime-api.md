@@ -50,15 +50,24 @@ Recent admission decisions (FR-377/378).
 ```json
 {
   "observed_at": "2026-07-31T09:14:02Z",
-  "residents": [{ "tenant": "job_3842", "kind": "job", "vram_gb": 10.1 }],
-  "usable_budget_gb": 11.4, "accounted_resident_gb": 10.1, "live_free_gb": 1.6,
-  "capacity": 64,
+  "residents": [
+    { "model_key": "job_3842", "kind": "job", "vram_gb": 10.1,
+      "state": "resident", "active_requests": 1 }
+  ],
+  "usable_budget_gb": 11.4, "accounted_resident_gb": 10.1,
+  "reserved_gb": 0.0, "unmaterialized_gb": 0.0, "live_free_gb": 1.6,
+  "job_barrier": false, "capacity": 64,
   "records": [
     {
-      "id": "adm_01J…", "tenant": "vision", "kind": "serving",
-      "requested_gb": 3.2, "decision": "refused", "reason": "job-exclusive",
-      "residents": [{ "tenant": "job_3842", "kind": "job", "vram_gb": 10.1 }],
-      "device_index": 0, "usable_budget_gb": 11.4, "accounted_resident_gb": 10.1, "live_free_gb": 1.6,
+      "id": "adm_01J…", "op_id": "req-9f2", "tenant": "vision", "kind": "serving",
+      "model_key": "clip-vit-b32", "requested_gb": 3.2, "attempt": 1,
+      "decision": "refused", "reason": "job-exclusive",
+      "residents": [
+        { "model_key": "job_3842", "kind": "job", "vram_gb": 10.1,
+          "state": "resident", "active_requests": 1 }
+      ],
+      "device_index": 0, "usable_budget_gb": 11.4, "accounted_resident_gb": 10.1,
+      "reserved_gb": 0.0, "unmaterialized_gb": 0.0, "live_free_gb": 1.6,
       "explanation": "Refused: job job_3842 holds the GPU exclusively. A running job is never preempted.",
       "decided_at": "2026-07-31T09:13:58Z"
     }
@@ -68,15 +77,22 @@ Recent admission decisions (FR-377/378).
 
 **Rules**
 
-- This is a **decision history**, not a queue. Admission decides immediately; nothing waits
-  (research R1). There is no `pending` decision value and no queue-position field, and the console
-  must not present one. Constitution v1.6.1's eviction branch does not change that — an eviction is
-  part of the decision, not a wait.
-- The **two VRAM checks are reported separately** (`accounted_resident_gb` vs `usable_budget_gb`, and
-  the incoming load vs `live_free_gb` + headroom). They MUST NOT be merged: `live_free_gb` already
-  excludes residents, so summing the resident set against it double-counts them — the exact v1.6.0
-  defect corrected by v1.6.1.
-- Backed by a **bounded in-memory ring** (default 64) written by `Admission.acquire()` as it
+- This is a **decision history for serving admission**, not a queue: a refused serving request will
+  never later be granted, so there is no `pending` value and no queue-position field here, and the
+  console must not present one (research R1). Bounded in-flight retries are reported as `attempt` on
+  the record — a retry is not a queue place. The **jobs lane is a separate, genuine FIFO queue** with
+  `queue_pos`, read from the gateway's `/admin/queue`, and is presented as one.
+- The **two VRAM checks are reported separately**, each with **its own reservation term**:
+  budget is `accounted_resident_gb + reserved_gb` against `usable_budget_gb`; live-VRAM is the
+  incoming load plus headroom against `live_free_gb − unmaterialized_gb`. They MUST NOT be merged
+  (`live_free_gb` already excludes residents, so summing the resident set against it double-counts —
+  the v1.6.0 defect v1.6.1 corrected), and neither reservation term may be dropped: `reserved_gb`
+  counts every outstanding reservation, `unmaterialized_gb` only those not yet reconciled to a real
+  delta, because a materialized one is already reflected in `live_free_gb`.
+- `residents[]` is keyed by **`model_key`, not tenant** — the coordinator shares one resident child
+  across every tenant requesting that model. Each carries its lifecycle `state` and `active_requests`
+  so a mid-transition read is not mistaken for a violated invariant.
+- Backed by a **bounded in-memory ring** (default 64) written by the coordinator as each decision
   returns. Bounded because it must not grow unboundedly in a long-lived agent, and in-memory because
   a decision history is diagnostic, not durable — losing it on restart is acceptable, and persisting
   it would mean a migration for no operational gain.

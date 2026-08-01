@@ -49,19 +49,35 @@ constraint, Runtime, Inference, and Traces would have rendered essentially empty
 
 ## R1 — Admission is *refuse*, not *queue*
 
-**Decision**: name the surface **Admission**, present it as a **decision record**, and do **not**
-ship anything called a queue.
+**Decision**: name the **serving admission** surface *Admission* and present it as a **decision
+record**, never a queue — but show the **jobs lane as the real FIFO queue it is**. The original
+blanket "ship nothing called a queue" was too broad; corrected below.
 
 **Rationale**: the source addendum's navigation says "Admission Queue" and its entity sketch has an
-`age` field, both of which imply pending requests that will later be granted. That is not what this
-platform does. `hostagent/admission.py::acquire()` makes the VRAM reads, the resident-set check, and
-the claim under one re-entrant lock and returns a decision **immediately** — admitted, admitted after
-eviction, or refused. Nothing waits. A caller that is refused gets a `409` and is done.
+`age` field, both of which imply pending *serving* requests that will later be granted. That is not
+what serving admission does. It evaluates the bounds and returns a decision — admitted, or refused —
+and a refused caller is done.
 
-**Constitution v1.6.1 does not change this.** Bounded co-residency adds an *eviction* branch
-(idle-first/LRU when a serving model does not fit alongside current tenants) and splits the refusal
-reasons across the two required VRAM checks, but admission still decides in one critical section and
-still never queues. The decision record therefore gains fields; it does not become a queue.
+**Corrected against 026's merged coordinator contract.** This finding originally rested on today's
+single-slot `hostagent/admission.py`: "decides in one critical section, nothing waits, a refused
+caller gets a `409`." Feature 026 replaces that module, and all three of those premises changed:
+
+| Premise (v1) | 026's merged contract |
+|---|---|
+| "nothing waits" | Serving admission has a **bounded** retry loop — `max_admission_attempts` with jittered backoff, plus `AwaitLoad` (joining an in-flight load) and `AwaitTransient` (waiting out an owning operation). Callers *do* wait, bounded by their own deadline. |
+| "refused gets a `409`" | Refusals are **`503 gpu_busy` + `Retry-After`** (transient) or **`413 model_too_large`** (permanent). `409` is now reserved for the host agent's jobs-lane-full contract. |
+| "never queues" | True of **serving**. False of **jobs**: 026 ships a persisted FIFO `jobs_lane` — `POST /jobs` returns `202 {state:"queued", queue_pos:2}`, and `/admin/queue` exposes `jobs_lane` with positions. |
+
+**What survives, and what changes.** The core insight holds and is *strengthened*: a refused serving
+request will never "come up", so presenting it in a backlog would teach the operator to wait for
+something that will not happen. But bounded waiting is real, and the jobs lane is a genuine queue with
+positions an operator needs — hiding it to preserve a slogan would be its own falsehood, the mirror of
+the one this finding exists to prevent. So:
+
+- **Serving** → decision record. No `pending`, no queue position, no age-until-granted. A bounded
+  in-flight retry is reported as `attempt` on the record, not as a queue place.
+- **Jobs** → a real queue view, with `queue_pos` read from the persisted lane. Naming it a queue is
+  accurate here; refusing to would be the fake semantics, inverted.
 
 Shipping a "queue" would therefore be exactly the fake-orchestration-semantics failure the addendum
 itself warns against in §23.4 (Prefect) and §23.5 (Alertmanager) — the same error, applied to
@@ -73,9 +89,17 @@ with an `age`. The spec's FR-377 wording ("admission requests and decisions … 
 by age-since-decision. The Overview's "Pending Admissions" card (FR-371) is re-read as **recent
 refusals** — a pressure signal, not a backlog.
 
-**Alternatives rejected**: (a) building a real admission queue — a behavioural change to the
+**Alternatives rejected**: (a) building a real *serving* admission queue — a behavioural change to the
 platform's non-negotiable Principle II mechanism, far outside a console increment; (b) rendering the
-nav item as "Queue" with an explanatory tooltip — the label is what operators read.
+nav item as "Queue" with an explanatory tooltip — the label is what operators read; (c) keeping the
+blanket "no queue anywhere" rule — it would suppress the jobs lane, which genuinely queues.
+
+**Sequencing.** These surfaces read the coordinator that 026 specifies, not today's `admission.py` —
+admission records do not exist today at all (`AdmissionResult` is computed and discarded, R0), so this
+surface is net-new either way and should be built against the design that will be there. If 027 ships
+before 026's Phase 2 lands, the coordinator-specific fields (`residents[].state`, `activeRequests`,
+`reservedGb`, `unmaterializedGb`, `attempt`) resolve to `unknown` under the existing degradation rules
+rather than being faked — FR-430 already requires exactly that when a source cannot answer.
 
 ---
 

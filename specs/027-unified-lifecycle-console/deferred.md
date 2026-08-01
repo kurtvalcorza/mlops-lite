@@ -18,7 +18,7 @@ for every feature directory, so a stub containing only a spec would fail the `sp
 **Scope**: start and cancel jobs, register versions, assign aliases, create endpoint assignments,
 submit labels, approve review items, manage capture and evaluation policies.
 
-**What 027 guarantees on its behalf** (verified by T695):
+**What 027 guarantees on its behalf** (verified by T768):
 
 1. **Every route 027 adds is read-only.** No `gateway/app/console/*` or `runtime/*` route mutates
    state. The single write-shaped entry, `POST /console/predictions/{id}/payload`, only reveals a
@@ -48,9 +48,9 @@ submit labels, approve review items, manage capture and evaluation policies.
 **Scope**: drift workflows, suggestion review with evidence, quality-gate authoring, automated
 cross-system reconciliation, controlled rollout and rollback, audit views.
 
-**What 027 guarantees on its behalf** (verified by T696):
+**What 027 guarantees on its behalf** (verified by T769):
 
-1. **Affordances surfaced early are inert and labelled.** The conflict banner (T659) offers a
+1. **Affordances surfaced early are inert and labelled.** The conflict banner (T732) offers a
    `reconcile` action because `StateConflict.suggestedAction` includes it in the data model — in 027
    it performs **no reconciliation**. An affordance that looks actionable but does nothing teaches
    operators that the console lies, which is precisely the trust this increment is trying to build.

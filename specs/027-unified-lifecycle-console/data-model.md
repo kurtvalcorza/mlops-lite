@@ -171,13 +171,17 @@ interface RuntimeCompatibility {
   estimatedVramGb?: number;
   usableBudgetGb?: number;       // VRAM_GB less the safety reserve
   accountedResidentGb?: number;  // current accounted resident set
+  reservedGb?: number;           // Σ ALL outstanding reservations — budget check only
+  unmaterializedGb?: number;     // Σ reservations not yet reconciled — live-VRAM check only
   liveFreeVramGb?: number;       // measured; already excludes residents
   headroomGb?: number;
 
-  budgetCheck: "pass" | "fail" | "unknown";    // est + accounted <= usable budget
-  liveVramCheck: "pass" | "fail" | "unknown";  // est + headroom <= live free
+  // est + accounted + reserved <= usable budget
+  budgetCheck: "pass" | "fail" | "unknown";
+  // est + headroom <= live free - unmaterialized
+  liveVramCheck: "pass" | "fail" | "unknown";
   fitsAlone: boolean;                          // est <= usable budget on an empty GPU
-  jobExclusive: boolean;                       // a training/HPO/batch job holds the whole GPU
+  jobExclusive: boolean;                       // a job holds the whole GPU, or its barrier is up
 
   verdict: "eligible" | "not-currently-eligible" | "incompatible" | "unknown";
   reasons: string[];
@@ -200,6 +204,16 @@ checks:
 enough VRAM" when the real constraint is the accounted budget — or the reverse — sends them to the
 wrong remedy: eviction fixes a budget failure, whereas a live-VRAM failure with headroom exhausted
 usually means a leaked or unaccounted allocation.
+
+**Each check carries a *different* reservation term, and they are not interchangeable.** The
+coordinator's invariant 1 counts **every** outstanding reservation against the budget; invariant 2
+deducts only the **not-yet-materialized** ones from live free, because a reservation that has already
+been reconciled to a real delta is by then visible in `liveFreeVramGb` itself and subtracting it twice
+would report a model as not fitting when admission would accept it. Omitting either term is the same
+class of error as merging the two checks — it produces a console that says `pass` where the
+coordinator says refuse. Source of truth is
+[026's admission contract](../026-lan-gpu-broker/contracts/admission-scheduler.md) §VRAM admission,
+whose `/admin/queue` exposes `reserved_mb` and `unmaterialized_mb` separately for exactly this reason.
 
 `estimatedVramGb` comes from the platform's existing `*_EST_GB` configuration, not a guess.
 `baseResolvable: false` forces `incompatible`, mirroring the platform's actual refusal to promote an
@@ -227,21 +241,36 @@ interface EngineProcess {
   modelIdentity?: string;      // AGENT-REPORTED loaded identity (022) — never the desired pointer
   registryVersion?: string;
   startedAt?: string; activeRequests?: number;
+
+  // The coordinator's residency state for this engine's model, when it has one. DISTINCT from
+  // `state` above and deliberately not merged with it — see the mapping note.
+  residencyState?: "loading" | "resident" | "draining" | "evicting" | "rolling-back";
 }
 
 interface AdmissionRecord {
-  id: string; tenant: string; kind: "serving" | "job"; requestedGb: number;
-  decision: "admitted" | "admitted-after-eviction" | "refused";
-  reason?: "job-exclusive" | "budget" | "live-vram" | "cannot-fit-alone";
+  id: string; opId: string; tenant: string; kind: "serving" | "job";
+  modelKey: string;             // the RESOURCE being admitted — see identity note below
+  requestedGb: number;
+  decision: "admitted" | "refused" | "evicted-retry";
+  reason?: "job-exclusive" | "budget" | "live-vram" | "cannot-fit-alone" | "load-failed";
+  attempt?: number;             // bounded by max_admission_attempts
 
-  // The co-resident set at decision time. Constitution v1.6.1 admits BOUNDED CO-RESIDENCY of
-  // serving tenants, so this is a list — there is no single "holder" for serving any more.
-  residents?: { tenant: string; kind: "serving" | "job"; vramGb: number }[];
-  evicted?: { tenant: string; policy: "idle-first" | "lru"; freedGb: number }[];
+  // The co-resident set at decision time. Constitution v1.6.1 admits BOUNDED CO-RESIDENCY, and the
+  // coordinator keys residency by MODEL INSTANCE, not tenant: many tenants requesting the same model
+  // share one resident child whose ref-count rises. Keying this by tenant would render five tenants
+  // on one model as five residents, each apparently holding its own VRAM.
+  residents?: {
+    modelKey: string; kind: "serving" | "job"; vramGb: number;
+    state: "loading" | "resident" | "draining" | "evicting" | "rolling-back";
+    activeRequests: number;     // the claim count; 0 in `resident` means genuinely idle
+  }[];
+  evicted?: { modelKey: string; policy: "idle-first" | "lru"; freedGb: number }[];
 
-  // The TWO distinct checks the constitution requires. They are not interchangeable.
+  // The TWO distinct checks, each with ITS OWN reservation term (see §5).
   usableBudgetGb?: number;      // VRAM_GB less the safety reserve
   accountedResidentGb?: number; // sum of the accounted resident set
+  reservedGb?: number;          // Σ ALL outstanding reservations   → budget check
+  unmaterializedGb?: number;    // Σ not-yet-reconciled reservations → live-VRAM check
   liveFreeGb?: number;          // measured free VRAM (already excludes residents)
   headroomGb?: number;
 
@@ -270,18 +299,45 @@ cannot drift from admission's real reasoning. Templates:
 - refused/`live-vram` → *"Refused: needs {requestedGb} GB plus {headroomGb} GB headroom; live free
   VRAM is {liveFreeGb} GB on device {deviceIndex}."*
 - refused/`cannot-fit-alone` → *"Refused: {requestedGb} GB exceeds the {usableBudgetGb} GB usable
-  budget even with the GPU empty. Evicting other tenants cannot help."*
-- `admitted-after-eviction` → *"Admitted to device {deviceIndex} after evicting {tenants}
-  ({policy}) to free {freedGb} GB."*
+  budget even with the GPU empty. Evicting other models cannot help."*
+- refused/`load-failed` → *"Refused: {modelKey} was admitted but failed to load ({detail}). Its
+  reserved capacity has been released."*
+- `evicted-retry` → *"Attempt {attempt}: evicted {modelKeys} ({policy}) to free {freedGb} GB; both
+  bounds will be re-derived on the next attempt."*
 - `admitted` → *"Admitted to device {deviceIndex}: fits the usable budget and live free VRAM
-  alongside {n} resident tenant(s)."*
+  alongside {n} resident model(s)."*
 
 `cannot-fit-alone` is deliberately distinguished from `budget`: the former is **structural** — no
 amount of eviction or waiting helps — while the latter is **transient**. That distinction is the
 same one the compatibility verdict makes (§5), and the two must agree.
 
 The wording deliberately teaches the platform's rules at the moment they bite: that a job takes the
-whole GPU and is never preempted, and that serving tenants share a bounded budget.
+whole GPU and is never preempted, and that serving models share a bounded budget.
+
+**Why `evicted-retry` and not `admitted-after-eviction`.** The coordinator's protocol is
+**evict-then-recompute**: when neither bound is satisfied it marks victims, completes their eviction
+*outside* the lock, and then **re-derives both bounds from scratch on a later attempt** — which may
+still refuse, because another operation can have taken the freed capacity in between. There is
+therefore no single decision that both evicts and admits, and a record claiming one would assert a
+causal link the coordinator deliberately does not guarantee. An eviction is its own recorded outcome;
+the admission that follows is a separate record with an incremented `attempt`. Presenting them as one
+event is precisely the fiction that R1 refuses elsewhere.
+
+**Why `load-failed` exists.** A model can pass both bounds, be granted a reservation, and then fail to
+load — spawn error, readiness timeout, OOM, missing artifact. That is neither a budget nor a live-VRAM
+refusal, and without its own reason the console would have to file it under one of them and mislead
+the operator about the remedy. The coordinator clears the reservation on this path, so the explanation
+says so: capacity is not left held.
+
+```typescript
+**`state` and `residencyState` are two different facts and must not be collapsed.** `state` is the
+**engine process's** health as the agent reports it — is this child up, warming, wedged. `residencyState`
+is the **coordinator's** view of the model's place in the resident set — is its VRAM accounted, is it
+being drained for an eviction or a job barrier, is it rolling back a failed load. They overlap in
+appearance (`loading`, `draining` occur in both vocabularies) and diverge in meaning: an engine can be
+`ready` while its model is `draining`, which is exactly the state an operator needs to see and exactly
+the one a merged field would erase. Where the coordinator has no entry for an engine's model,
+`residencyState` is absent rather than guessed.
 
 ```typescript
 interface JournalEntry {
