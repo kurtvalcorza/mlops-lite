@@ -472,12 +472,16 @@ policy and suggestion records.
 - **FR-376**: The console MUST expose resident engine processes with engine identifier, modality,
   model identity, process identifier, device, VRAM, start time, health, and active request count.
 - **FR-377**: The console MUST expose admission requests and decisions with the required engine,
-  requested VRAM, the co-resident tenant set, device evaluated, decision, reason, any eviction
-  performed, and age. The two VRAM checks — accounted resident set against the usable budget, and
-  incoming load against live free VRAM — MUST be reported **separately** and never merged.
+  requested VRAM, the co-resident set, device evaluated, decision, reason, any eviction performed, and
+  age. The two VRAM checks — accounted resident set **plus outstanding reservations** against the
+  usable budget, and incoming load against live free VRAM **less not-yet-materialized reservations** —
+  MUST be reported **separately**, never merged, and neither reservation term may be omitted. The
+  co-resident set MUST be keyed by **model instance, not tenant**, since one resident child serves
+  every tenant requesting that model, and each resident MUST carry its lifecycle state and active
+  request count.
 - **FR-378**: Every admission decision MUST be rendered as a human-readable explanation naming the
-  determining factor — the exclusive job holder, which VRAM check failed and by how much, the tenants
-  evicted to make room, or the checks that passed.
+  determining factor — the exclusive job holder, which VRAM check failed and by how much, the models
+  evicted to make room, a load that failed after being admitted, or the checks that passed.
 - **FR-379**: The console MUST NOT offer any control that would preempt a running job; refusal
   semantics MUST be presented as the platform's designed behaviour.
 - **FR-380**: The console MUST expose the durable journal as a paged, filterable diagnostic view with
@@ -720,8 +724,9 @@ policy and suggestion records.
 - **SC-201**: **[HW]** On the target GPU machine, live per-device VRAM, resident engine identity, and
   admission decisions displayed by the console match the agent's own reported state exactly.
 - **SC-202**: **[HW]** During a real GPU contention event, the console's runtime view reflects the
-  correct resident tenant set and the correct refusal reason throughout, distinguishing an
-  exclusive-job refusal from each of the two VRAM-check failures.
+  correct resident **model** set — keyed by model instance, not tenant — and the correct refusal
+  reason throughout, distinguishing an exclusive-job refusal from each of the two VRAM-check
+  failures and from a load that failed after admission.
 - **SC-203**: Every new externally observable endpoint introduced by this feature has a corresponding
   contract entry.
 

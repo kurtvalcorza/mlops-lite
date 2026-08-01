@@ -179,7 +179,8 @@ fails early if it is going to.
   `model_identity` differs from the desired pointer **during an in-flight activation** — the one
   moment the two legitimately diverge, and the only real proof the field is agent-sourced.
 - [ ] **T719** [HW] [US2] On hardware: run a real contention event (fine-tune holds the GPU, vision
-  classify refused) and confirm the console shows the correct resident tenant set throughout and the
+  classify refused) and confirm the console shows the correct resident **model** set throughout (keyed by model
+  instance, with each resident's lifecycle state and active-request count) and the
   refusal reads *"job … holds the GPU exclusively. A running job is never preempted."* (SC-187/202).
   Then exercise **each** of the two VRAM-check failures separately — a `budget` refusal (accounted
   resident set would exceed the usable budget) and a `live-vram` refusal (incoming load exceeds
