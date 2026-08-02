@@ -121,3 +121,28 @@ def test_no_area_is_named_after_a_backing_service():
                       "supervisor", "bentoml", "llama"):
         for label in labels:
             assert forbidden not in label.lower(), f"area {label!r} is named after a service"
+
+
+def test_no_test_asserts_against_a_retired_route_source():
+    """A guard for the failure this file's own change caused.
+
+    Renaming an area moves `ui/app/<old>/page.tsx` to a new directory and leaves a **redirect stub**
+    behind. A test that reads the old path then asserts against the stub's four lines — which is not
+    a failure a reader would connect to a rename. Any suite reading a route source must read the
+    live one, so a retired path appearing in a test is flagged here, next to the rename that would
+    cause it.
+    """
+    import glob
+
+    retired = {p.strip("/") for p in REDIRECTS}
+    offenders = []
+    for path in glob.glob(os.path.join(REPO, "tests", "test_*.py")):
+        if os.path.basename(path) == os.path.basename(__file__):
+            continue  # this file names the retired paths on purpose
+        source = open(path, encoding="utf-8").read()
+        for old in retired:
+            if f'"{old}", "page.tsx"' in source or f"'{old}', 'page.tsx'" in source:
+                offenders.append(f"{os.path.basename(path)} reads ui/app/{old}/page.tsx")
+    assert not offenders, (
+        "these tests read a retired route's redirect stub instead of the live page: "
+        + "; ".join(offenders))
