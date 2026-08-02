@@ -335,3 +335,45 @@ def test_a_dataset_version_survives_a_manifest_that_only_has_a_version():
     assert row["version"] == "2" and row["contentDigest"] is None
     assert row["validation"]["status"] == "not-validated"
     assert row["referencedBy"] == {"runIds": [], "modelVersions": []}
+
+
+# -- the alert rules are actually found -------------------------------------------------------------
+
+def test_the_shipped_alert_rules_are_discovered():
+    """The reader globbed `monitoring/**/*rules*.y*ml`, which matched nothing: the rules are at
+    `infra/prometheus/rules/mlops-lite.yml` — wrong directory, and the filename contains no "rules"
+    either, so the right directory would have missed it too.
+
+    It returned `[]` **successfully**, so the console reported "no rules configured" with a clean
+    observation timestamp instead of degrading. A confident empty list is worse than an error here:
+    nothing about it looks wrong, and this is the surface whose entire premise is that it does not
+    claim things it cannot see.
+    """
+    from gateway.app.console import sources
+
+    rules = sources.alert_rules()
+    assert rules, "the shipped rule set must be found"
+    names = {r["name"] for r in rules}
+    assert "WedgedEngine" in names, f"expected the 023 US7 rules, got {sorted(names)}"
+
+
+def test_every_discovered_rule_carries_its_runbook():
+    """The runbook link is the honest substitute for having no notification channel: it says what to
+    DO without claiming anyone was told. The parser accepted only `runbook_url:` while the shipped
+    rules write `runbook:`, so every link was dropped."""
+    from gateway.app.console import sources
+
+    for rule in sources.alert_rules():
+        url = (rule.get("annotations") or {}).get("runbook_url")
+        assert url, f"{rule['name']} has no runbook"
+        assert not url.startswith('"'), "YAML quoting must be stripped, or the href resolves nowhere"
+
+
+def test_an_unreadable_rules_directory_degrades_rather_than_reporting_no_rules(monkeypatch):
+    """The whole point of the fix: 'we could not read the rules' and 'there are no rules' are
+    different facts, and only the second is safe to render as an empty list."""
+    from gateway.app.console import sources
+
+    monkeypatch.setattr(sources, "RULES_DIR", "/nonexistent/rules")
+    with pytest.raises(Exception):
+        sources.alert_rules()

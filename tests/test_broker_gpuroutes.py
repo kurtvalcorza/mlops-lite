@@ -160,12 +160,26 @@ def test_a_running_job_is_never_reordered_and_says_so(conn, lane):
     assert store.get_broker_job(conn, ids[0])["state"] == "running"
 
 
-def test_a_running_job_can_still_be_cancelled(conn, lane):
-    """Cancel is not preemption-by-another-tenant: it is the job's owner ending their own work."""
+def test_a_running_job_cannot_be_cancelled_either(conn, lane):
+    """Cancel was carved out of the running-job guard on the reasoning that it is the owner ending
+    their own work rather than preemption by another tenant. That reasoning does not survive
+    contact with what the route can actually do.
+
+    There is no runtime cancellation path here. `cancel_broker_job()` writes the database; it does
+    not stop a process. So the carve-out flipped the row to `cancelled` while the GPU kept running,
+    leaving the persisted lane, the coordinator's ownership, and a reservation still accruing
+    against the tenant all disagreeing — with nothing to reconcile them.
+
+    A cancel that stops the work needs a coordinator-controlled stop-and-settle lifecycle. Until
+    that exists, refusing is the only answer that does not lie about what happened.
+    """
     _, ids = lane
     store.start_broker_job(conn, ids[0])
-    status, _ = gpuroutes.job_override(store, conn, ids[0], "cancel")
-    assert status == 200 and store.get_broker_job(conn, ids[0])["state"] == "cancelled"
+    status, payload = gpuroutes.job_override(store, conn, ids[0], "cancel")
+    assert status == 409
+    assert "cancelled" in payload["error"], "the refusal names cancel explicitly"
+    assert store.get_broker_job(conn, ids[0])["state"] == "running", \
+        "the row must still describe what the GPU is doing"
 
 
 def test_an_unknown_job_is_404_and_an_unknown_action_is_400(conn, lane):

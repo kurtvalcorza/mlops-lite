@@ -225,3 +225,172 @@ def test_the_engine_runtimes_and_the_broker_share_one_coordinator(monkeypatch):
     assert shim.coordinator is coordinator
     assert scheduler.coordinator is coordinator
     agent_main._COORDINATOR = None
+
+
+# -- the production wiring, over a REAL EngineRuntime ----------------------------------------------
+#
+# Every test above drives `CoordinatorAdmission` over the coordinator's *test* lifecycle, which is
+# why they all passed while production ran on `NullLifecycle` and behaved differently. These use a
+# real `hostagent.lifecycle.EngineRuntime` with a fake adapter, so the call ORDER is the real one:
+#
+#     acquire(...) -> adapter.spawn() -> set_child(real pid)
+#
+# That order is the whole problem the `RuntimeLifecycle` exists to solve: at admission time the
+# process the coordinator would measure does not exist yet.
+
+class _FakeChild:
+    """What `EngineRuntime` actually drives: it calls `terminate()` on the child directly, not
+    `adapter.stop()`."""
+
+    def __init__(self, pid):
+        self.pid = pid
+        self._alive = True
+        self.terminated = False
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def terminate(self):
+        self.terminated = True
+        self._alive = False
+
+    def kill(self):
+        self._alive = False
+
+    def wait(self, timeout=None):
+        self._alive = False
+        return 0
+
+
+class _FakeAdapter:
+    """The smallest thing `EngineRuntime` will drive: spawns a child with a known PID."""
+
+    gpu = True
+    optional = False
+
+    def __init__(self, engine_id, pid, est_gb):
+        self.engine_id = engine_id
+        self._pid = pid
+        self._est = est_gb
+        self.spawned = 0
+        self.stopped = 0
+
+    def available(self):
+        return True, ""
+
+    def estimate_vram(self):
+        return self._est
+
+    def spawn(self):
+        self.spawned += 1
+        return _FakeChild(self._pid)
+
+    def ready(self):
+        return True
+
+    def stop(self, child):
+        self.stopped += 1
+        child.kill()
+
+
+def _runtime(adapter, admission):
+    from hostagent import lifecycle as lifecycle_mod
+    return lifecycle_mod.EngineRuntime(adapter, admission, kind="serving", ready_wait_s=1,
+                                       sleep=lambda _s: None)
+
+
+def test_the_real_spawned_pid_reaches_the_coordinator(monkeypatch):
+    """`set_child()` only assigned when `entry.child` was None, and the lifecycle had already put a
+    placeholder there — so the real PID was silently dropped and every per-PID reading afterwards
+    measured a process that does not exist."""
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    shim = coordadmission.CoordinatorAdmission(coord)
+
+    adapter = _FakeAdapter("llm", pid=4242, est_gb=4.0)
+    runtime = _runtime(adapter, shim)
+    coord.lifecycle.inner.register("llm", runtime)
+
+    runtime.ensure_loaded()
+
+    entry = coord.residents["llm"]
+    assert entry.child is not None and entry.child.pid == 4242, \
+        "the coordinator must know the PID of the process it is accounting for"
+
+
+def test_the_accounted_vram_is_reconciled_against_the_real_process(monkeypatch):
+    """Stage 3 cannot measure a process that does not exist yet, so the estimate stands until the
+    runtime reports back — and then the REAL reading replaces it."""
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    shim = coordadmission.CoordinatorAdmission(coord)
+
+    adapter = _FakeAdapter("llm", pid=4242, est_gb=4.0)
+    runtime = _runtime(adapter, shim)
+    coord.lifecycle.inner.register("llm", runtime)
+
+    # The probe reports the real process at 5 GiB — more than the 4 GiB estimate.
+    gpu.loaded[4242] = ("llm", 5 * GIB)
+    runtime.ensure_loaded()
+
+    assert coord.residents["llm"].vram_accounted_bytes == 5 * GIB, \
+        "both VRAM bounds are enforced against this number; it must be measured, not estimated"
+
+
+def test_a_deferred_load_is_not_marked_materialized_before_the_process_exists():
+    """Materialized means 'these bytes are already visible in live-free'. For a process that has not
+    spawned they are not, and saying otherwise stops deducting memory that is about to be taken —
+    admitting a second model against VRAM the first is on its way to using."""
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    shim = coordadmission.CoordinatorAdmission(coord)
+
+    adapter = _FakeAdapter("llm", pid=99, est_gb=4.0)
+    runtime = _runtime(adapter, shim)
+    coord.lifecycle.inner.register("llm", runtime)
+
+    # Admit without spawning: exactly the window between `acquire` and `set_child`.
+    result = coord.admit_serving("llm", 4.0 * GIB)
+    assert not isinstance(result, co.Refuse)
+    reservations = [r for r in coord.reservations.values()]
+    assert all(not r.materialized for r in reservations), \
+        "a not-yet-spawned model's bytes are not in live-free"
+
+
+def test_a_coordinator_eviction_unloads_the_real_engine():
+    """The no-op `NullLifecycle.unload` left the real child running while the coordinator recorded
+    the model as gone — the two VRAM bounds then enforced against memory still held."""
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    shim = coordadmission.CoordinatorAdmission(coord)
+
+    adapter = _FakeAdapter("llm", pid=4242, est_gb=4.0)
+    runtime = _runtime(adapter, shim)
+    coord.lifecycle.inner.register("llm", runtime)
+
+    runtime.ensure_loaded()
+    child = runtime.child
+    assert child is not None, "the engine is up"
+
+    shim.release("llm")           # drop the shim's long-lived claim so the model is evictable
+    coord.evict("llm")
+
+    assert child.terminated, "eviction must stop the REAL child, not call a no-op"
+    assert runtime.child is None, "and the runtime must know it is gone"
+    assert "llm" not in coord.residents
+
+
+def test_production_wiring_does_not_use_the_null_lifecycle(monkeypatch):
+    """The finding in one assertion: `_coordinator()` built a bare `Coordinator()`, which defaults
+    to a lifecycle that loads nothing and unloads nothing."""
+    monkeypatch.setenv("BROKER_COORDINATOR_ADMISSION", "1")
+    from hostagent import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_COORDINATOR", None)
+    monkeypatch.setattr(main_mod, "_RUNTIME_LIFECYCLE", None)
+    coordinator = main_mod._coordinator()
+
+    inner = getattr(coordinator.lifecycle, "inner", coordinator.lifecycle)
+    assert not isinstance(inner, co.NullLifecycle), \
+        "production must not run the coordinator on a lifecycle that loads and unloads nothing"
+    assert isinstance(inner, coordadmission.RuntimeLifecycle)

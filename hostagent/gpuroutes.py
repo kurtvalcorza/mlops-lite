@@ -73,8 +73,17 @@ def job_override(store, conn, job_id: str, action: str, position: int = None) ->
     job = store.get_broker_job(conn, job_id)
     if job is None:
         return 404, {"error": "unknown job"}
-    if job["state"] == "running" and action != "cancel":
-        return 409, {"error": "a running job is never preempted or reordered"}
+    if job["state"] == "running":
+        # EVERY action, including cancel. The guard used to read `and action != "cancel"`, which let
+        # an override flip a running row to `cancelled` in the database while the GPU process kept
+        # running — splitting the persisted lane, the coordinator's ownership, and the reservation
+        # that is still accruing against the tenant. The row would say the job is over; the device
+        # would disagree, and nothing would reconcile them.
+        #
+        # There is no runtime cancellation path for a running job, and inventing one here would mean
+        # killing a child from a route that holds none of the coordinator's state. If it is ever
+        # supported it needs a coordinator-controlled stop-and-settle lifecycle, not a store write.
+        return 409, {"error": "a running job is never preempted, reordered, or cancelled"}
 
     try:
         if action == "pin":

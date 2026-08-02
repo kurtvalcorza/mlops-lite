@@ -49,6 +49,58 @@ def enabled() -> bool:
     return os.getenv("BROKER_COORDINATOR_ADMISSION", "0").lower() in ("1", "true", "yes", "on")
 
 
+class RuntimeLifecycle:
+    """The coordinator's lifecycle when it is driven by `hostagent/lifecycle.py`'s engine runtimes.
+
+    **The runtime owns loading; the coordinator owns accounting.** That is forced by the call order
+    the legacy surface imposes:
+
+        runtime: admission.acquire(...)   ← the coordinator admits, and would like to load
+        runtime: child = adapter.spawn()  ← the REAL load happens here
+        runtime: admission.set_child(...) ← and only now is the real PID known
+
+    So the coordinator cannot be the thing that loads: by the time it is asked to admit, the process
+    it would measure does not exist yet. This lifecycle therefore returns a **deferred** child whose
+    PID is `None`, meaning "the caller is spawning it; reconcile when it reports back".
+
+    Leaving `NullLifecycle` wired here — which is what production did — was not merely a stub. Its
+    `load()` returns a fake child with `pid=0`, so stage 3 reconciled the reservation against PID 0,
+    measuring some other process or nothing at all; `set_child()` then declined to install the real
+    PID because a child was already present; and eviction called a no-op `unload()`, leaving the real
+    engine running while the coordinator recorded it as gone. Production and the co-residency tests
+    were describing two different systems.
+
+    Unloading routes back to the real runtime, because there is exactly one thing that can stop that
+    child and it is not this module.
+    """
+
+    def __init__(self):
+        #: engine_id -> the `EngineRuntime` that owns that engine's child.
+        self._runtimes = {}
+
+    def register(self, engine_id: str, runtime) -> None:
+        self._runtimes[engine_id] = runtime
+
+    def load(self, model_key):
+        """A deferred child: admitted, not yet spawned.
+
+        `pid=None` is deliberate and is read by `GpuProbe.used_by_pid`, which returns 0 for it — so
+        the reservation keeps its **estimate** until the real PID arrives, rather than reconciling
+        to a measurement of the wrong process. An estimate held a moment longer is conservative; a
+        confident measurement of PID 0 is not.
+        """
+        return type("DeferredChild", (), {"pid": None, "model_key": model_key})()
+
+    def unload(self, model_key, child=None):
+        runtime = self._runtimes.get(model_key)
+        if runtime is None:
+            # Nothing registered for this key. Raising would turn an eviction into an admission
+            # failure; the coordinator's caller cannot act on it either way, and the accounting drop
+            # is still correct. Logged by the coordinator's own eviction path.
+            return None
+        return runtime.unload(drain_timeout_s=0)
+
+
 class CoordinatorAdmission:
     """The legacy `Admission` surface, served by the coordinator."""
 
@@ -115,10 +167,35 @@ class CoordinatorAdmission:
             claim.release()
 
     def set_child(self, tenant: str, pid: int) -> None:
+        """Install the **real** spawned PID and reconcile the accounted VRAM against it.
+
+        Two bugs lived in the old three-line version. It only assigned when `entry.child` was
+        `None`, but the lifecycle had already put a placeholder there — so the real PID was silently
+        discarded and every later per-PID reading measured a process that does not exist. And it
+        never re-measured, so the resident's accounted bytes stayed at whatever stage 3 recorded for
+        the placeholder, which is the number both VRAM bounds are then enforced against.
+
+        Re-measuring here is the whole point of the callback: this is the first moment the platform
+        knows which process holds the model's memory.
+        """
+        measured = None
+        try:
+            measured = self.coordinator.gpu.used_by_pid(pid)
+        except Exception:  # noqa: BLE001 — an unreadable probe leaves the estimate in place
+            measured = None
+
         with self.coordinator._locked():
             entry = self.coordinator.residents.get(tenant)
-            if entry is not None and entry.child is None:
-                entry.child = type("Child", (), {"pid": pid})()
+            if entry is None:
+                return
+            # Always replace: the placeholder is not a child, and keeping it would mean the
+            # coordinator can never see the process it is accounting for.
+            entry.child = type("Child", (), {"pid": pid})()
+            if measured:
+                # Only when the probe returned something. A zero reading is far more likely to mean
+                # "the process has not allocated yet" than "this model is free", and adopting it
+                # would drop the model out of the budget entirely.
+                entry.vram_accounted_bytes = measured
 
     def holder(self):
         """The exclusive job if one runs, else the most recently used resident — see the module

@@ -217,12 +217,36 @@ def test_plaintext_is_refused_not_redirected(client, monkeypatch, upstream):
     assert "location" not in {k.lower() for k in r.headers}
 
 
-def test_tls_is_satisfied_by_the_forwarded_proto_header(client, monkeypatch, upstream):
-    """The compose deployment terminates TLS at a proxy; the app sees the hop header."""
+def test_a_client_supplied_forwarded_proto_header_does_not_satisfy_tls(client, monkeypatch,
+                                                                       upstream):
+    """The header alone is **not** proof of TLS, and treating it as proof defeated the whole control.
+
+    Any peer on the LAN can send plaintext HTTP with `X-Forwarded-Proto: https`. When `_is_secure()`
+    read that header directly, such a request passed `enforce_tls()` and the bearer key crossed the
+    network in the clear — precisely the outcome FR-002a exists to prevent, reachable by adding one
+    header. At this layer there is nothing left to tell a proxy's header from a client's; the peer
+    address is gone.
+
+    Trust therefore lives where the address is still known: uvicorn's `ProxyHeadersMiddleware`
+    honours the header only from `--forwarded-allow-ips`, and the result is `request.url.scheme` —
+    which is now the only thing consulted.
+    """
     created = _tenant(client)
     monkeypatch.delenv("BROKER_ALLOW_PLAINTEXT", raising=False)
     r = client.get("/v1/usage", headers={**_auth(created), "X-Forwarded-Proto": "https"})
-    assert r.status_code == 200
+    assert r.status_code == 401, "a spoofable header must not satisfy TLS enforcement"
+
+
+def test_tls_is_satisfied_by_the_framework_resolved_scheme(env, monkeypatch, upstream):
+    """The legitimate path: a TLS request (direct, or forwarded by a TRUSTED proxy, which is what
+    populates the scheme) is admitted."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("BROKER_ALLOW_PLAINTEXT", raising=False)
+    with TestClient(_gwimport.gateway_app(), base_url="https://testserver") as secure:
+        created = _tenant(secure)
+        r = secure.get("/v1/usage", headers=_auth(created))
+        assert r.status_code == 200
 
 
 # -- T620/T627: auth and per-tenant attribution ----------------------------------------------------------
@@ -661,3 +685,173 @@ def test_one_tenants_exhaustion_does_not_affect_another(client, upstream):
     body = {"messages": [{"role": "user", "content": "hi"}]}
     assert client.post("/v1/chat/completions", json=body, headers=_auth(poor)).status_code == 403
     assert client.post("/v1/chat/completions", json=body, headers=_auth(rich)).status_code == 200
+
+
+def test_a_streamed_request_is_charged_for_the_time_the_stream_actually_took(client, conn,
+                                                                            monkeypatch):
+    """The settled ledger charge, not the presence of a usage event (review finding 1).
+
+    `chat_completions` returns the `StreamingResponse` from inside `with meter:`, so `__exit__` ran
+    the moment the *response object* was built — before the generator opened the upstream stream or
+    produced a token. The meter settled at ~0 GPU-seconds and the generator's later `finish()` was a
+    no-op, because `finish` is idempotent once `settled` is set. Every streamed request was
+    materially undercharged, and the terminal usage event reported that premature value as fact.
+
+    The old streaming test could not catch this: it asserted the usage event *existed*. This one
+    puts a measurable delay inside the stream and reads what was persisted, which is the number the
+    tenant is actually billed on.
+    """
+    import httpx
+
+    delay = 0.25
+
+    class FakeStream:
+        status_code = 200
+
+        async def aiter_lines(self):
+            import asyncio
+            for token in ("Hel", "lo"):
+                await asyncio.sleep(delay / 2)
+                yield "data: " + json.dumps({"token": token})
+
+        async def aread(self):
+            return b""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    alice = _tenant(client, "alice", budget=1000)
+    headers = {**_auth(alice), "X-Request-Id": "op-streamed"}
+
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=headers) as r:
+        assert r.status_code == 200
+        body = "".join(chunk for chunk in r.iter_text())
+
+    rows = [row for row in store.list_ledger(conn) if row["ref_id"] == "op-streamed"]
+    assert len(rows) == 1, "the stream must settle exactly once"
+    charged = float(rows[0]["gpu_seconds"])
+    assert charged >= delay, (
+        f"charged {charged:.3f}s for a stream that took at least {delay}s — settlement ran before "
+        "the stream did")
+
+    # And the terminal usage event reports that same settled number, not a premature one.
+    usage_line = [ln for ln in body.splitlines()
+                  if ln.startswith("data:") and "gpu_seconds" in ln][0]
+    assert json.loads(usage_line[5:])["gpu_seconds"] == pytest.approx(charged, abs=0.01)
+
+
+def test_a_refused_upstream_stream_is_not_counted_as_a_successful_request(client, monkeypatch):
+    """The generator's `finally` incremented `status="ok"` unconditionally, so an upstream refusal —
+    which returns early after yielding an SSE error — was recorded as a success. A refusal rate
+    computed from that counter would read zero however often the GPU turned tenants away."""
+    import httpx
+
+    class FakeStream:
+        status_code = 503
+
+        async def aiter_lines(self):
+            yield ""
+
+        async def aread(self):
+            return b"gpu busy"
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    from gateway.app.routers import broker_openai
+
+    before = broker_openai.BROKER_REQUESTS.labels(modality="chat", status="ok")._value.get()
+    alice = _tenant(client, "alice", budget=1000)
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=_auth(alice)) as r:
+        body = "".join(chunk for chunk in r.iter_text())
+
+    assert "error" in body.lower(), "the refusal reaches the client as an SSE error"
+    after = broker_openai.BROKER_REQUESTS.labels(modality="chat", status="ok")._value.get()
+    assert after == before, "a refused stream must not increment the ok counter"
+
+
+def test_a_settlement_appended_during_compaction_is_not_erased(monkeypatch, tmp_path):
+    """The compact-vs-append race (review finding 5).
+
+    `_wal_compact()` read the entries *before* taking the lock, then took it and replaced the file
+    from that stale snapshot. An append landing in between was erased — silent data loss in the one
+    structure whose entire purpose is to survive loss, and it loses exactly the record needed if
+    that request's database settlement later fails.
+
+    Driven deterministically: the writer is released the moment the compactor has read, so the
+    append is guaranteed to fall inside the window rather than depending on timing.
+    """
+    from gateway.app import metering
+
+    wal = tmp_path / "race.jsonl"
+    monkeypatch.setenv("BROKER_METERING_WAL", str(wal))
+
+    metering._wal_append({"op_id": "op-old", "gpu_seconds": 1.0})
+    metering._wal_append({"op_id": "op-doomed", "gpu_seconds": 2.0})
+
+    read_happened = threading.Event()
+    appended = threading.Event()
+    real_entries = metering._wal_entries
+
+    def entries_then_yield():
+        rows = real_entries()
+        read_happened.set()
+        # Give the writer its window. With the read outside the lock this genuinely interleaves;
+        # with the read inside it, the writer simply waits and nothing is lost either way.
+        appended.wait(2.0)
+        return rows
+
+    def writer():
+        read_happened.wait(2.0)
+        metering._wal_append({"op_id": "op-new", "gpu_seconds": 3.0})
+        appended.set()
+
+    monkeypatch.setattr(metering, "_wal_entries", entries_then_yield)
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    metering._wal_compact({"op-doomed"})
+    thread.join(3.0)
+
+    monkeypatch.setattr(metering, "_wal_entries", real_entries)
+    op_ids = {e["op_id"] for e in metering._wal_entries()}
+    assert "op-new" in op_ids, "an append during compaction was erased — the outbox lost a record"
+    assert "op-old" in op_ids, "an unrelated pending settlement must survive compaction"
+    assert "op-doomed" not in op_ids, "a confirmed settlement is still dropped"

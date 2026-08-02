@@ -375,3 +375,78 @@ def test_the_snapshot_carries_both_lanes(conn, tenant):
 def _coordinator():
     from tests.test_agent_coordinator import make
     return make()
+
+
+# -- the lane connection is reused, not reopened per read -------------------------------------------
+
+def test_the_lane_connection_factory_reuses_one_connection(monkeypatch):
+    """`Scheduler.snapshot()` backs `GET /admin/queue`, which the console polls every few seconds,
+    and neither it nor `queued()` closes what the factory hands them.
+
+    A connect-per-call factory therefore opened a Postgres connection on every poll and dropped it
+    unclosed, walking the server's connection limit until nothing could connect at all. The factory
+    now caches one and reopens it only after a failure — the same self-healing shape
+    `gateway/app/broker.py` and `gateway/app/policies.py` use, for the same reason.
+    """
+    from platformlib import store as store_mod
+
+    opened = []
+
+    class FakeConn:
+        closed = False
+
+        def __init__(self):
+            opened.append(self)
+
+    monkeypatch.setenv("BROKER_ENABLED", "1")
+    monkeypatch.setattr(store_mod, "connect", lambda *a, **k: FakeConn())
+    monkeypatch.setattr(store_mod, "recover_broker_lane",
+                        lambda conn: {"interrupted": [], "requeued": []})
+    monkeypatch.setattr(store_mod, "list_queued_broker_jobs", lambda conn: [])
+
+    from hostagent import main as main_mod
+    monkeypatch.setattr(main_mod, "_COORDINATOR", None)
+    monkeypatch.setattr(main_mod, "_RUNTIME_LIFECYCLE", None)
+
+    _coordinator, scheduler = main_mod.build_broker()
+    before = len(opened)
+    for _ in range(20):
+        scheduler.snapshot()
+        scheduler.queued()
+
+    assert len(opened) == before, \
+        f"{len(opened) - before} extra connections opened across 40 reads — each one leaks"
+
+
+def test_the_lane_connection_is_reopened_after_a_failure(monkeypatch):
+    """Self-healing: a store that comes back must not need an agent restart."""
+    from platformlib import store as store_mod
+
+    class FakeConn:
+        def __init__(self):
+            self.closed = False
+
+    state = {"fail": True, "opened": 0}
+
+    def connect(*a, **k):
+        if state["fail"]:
+            raise store_mod.StoreError("down")
+        state["opened"] += 1
+        return FakeConn()
+
+    monkeypatch.setenv("BROKER_ENABLED", "1")
+    monkeypatch.setattr(store_mod, "connect", connect)
+    monkeypatch.setattr(store_mod, "recover_broker_lane",
+                        lambda conn: {"interrupted": [], "requeued": []})
+    monkeypatch.setattr(store_mod, "list_queued_broker_jobs", lambda conn: [])
+
+    from hostagent import main as main_mod
+    monkeypatch.setattr(main_mod, "_COORDINATOR", None)
+    monkeypatch.setattr(main_mod, "_RUNTIME_LIFECYCLE", None)
+
+    _coordinator, scheduler = main_mod.build_broker()
+    assert scheduler.snapshot()["jobs_lane"] == [], "a down store degrades the view, not the read"
+
+    state["fail"] = False
+    scheduler.snapshot()
+    assert state["opened"] == 1, "the factory reconnects once the store is back"

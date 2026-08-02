@@ -257,6 +257,13 @@ class LifecycleGuard:
         self._lifecycle = lifecycle
         self._coordinator = coordinator
 
+    @property
+    def inner(self):
+        """The wrapped lifecycle. Public because the guard is transparent by design — a caller that
+        needs to register a runtime with the real lifecycle should not have to reach past an
+        underscore to reach through a wrapper whose only job is an assertion."""
+        return self._lifecycle
+
     def _check(self, op):
         if self._coordinator._holds_lock():
             raise AssertionError(
@@ -310,6 +317,12 @@ class GpuProbe:
         return float(self._nvml(lambda h, m: m.free))
 
     def used_by_pid(self, pid: int) -> float:
+        if pid is None:
+            # A DEFERRED child: admitted, not yet spawned (see `coordadmission.RuntimeLifecycle`).
+            # There is no process to measure, and returning 0 lets stage 3 keep the reservation's
+            # estimate rather than reconciling to a reading of something else — `set_child` supplies
+            # the real number the moment the PID exists.
+            return 0.0
         if self._used_fn is not None:
             return float(self._used_fn(pid))
         try:
@@ -810,14 +823,24 @@ class Coordinator:
         with _Gate(self._load_gate):
             try:
                 child = self.lifecycle.load(model_key)
-                real_bytes = self.gpu.used_by_pid(getattr(child, "pid", 0))
+                pid = getattr(child, "pid", None)
+                # A DEFERRED child (`pid is None`) means the CALLER spawns the process — the engine
+                # runtime does, right after admission returns — so there is nothing to measure yet.
+                # See `coordadmission.RuntimeLifecycle`.
+                deferred = pid is None
+                real_bytes = est_bytes if deferred else self.gpu.used_by_pid(pid)
             except Exception as e:  # noqa: BLE001 — spawn error, readiness timeout, OOM, missing model
                 return self._load_failed(model_key, op_id, child, e)  # T674
 
             # Reconcile the reservation to the measured size and mark it materialized: the bytes are
             # now visible in `live_free`, so continuing to deduct them from it would double-count.
+            #
+            # A deferred child gets NEITHER. Its bytes are not in `live_free` — the process does not
+            # exist — so marking it materialized would stop deducting memory nothing has allocated
+            # yet, admitting a second model against VRAM that is about to be taken. The estimate
+            # stands until `set_child()` reports the real PID and re-measures.
             with self._locked():
-                if op_id in self.reservations:
+                if op_id in self.reservations and not deferred:
                     self.reservations[op_id].est_bytes = real_bytes
                     self.reservations[op_id].materialized = True
 

@@ -85,12 +85,22 @@ def _wal_entries() -> list:
 
 def _wal_compact(done_op_ids: set) -> None:
     """Drop entries whose settlement is confirmed. Rewrites through a temp file + `os.replace` so a
-    crash mid-compaction leaves the old complete WAL rather than a truncated one."""
+    crash mid-compaction leaves the old complete WAL rather than a truncated one.
+
+    **The read and the rewrite are one critical section.** They used not to be: the entries were
+    read *before* taking the lock, so an append landing between the read and the `os.replace` was
+    erased by the stale snapshot. That is silent data loss in the one structure whose entire job is
+    to survive loss — and it loses precisely the record needed if that request's database settlement
+    later fails, breaking the exactly-once guarantee the outbox exists to provide.
+
+    `_wal_entries()` does not take the lock itself, so reading inside it here is safe with a
+    non-reentrant lock.
+    """
     path = wal_path()
-    remaining = [e for e in _wal_entries()
-                 if not (e.get("op_id") in done_op_ids or e.get("done"))]
     tmp = path + ".compact"
     with _wal_lock:
+        remaining = [e for e in _wal_entries()
+                     if not (e.get("op_id") in done_op_ids or e.get("done"))]
         with open(tmp, "w", encoding="utf-8") as fh:
             for e in remaining:
                 fh.write(json.dumps(e, separators=(",", ":")) + "\n")

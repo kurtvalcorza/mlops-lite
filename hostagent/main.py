@@ -69,7 +69,14 @@ def build_agent():
     journal = Journal()  # US4 T375-B: durable job state lives in the Postgres `jobs` table now
     from hostagent import adapters  # one runtime per registered engine adapter (T358+)
 
-    manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission))
+    runtimes = adapters.build_runtimes(admission)
+    # Co-residency only: tell the coordinator which runtime owns each engine, so an eviction unloads
+    # the real child instead of calling a no-op. The runtimes take admission as a constructor
+    # argument, so this cannot happen any earlier than here.
+    for engine_id, runtime in runtimes.items():
+        _register_runtime(engine_id, runtime)
+
+    manager = lifecycle.EngineManager(admission, runtimes=runtimes)
     jobs = jobs_mod.JobManager(admission, journal)  # 018 T362: the trainer folded in
     return admission, journal, manager, jobs
 
@@ -80,12 +87,37 @@ def build_agent():
 _COORDINATOR = None
 
 
+#: The lifecycle the coordinator drives in production. Shared with the admission shim so the engine
+#: runtimes can register themselves as the real owners of load and unload.
+_RUNTIME_LIFECYCLE = None
+
+
 def _coordinator():
-    global _COORDINATOR
+    """The one coordinator, wired to a lifecycle that reflects how loading actually happens here.
+
+    It used to be constructed bare, which left it on `NullLifecycle` — a stub that returns a fake
+    child with `pid=0` and unloads nothing. In production that meant stage 3 reconciled VRAM against
+    PID 0, the real spawned PID was never installed, and coordinator evictions left the real engine
+    running. The co-residency tests passed because they supply their own fake lifecycle, so the
+    tested system and the shipped one were not the same system.
+    """
+    global _COORDINATOR, _RUNTIME_LIFECYCLE
     if _COORDINATOR is None:
+        from hostagent import coordadmission
         from hostagent import coordinator as coordinator_mod
-        _COORDINATOR = coordinator_mod.Coordinator()
+        _RUNTIME_LIFECYCLE = coordadmission.RuntimeLifecycle()
+        _COORDINATOR = coordinator_mod.Coordinator(lifecycle=_RUNTIME_LIFECYCLE)
     return _COORDINATOR
+
+
+def _register_runtime(engine_id: str, runtime) -> None:
+    """Tell the coordinator which runtime owns an engine, so eviction can actually unload it.
+
+    Called after the runtimes are built — they take admission as a constructor argument, so the
+    coordinator necessarily exists first and the registration cannot happen at construction time.
+    """
+    if _RUNTIME_LIFECYCLE is not None:
+        _RUNTIME_LIFECYCLE.register(engine_id, runtime)
 
 
 def _build_admission():
@@ -118,11 +150,29 @@ def build_broker():
 
     coordinator = _coordinator()  # the SAME instance the engine runtimes admit through
 
+    # ONE cached connection, reopened after a failure — not a fresh connect per call.
+    #
+    # `Scheduler.snapshot()` backs `GET /admin/queue`, which the console polls every few seconds and
+    # which never closed what the factory handed it. A connect-per-call factory therefore opened a
+    # new Postgres connection on every poll and dropped it unclosed, walking the server's connection
+    # limit until nothing could connect at all. The self-healing cache mirrors
+    # `gateway/app/broker.py` and `gateway/app/policies.py`, which solved the same problem for the
+    # same reason.
+    lane_conn = {"conn": None}
+    lane_lock = threading.Lock()
+
     def conn_factory():
-        try:
-            return _store.connect()
-        except StoreError:
-            return None  # the scheduler degrades its lane view rather than failing the read
+        with lane_lock:
+            existing = lane_conn["conn"]
+            if existing is not None and not getattr(existing, "closed", False):
+                return existing
+            try:
+                lane_conn["conn"] = _store.connect()
+            except StoreError:
+                # The scheduler degrades its lane view rather than failing the read, and the next
+                # call retries — a store that comes back does not need an agent restart.
+                lane_conn["conn"] = None
+            return lane_conn["conn"]
 
     scheduler = scheduler_mod.Scheduler(coordinator, store=_store, conn_factory=conn_factory)
     _recover_broker_lane(_store, conn_factory)

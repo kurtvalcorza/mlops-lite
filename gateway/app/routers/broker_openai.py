@@ -97,6 +97,8 @@ class _Meter:
         self.started = None
         self.gpu_seconds = 0.0
         self.settled = None
+        #: True once a streaming generator has taken over settlement — see `transfer()`.
+        self.transferred = False
 
     def __enter__(self):
         reserve_or_refuse(self.op_id, self.tenant, self.est, kind="inference",
@@ -107,6 +109,23 @@ class _Meter:
     def elapsed(self) -> float:
         return max(0.0, time.monotonic() - (self.started or time.monotonic()))
 
+    def transfer(self) -> "_Meter":
+        """Hand settlement ownership to a streaming generator, so `__exit__` does not settle.
+
+        **This is what makes streamed metering correct.** A `return StreamingResponse(...)` from
+        inside `with meter:` runs `__exit__` at the moment the *response object* is constructed —
+        before the generator has opened the upstream stream or produced a single token. The meter
+        therefore settled at ~0 GPU-seconds, and the generator's later `finish()` was a no-op
+        because `finish` is idempotent once `settled` is set. Every streamed request was materially
+        undercharged, and the terminal usage event reported that premature value as fact.
+
+        The reservation is already placed by `__enter__`; only the *settlement* moves. If the
+        generator is never consumed, its `aclose()` still runs the `finally` — Starlette closes the
+        response body — so the reservation is not orphaned.
+        """
+        self.transferred = True
+        return self
+
     def __exit__(self, exc_type, exc, tb):
         if exc_type is not None and self.started is None:
             return False
@@ -114,8 +133,13 @@ class _Meter:
             # The work failed. Charge what the GPU actually spent rather than releasing in full: a
             # failure after the model was loaded and tokens were generated still consumed the GPU,
             # and refunding it would let a tenant burn the device for free by cancelling.
+            #
+            # This runs even when transferred: the failure happened before the generator existed, so
+            # there is nothing downstream that will settle it.
             self.finish(self.elapsed())
             return False
+        if self.transferred:
+            return False  # the generator settles when the stream actually ends
         if self.settled is None:
             self.finish(self.elapsed())
         return False
@@ -223,7 +247,10 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     with BROKER_LATENCY.labels(modality="chat").time():
         with meter:
             if body.stream:
-                return await _chat_stream(prompt, body, meter)
+                # `transfer()` before returning: the generator, not this context, owns settlement.
+                # Without it `__exit__` settles here — before a token exists — and the generator's
+                # later `finish()` is a no-op.
+                return await _chat_stream(prompt, body, meter.transfer())
             r = await _post(f"{SERVING_URL}/infer",
                             {"prompt": prompt, "max_tokens": body.max_tokens,
                              "temperature": body.temperature})
@@ -255,6 +282,12 @@ async def _chat_stream(prompt: str, body: ChatCompletionRequest, meter: "_Meter"
     GPU-seconds were spent either way, and a disconnect must not turn into an unsettled reservation
     that holds the tenant's quota until something reconciles it.
     """
+    # Set only when the upstream stream completed normally. The `finally` used to increment
+    # `status="ok"` unconditionally, so an upstream refusal — which returns early after yielding an
+    # SSE error — was counted as a success. A refusal rate computed from that counter would read as
+    # zero no matter how often the GPU turned tenants away.
+    outcome = {"status": "refused"}
+
     async def gen():
         try:
             async with httpx.AsyncClient(headers=agent_headers(), timeout=600.0) as client:
@@ -266,6 +299,7 @@ async def _chat_stream(prompt: str, body: ChatCompletionRequest, meter: "_Meter"
                         text = (await upstream.aread()).decode("utf-8", "replace")
                         yield _sse_error(upstream.status_code, text)
                         return
+                    outcome["status"] = "ok"
                     async for chunk in upstream.aiter_lines():
                         if not chunk:
                             continue
@@ -275,6 +309,9 @@ async def _chat_stream(prompt: str, body: ChatCompletionRequest, meter: "_Meter"
                             "choices": [{"index": 0, "delta": {"content": _delta(chunk)}}],
                         }) + "\n\n")
         finally:
+            # THE settlement for a streamed request. `elapsed()` here spans the actual stream,
+            # because this runs when the generator finishes — normally, on error, or on a client
+            # disconnect (Starlette closes the body, which raises GeneratorExit into this frame).
             meter.finish(meter.elapsed())
             state = quota_state(meter.tenant["id"])
             usage = {"gpu_seconds": round(meter.gpu_seconds, 3),
@@ -284,7 +321,7 @@ async def _chat_stream(prompt: str, body: ChatCompletionRequest, meter: "_Meter"
                 usage["window_start"] = getattr(window_start, "isoformat", lambda: window_start)()
             yield "event: usage\ndata: " + json.dumps(usage) + "\n\n"
             yield "data: [DONE]\n\n"
-            BROKER_REQUESTS.labels(modality="chat", status="ok").inc()
+            BROKER_REQUESTS.labels(modality="chat", status=outcome["status"]).inc()
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers=meter.headers(streaming=True))

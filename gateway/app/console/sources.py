@@ -9,7 +9,14 @@ answer" if the reader already decided for it.
 Bounded by default. Every reader here can be called on a poll cadence by an interface that is open
 all day, so an unbounded read is not an option (contract cross-cutting rule 3).
 """
+import os
 import time
+
+#: The repository root. `sources.py` sits at `gateway/app/console/`, so this is **four** levels up —
+#: an earlier three-level walk landed on `gateway/` and silently made every repo-relative lookup
+#: below it resolve to a path that does not exist.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 #: Process start, for the admin surface's uptime. Captured at import rather than read from
 #: `/proc`, so the number describes THIS gateway process — which is what an operator asking
@@ -340,6 +347,18 @@ def dataset_detail(name: str, version: str):
     return datasets_mod.get_dataset(name, version)
 
 
+#: Where the 023 US7 rule files actually live. Configuration-backed, defaulting to the mounted path
+#: the compose deployment uses.
+#:
+#: This was `monitoring/**/*rules*.y*ml`, which matched **nothing**: the rules are at
+#: `infra/prometheus/rules/mlops-lite.yml` — wrong directory, and the filename does not contain
+#: "rules" either, so even the right directory would have missed it. The failure mode is the one
+#: this increment exists to prevent: the glob returned `[]` *successfully*, so the console reported
+#: "no rules configured" with a clean observation timestamp instead of degrading. A confident empty
+#: list is worse than an error, because nothing about it looks wrong.
+RULES_DIR = os.getenv("PROMETHEUS_RULES_DIR", "infra/prometheus/rules")
+
+
 def alert_rules() -> list:
     """The 023 US7 Prometheus rule files, parsed for rule NAMES and expressions.
 
@@ -347,28 +366,44 @@ def alert_rules() -> list:
     but no Alertmanager, so there is no evaluation endpoint to ask for live state. Every rule
     therefore comes back `unknown` — which is the honest answer and is exactly why `unknown` is a
     first-class member of the state vocabulary rather than a fallback to `inactive`.
+
+    Raises when the configured directory does not exist, so an unreadable rule set is reported as a
+    degraded source rather than as an empty one.
     """
     import glob
-    import os
 
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    directory = RULES_DIR if os.path.isabs(RULES_DIR) else os.path.join(_REPO_ROOT, RULES_DIR)
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"no Prometheus rules directory at {directory}")
+
+    def _value(line):
+        """The scalar after `key:`, with YAML quoting removed.
+
+        Left in, a quoted runbook path becomes `"monitoring/README.md#..."` — an href with literal
+        quote characters, which resolves to nothing.
+        """
+        return line.split(":", 1)[1].strip().strip('"\'')
+
     rules = []
-    for path in sorted(glob.glob(os.path.join(repo, "monitoring", "**", "*rules*.y*ml"),
-                                 recursive=True)):
+    for path in sorted(glob.glob(os.path.join(directory, "**", "*.y*ml"), recursive=True)):
         with open(path, encoding="utf-8") as fh:
             current = None
             for raw in fh:
                 line = raw.strip()
                 if line.startswith("- alert:"):
-                    current = {"name": line.split(":", 1)[1].strip(), "state": "unknown",
+                    current = {"name": _value(line), "state": "unknown",
                                "annotations": {}, "labels": {}}
                     rules.append(current)
                 elif current is not None and line.startswith("expr:"):
-                    current["expr"] = line.split(":", 1)[1].strip()
+                    current["expr"] = _value(line)
                 elif current is not None and line.startswith("severity:"):
-                    current["labels"]["severity"] = line.split(":", 1)[1].strip()
-                elif current is not None and line.startswith("runbook_url:"):
-                    current["annotations"]["runbook_url"] = line.split(":", 1)[1].strip()
+                    current["labels"]["severity"] = _value(line)
+                elif current is not None and line.startswith(("runbook:", "runbook_url:")):
+                    # The shipped rules write `runbook:`; the Prometheus convention is
+                    # `runbook_url:`. Accept both rather than silently dropping the link that
+                    # tells an operator what to DO — which is the whole substitute this platform
+                    # offers for having no notification channel.
+                    current["annotations"]["runbook_url"] = _value(line)
     return rules
 
 

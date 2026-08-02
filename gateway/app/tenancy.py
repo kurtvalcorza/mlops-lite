@@ -55,14 +55,19 @@ def tls_required() -> bool:
 def _is_secure(request: Request) -> bool:
     """Whether this request reached us over TLS.
 
-    `request.url.scheme` already reflects `X-Forwarded-Proto` when the app runs behind a proxy with
-    `ProxyHeadersMiddleware`, which is how the compose deployment terminates TLS. A direct-to-uvicorn
-    TLS deployment sets the scheme itself. Both are accepted; nothing else is.
+    **Only the framework-resolved scheme is trusted.** `request.url.scheme` reflects
+    `X-Forwarded-Proto` when — and only when — uvicorn's `ProxyHeadersMiddleware` accepted it from a
+    trusted proxy address (`--forwarded-allow-ips`, `FORWARDED_ALLOW_IPS`; `127.0.0.1` by default).
+    A direct-to-uvicorn TLS deployment sets the scheme itself. Both are covered by this one check.
+
+    An earlier version *also* read the raw `X-Forwarded-Proto` header itself, which defeated the
+    entire control: any LAN client could send plaintext HTTP with `X-Forwarded-Proto: https` and
+    satisfy `enforce_tls()`, putting the bearer token on the wire in the clear — the exact threat
+    FR-002a exists to prevent. Reading the header directly cannot be made safe here, because at this
+    layer there is nothing left to distinguish a proxy's header from a client's. The trust decision
+    belongs where the peer address is still known, which is the proxy middleware.
     """
-    if request.url.scheme == "https":
-        return True
-    forwarded = request.headers.get("x-forwarded-proto", "")
-    return forwarded.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
 
 
 def enforce_tls(request: Request) -> None:
