@@ -332,20 +332,20 @@ stopped in turn produces its documented degradation; fixture mode is badged.
 **Independent Test**: a failed gate shows the rule, threshold, observed value and comparison basis
 without leaving the view; drift shows configurable thresholds and stated limitations.
 
-- [ ] **T736** [P] [US5] Write `tests/test_console_read_api.py` (evaluations half) — modality-native
+- [X] **T736** [P] [US5] Write `tests/test_console_read_api.py` (evaluations half) — modality-native
   metrics are **not** coerced into a common metric (FR-399); a version with no logged metric that is
   not serving reads `not-evaluated`, not an error (FR-402).
-- [ ] **T737** [US5] Implement `GET /console/evaluations`, `/console/evaluations/{id}`,
+- [X] **T737** [US5] Implement `GET /console/evaluations`, `/console/evaluations/{id}`,
   `/console/gates`, `/console/compare` (FR-398) — failing rule, operator, threshold, observed value,
   comparison basis, metric direction, and any override with its reason (FR-400/401/SC-191).
-- [ ] **T738** [US5] Implement `GET /console/drift` (FR-404) returning `thresholds` **inline** so the
+- [X] **T738** [US5] Implement `GET /console/drift` (FR-404) returning `thresholds` **inline** so the
   interface never hard-codes the 0.10/0.25 convention (FR-405).
-- [ ] **T739** [US5] Build `ui/app/(console)/evaluations/` — runs, comparisons, test sets, gates,
+- [X] **T739** [US5] Build `ui/app/(console)/evaluations/` — runs, comparisons, test sets, gates,
   drift. The comparison workspace separates quality / latency / resources / artifacts / datasets /
   policy (FR-403). **The drift surface states the statistic's limitations on the surface itself**
   (FR-406) — it detects distributional change, does not prove degradation, does not establish
   causality, and depends on baseline and binning.
-- [ ] **T740** [US5] Extend the allowlist with the five evaluation entries.
+- [X] **T740** [US5] Extend the allowlist with the five evaluation entries.
 
 ---
 
@@ -356,27 +356,27 @@ without leaving the view; drift shows configurable thresholds and stated limitat
 **Independent Test**: predictions come from the gateway record; payloads are hidden until explicitly
 revealed and never appear in a URL; traces render as a generic span waterfall.
 
-- [ ] **T741** [P] [US6] Write the payload-safety tests in `tests/test_ui_security.py` — no payload
+- [X] **T741** [P] [US6] Write the payload-safety tests in `tests/test_ui_security.py` — no payload
   value in any path or query, reveal requires the explicit `POST` call, and no payload content
   reaches browser telemetry (FR-409/SC-192).
-- [ ] **T742** [US6] Implement `gateway/app/console/predictions.py` + `GET /console/predictions`,
+- [X] **T742** [US6] Implement `gateway/app/console/predictions.py` + `GET /console/predictions`,
   `/console/predictions/{id}` — **from the gateway record, not reconstructed from traces**
   (FR-407). Detail (FR-408) returns `PayloadPreview` **without** `preview`, making default-hidden structural:
   a component cannot render a payload it was never sent.
-- [ ] **T743** [US6] Implement `POST /console/predictions/{id}/payload` — the explicit reveal (FR-409/SC-192), with
+- [X] **T743** [US6] Implement `POST /console/predictions/{id}/payload` — the explicit reveal (FR-409/SC-192), with
   the identifier in the **body**. It is a `POST` specifically so no payload reference lands in a URL,
   where it would reach logs, history, and referrers (contracts/console-read-api.md).
-- [ ] **T744** [P] [US6] Implement `GET /console/captures` and `GET /console/review-queue` —
+- [X] **T744** [P] [US6] Implement `GET /console/captures` and `GET /console/review-queue` —
   label state per FR-410, prioritized by policy result, confidence, drift contribution, sampling, missing label, manual flag,
   and suggestion (FR-411).
-- [ ] **T745** [US6] Implement `gateway/app/console/traces.py` + `GET /console/traces`,
+- [X] **T745** [US6] Implement `gateway/app/console/traces.py` + `GET /console/traces`,
   `/console/traces/{id}` via the already-pinned `mlflow-skinny` client (research R6 — **no new
   dependency**). Normalize to a generic span tree server-side (FR-412) so FR-413 is enforced in one place.
-- [ ] **T746** [US6] Build `ui/app/(console)/inference/` — predictions, traces, captures, labels,
+- [X] **T746** [US6] Build `ui/app/(console)/inference/` — predictions, traces, captures, labels,
   review queue. Trace waterfall uses the T696 primitive and **makes no token-oriented assumptions**
   for non-text-generation modalities (FR-413). Large payloads truncate with the true size stated,
   never loading the whole object (spec Edge Cases).
-- [ ] **T747** [US6] Extend the allowlist with the seven inference entries, including the one
+- [X] **T747** [US6] Extend the allowlist with the seven inference entries, including the one
   write-shaped `POST console/predictions/:id/payload` (which mutates nothing).
 
 ---
@@ -388,17 +388,17 @@ revealed and never appear in a URL; traces render as a generic span waterfall.
 **Independent Test**: an in-progress activation shows desired and resident separately and is not
 labelled healthy on desired state alone.
 
-- [ ] **T748** [US7] Implement `gateway/app/console/endpoints.py` + `GET /console/endpoints`,
+- [X] **T748** [US7] Implement `gateway/app/console/endpoints.py` + `GET /console/endpoints`,
   `/console/endpoints/{id}` (FR-414) — **synthesized from registry, serving pointer, activation state, and
   agent engines; no table, no migration** (research R7).
-- [ ] **T749** [US7] Enforce the status rule (FR-415/416/417, data-model §7): `healthy` requires **resident**
+- [X] **T749** [US7] Enforce the status rule (FR-415/416/417, data-model §7): `healthy` requires **resident**
   confirmation; desired-only is `pending`; a GPU modality not resident because another tenant holds
   the GPU is **`stopped`, not `failed`** — on-demand loading is the design, and calling it a failure
   misrepresents Principle II as a fault.
-- [ ] **T750** [US7] Build `ui/app/(console)/deployments/` — endpoint list and detail. **Render no
+- [X] **T750** [US7] Build `ui/app/(console)/deployments/` — endpoint list and detail. **Render no
   rollout control the gateway does not implement** (FR-418); availability comes from
   `GET /console/capabilities`, so an unsupported control is absent rather than decorative.
-- [ ] **T751** [US7] Extend the allowlist with the two endpoint entries.
+- [X] **T751** [US7] Extend the allowlist with the two endpoint entries.
 
 ---
 

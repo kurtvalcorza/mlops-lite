@@ -54,12 +54,48 @@ def test_no_agent_path_appears_in_the_allowlist():
         assert ":8100" not in pattern, pattern
 
 
+#: The one non-GET entry on the console surface, and it mutates nothing.
+#:
+#: It is a `POST` **specifically so the payload reference travels in the body rather than a URL**.
+#: URLs reach access logs, browser history, and `Referer` headers; a `GET /…/{id}/payload` would put
+#: a pointer to sensitive content in all three, permanently, for every reveal anyone ever performs.
+#: The allowlist matcher keys on method, so listing it does not widen `GET` access.
+PAYLOAD_REVEAL = ("POST", "console/predictions/:id/payload")
+
+
 def test_the_console_surface_is_read_only():
     """A write here would be a control the console is not supposed to have — FR-379 forbids any
     job-preempting control, and the runtime area ships with no buttons at all."""
     for method, pattern in _entries():
-        if pattern.startswith(("runtime/", "console/")):
+        if pattern.startswith(("runtime/", "console/")) and (method, pattern) != PAYLOAD_REVEAL:
             assert method == "GET", f"{method} {pattern} is not a read"
+
+
+def test_the_payload_reveal_is_the_only_write_shaped_console_entry():
+    """contracts/allowlist-delta.md rule 1. If a second one appears, it deserves the same scrutiny
+    this one got rather than inheriting its exemption."""
+    write_shaped = [(m, p) for m, p in _entries()
+                    if p.startswith(("runtime/", "console/")) and m != "GET"]
+    assert write_shaped == [PAYLOAD_REVEAL]
+
+
+def test_no_payload_content_can_be_fetched_through_a_url():
+    """SC-192. The reveal must not ALSO exist as a GET — one allowlisted `GET …/payload` would undo
+    the whole reason the POST exists, and it would do so silently."""
+    for method, pattern in _entries():
+        if pattern.endswith("/payload"):
+            assert method == "POST", f"{method} {pattern} would place a payload reference in a URL"
+
+
+def test_the_console_never_proxies_the_object_store_directly():
+    """FR-421/422: bytes move only through the gateway's existing proxied download route, which
+    validates against permitted prefixes before any upstream call. No presigned URL is minted and no
+    object-store credential reaches the browser."""
+    for _method, pattern in _entries():
+        assert not pattern.startswith(("s3/", "objects/", "garage/")), pattern
+    patterns = {p for _m, p in _entries()}
+    assert "datasets/:name/:version/download" in patterns, \
+        "the one sanctioned byte path must stay proxyable"
 
 
 def test_the_broker_admin_surface_is_allowlisted_but_not_the_tenant_surface():

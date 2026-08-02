@@ -205,3 +205,126 @@ def study(study_id: str) -> dict:
         return None
     response.raise_for_status()
     return response.json()
+
+
+def evaluation_for(name: str, version: str):
+    """The logged evaluation record for one version, or `None` when it was never scored."""
+    from .. import evaluation, registry
+    return evaluation.read_eval(registry._client(), name, str(version))
+
+
+def gate_verdict(name: str, version: str):
+    """The gate's own verdict for a candidate against the current champion.
+
+    Computed by `evaluation.compute_verdict` — the same function the promote path uses. A second
+    implementation here would eventually disagree with the gate that actually blocks promotions,
+    and the disagreement would surface as a console that says "passed" over a refused promote.
+    """
+    from .. import evaluation, registry
+    client = registry._client()
+    champion = registry._serving_version(client, name)
+    return evaluation.compute_verdict(
+        evaluation.read_eval(client, name, str(version)),
+        evaluation.read_eval(client, name, champion),
+        incumbent_present=champion is not None)
+
+
+def prediction_rows(limit: int = 100, modality: str = None, model_name: str = None) -> list:
+    """Paged prediction records joined to their label state.
+
+    From the gateway's own table, never reconstructed from traces (FR-407): traces are sampled, and
+    a prediction list built from them would silently omit the untraced ones — "the request I am
+    looking for is missing" being the worst possible failure for an audit surface.
+    """
+    sql = ("SELECT p.prediction_id, p.modality, p.model_name, p.version, p.served_at, "
+           "p.payload_ref, l.label, l.submitted_at AS labeled_at "
+           "FROM predictions p LEFT JOIN labels l USING (prediction_id) ")
+    where, params = [], []
+    if modality:
+        where.append("p.modality = %s")
+        params.append(modality)
+    if model_name:
+        where.append("p.model_name = %s")
+        params.append(model_name)
+    if where:
+        sql += "WHERE " + " AND ".join(where) + " "
+    sql += "ORDER BY p.served_at DESC LIMIT %s"
+    with _conn().cursor() as cur:
+        cur.execute(sql, (*params, int(limit)))
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def prediction_row(prediction_id: str):
+    """One prediction by id — an index hit, not a scan of the platform's largest table."""
+    with _conn().cursor() as cur:
+        cur.execute("SELECT p.prediction_id, p.modality, p.model_name, p.version, p.served_at, "
+                    "p.payload_ref, l.label FROM predictions p LEFT JOIN labels l USING "
+                    "(prediction_id) WHERE p.prediction_id = %s", (prediction_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return dict(zip([c.name for c in cur.description], row))
+
+
+def capture_rows_for(modality: str = None, limit: int = 200) -> list:
+    """The capture index joined to labels — the input to both the capture list and the queue."""
+    sql = ("SELECT c.prediction_id, c.input_ref, c.captured_at, c.modality, "
+           "p.model_name, l.label FROM capture_index c "
+           "LEFT JOIN predictions p USING (prediction_id) "
+           "LEFT JOIN labels l USING (prediction_id) ")
+    params = []
+    if modality:
+        sql += "WHERE c.modality = %s "
+        params.append(modality)
+    sql += "ORDER BY c.captured_at DESC LIMIT %s"
+    with _conn().cursor() as cur:
+        cur.execute(sql, (*params, int(limit)))
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def payload_bytes(payload_ref: str) -> bytes:
+    """The stored payload for an explicit reveal. Read only when asked."""
+    from platformlib import store
+
+    bucket, _, key = str(payload_ref)[len("s3://"):].partition("/")
+    return store.s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
+def traces(limit: int = 50) -> list:
+    """Recent traces from the tracking server (research R6 — the already-pinned client)."""
+    from .. import registry
+    client = registry._client()
+    search = getattr(client, "search_traces", None)
+    if search is None:
+        # The pinned client does not expose trace search. `[]` is wrong here and an exception is
+        # right: the caller records `tracking` degraded and the console says "unknown" rather than
+        # "no traces", which would be a claim this deployment cannot make.
+        raise RuntimeError("this tracking client exposes no trace search")
+    return list(search(max_results=limit))
+
+
+def trace(trace_id: str):
+    from .. import registry
+    client = registry._client()
+    getter = getattr(client, "get_trace", None)
+    if getter is None:
+        raise RuntimeError("this tracking client exposes no trace lookup")
+    return getter(trace_id)
+
+
+def serving_pointers() -> list:
+    """Every task's desired serving target, from the registry alias."""
+    from .. import registry
+    out = []
+    for model in registry.list_models():
+        if not model.get("serving_version"):
+            continue
+        versions = registry.list_versions(model["name"])
+        current = next((v for v in versions if str(v["version"]) == str(model["serving_version"])),
+                       {})
+        out.append({"modelName": model["name"], "version": str(model["serving_version"]),
+                    "alias": "serving", "modality": (current.get("tags") or {}).get("task"),
+                    "engine": (current.get("tags") or {}).get("serving_engine")})
+    return out

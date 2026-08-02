@@ -11,11 +11,13 @@ and which exist to draw a screen.
 import asyncio
 import time
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from .. import console, runtime
-from ..console import catalog, overview, sources, studies
+from ..console import catalog, endpoints, evaluations, overview, predictions, sources, studies
 from ..console import jobs as jobs_mod
+from ..console import traces as traces_mod
 
 router = APIRouter()
 
@@ -472,6 +474,274 @@ async def console_study_trials(study_id: str):
     if study is None:
         return projection.envelope(None)
     return projection.envelope(studies.trial_view(study))
+
+
+# -- evaluations, gates, drift (T737/T738) ----------------------------------------------------------
+
+@router.get("/console/evaluations")
+async def console_evaluations(model: str = None, limit: int = Query(100, ge=1, le=500)):
+    """`EvaluationResult[]` with **modality-native** metrics (FR-398/399).
+
+    Nothing here computes a cross-modality score. A WER, an accuracy and a perplexity are not
+    comparable, and a single "score" column would produce a leaderboard ranking an ASR model against
+    a classifier.
+    """
+    projection = console.Projection()
+    versions = await projection.read("registry", sources.model_versions)
+    if versions is None:
+        return projection.envelope(None)
+
+    rows = []
+    for version in versions[:limit]:
+        if model and version.get("name") != model:
+            continue
+        record = await projection.read(
+            "registry",
+            lambda v=version: sources.evaluation_for(v["name"], v["version"]))
+        rows.append(evaluations.evaluation_result(
+            name=version.get("name"), version=version.get("version"), evaluation=record,
+            modality=(version.get("tags") or {}).get("task")))
+    return projection.envelope(rows)
+
+
+@router.get("/console/evaluations/{name}/{version}")
+async def console_evaluation(name: str, version: str):
+    """One evaluation with the evidence a failure needs (FR-400/401 / SC-191): the failing rule, the
+    observed value, the incumbent it was compared against, and any override with its reason — all
+    without leaving the view."""
+    projection = console.Projection()
+    record = await projection.read("registry", lambda: sources.evaluation_for(name, version))
+    verdict = await projection.read("registry", lambda: sources.gate_verdict(name, version))
+    return projection.envelope(evaluations.evaluation_result(
+        name=name, version=version, evaluation=record, verdict=verdict))
+
+
+@router.get("/console/gates")
+async def console_gates():
+    """The configured gate and its rules. Read from the gate's own configuration, so the console
+    cannot describe a policy the platform is not enforcing."""
+    from .. import evaluation as evaluation_mod
+
+    return console.envelope({
+        "mode": evaluation_mod.GATE_MODE,
+        "tolerance": evaluation_mod.GATE_TOLERANCE,
+        "missingMetricPolicy": evaluation_mod.GATE_MISSING_METRIC,
+        "rules": [{
+            "metric": "the version's own logged metric",
+            "operator": "within tolerance of the incumbent, in the metric's own direction",
+            "scope": "like-for-like: same modality and same metric, or the gate refuses to judge",
+        }],
+    })
+
+
+@router.get("/console/compare")
+async def console_compare(name: str, challenger: str):
+    """Champion vs challenger across the six dimensions, kept **separate** (FR-403).
+
+    A challenger that wins on quality and loses on latency is a trade-off an operator has to make;
+    a combined score would make it for them silently.
+    """
+    from .. import registry
+
+    projection = console.Projection()
+    champion_version = await projection.read(
+        "registry", lambda: registry._serving_version(registry._client(), name))
+    challenger_eval = await projection.read(
+        "registry", lambda: sources.evaluation_for(name, challenger))
+    champion_eval = (await projection.read(
+        "registry", lambda: sources.evaluation_for(name, champion_version))
+        if champion_version else None)
+    verdict = await projection.read("registry", lambda: sources.gate_verdict(name, challenger))
+
+    return projection.envelope(evaluations.comparison(
+        challenger={"name": name, "version": challenger},
+        champion={"name": name, "version": champion_version} if champion_version else None,
+        challenger_eval=challenger_eval, champion_eval=champion_eval, verdict=verdict))
+
+
+@router.get("/console/drift")
+async def console_drift(limit: int = Query(20, ge=1, le=100)):
+    """Drift reports with their `thresholds` **inline** (FR-404/405), plus the surface's stated
+    limitations (FR-406) — which are a static property of the surface, not per-report data."""
+    projection = console.Projection()
+    reports = await projection.read("objectstore", lambda: sources.drift_reports(limit))
+    if reports is None:
+        return projection.envelope(None)
+    return projection.envelope({
+        "reports": [evaluations.drift_report(r) for r in reports],
+        "limitations": evaluations.DRIFT_LIMITATIONS,
+    })
+
+
+# -- inference: predictions, payload reveal, captures, traces (T742-T745) -----------------------------
+
+@router.get("/console/predictions")
+async def console_predictions(modality: str = None, model: str = None,
+                              limit: int = Query(50, ge=1, le=200)):
+    """Paged prediction records from the **gateway record** (FR-407), never from traces."""
+    projection = console.Projection()
+    rows = await projection.read(
+        "store", lambda: sources.prediction_rows(limit, modality=modality, model_name=model))
+    if rows is None:
+        return projection.envelope(None)
+    return projection.envelope([
+        predictions.prediction_record(
+            row, capture_state="captured" if row.get("payload_ref") else "not-captured",
+            label_state="labeled" if row.get("label") else "unlabeled")
+        for row in rows])
+
+
+@router.get("/console/predictions/{prediction_id}")
+async def console_prediction(prediction_id: str):
+    """Detail with a `PayloadPreview` and **no payload content** (FR-408).
+
+    The `preview` key is absent, not empty. A component cannot render a payload it was never sent,
+    which is what makes default-hidden structural rather than a styling choice.
+    """
+    projection = console.Projection()
+    row = await projection.read("store", lambda: sources.prediction_row(prediction_id))
+    if row is None:
+        return projection.envelope(None)
+
+    record = predictions.prediction_record(
+        row, capture_state="captured" if row.get("payload_ref") else "not-captured",
+        label_state="labeled" if row.get("label") else "unlabeled")
+    record["payload"] = predictions.payload_preview(available=bool(row.get("payload_ref")))
+    return projection.envelope(record)
+
+
+class RevealRequest(BaseModel):
+    """The identifier travels in the **body**, never the path.
+
+    URLs reach access logs, browser history, and `Referer` headers. A `GET /…/{id}/payload` would
+    put a pointer to sensitive content in all three, permanently, for every reveal anyone performs.
+    Carrying it in a body makes SC-192 structural rather than a convention someone must remember.
+    """
+
+    prediction_id: str
+
+
+@router.post("/console/predictions/{prediction_id}/payload")
+async def console_reveal_payload(prediction_id: str, request: RevealRequest):
+    """The explicit reveal (FR-409 / SC-192). Mutates nothing.
+
+    The path id and the body id must **match**. The path segment exists only so the route reads
+    conventionally; the body is the authority, and disagreement is a client bug worth refusing
+    rather than silently resolving in either direction.
+    """
+    if request.prediction_id != prediction_id:
+        raise HTTPException(status_code=400,
+                            detail="the path and body identifiers disagree")
+
+    projection = console.Projection()
+    row = await projection.read("store", lambda: sources.prediction_row(prediction_id))
+    if row is None or not row.get("payload_ref"):
+        return projection.envelope(predictions.payload_preview(available=False))
+
+    content = await projection.read("objectstore",
+                                    lambda: sources.payload_bytes(row["payload_ref"]))
+    if content is None:
+        return projection.envelope(predictions.payload_preview(available=True))
+    return projection.envelope(predictions.payload_preview(
+        available=True, revealed=True, content=content, total_bytes=len(content)))
+
+
+@router.get("/console/captures")
+async def console_captures(modality: str = None, limit: int = Query(100, ge=1, le=500)):
+    projection = console.Projection()
+    rows = await projection.read("store", lambda: sources.capture_rows_for(modality, limit))
+    if rows is None:
+        return projection.envelope(None)
+    return projection.envelope([
+        {"predictionId": row.get("prediction_id"), "modality": row.get("modality"),
+         "modelName": row.get("model_name"), "capturedAt": row.get("captured_at"),
+         "labelState": "labeled" if row.get("label") else "unlabeled",
+         # The capture's object reference is NOT returned as a fetchable URL. Bytes move only
+         # through the explicit reveal, which is a POST for the reason above.
+         "hasPayload": bool(row.get("input_ref"))}
+        for row in rows])
+
+
+@router.get("/console/review-queue")
+async def console_review_queue(limit: int = Query(100, ge=1, le=500)):
+    """Prioritized by policy result, confidence, drift contribution, sampling, missing label,
+    manual flag, and suggestion (FR-411). Every item states **which** signal put it there — a queue
+    that ranks without saying why is one an operator has to take on faith."""
+    projection = console.Projection()
+    rows = await projection.read("store", lambda: sources.capture_rows_for(None, limit))
+    if rows is None:
+        return projection.envelope(None)
+    return projection.envelope(predictions.review_queue(rows, limit=limit))
+
+
+@router.get("/console/traces")
+async def console_traces(limit: int = Query(50, ge=1, le=200)):
+    projection = console.Projection()
+    raw = await projection.read("tracking", lambda: sources.traces(limit))
+    if raw is None:
+        return projection.envelope(None)
+    return projection.envelope([traces_mod.normalize(t) for t in raw])
+
+
+@router.get("/console/traces/{trace_id}")
+async def console_trace(trace_id: str):
+    """A generic span tree (FR-412/413) — normalized server-side so the token-free presentation is
+    enforced in one place and the client never learns a tracking-vendor payload shape."""
+    projection = console.Projection()
+    raw = await projection.read("tracking", lambda: sources.trace(trace_id))
+    if raw is None:
+        return projection.envelope(None)
+    detail = traces_mod.normalize(raw)
+    depths = traces_mod.depth_of(detail["spans"])
+    for span in detail["spans"]:
+        span["depth"] = depths.get(span["spanId"], 0)
+    return projection.envelope(detail)
+
+
+# -- deployments (T748/T749) --------------------------------------------------------------------------
+
+@router.get("/console/endpoints")
+async def console_endpoints():
+    """Synthesized from registry, serving pointer, activation state, and agent engines (FR-414).
+
+    No table and no migration (research R7): persisting this would create a fifth system of record
+    whose only job is to disagree with the four it is derived from.
+    """
+    projection = console.Projection()
+
+    engines_body = await runtime.engines()
+    admission_body = await runtime.admission(1)
+    agent_reachable = engines_body["data"] is not None
+    if agent_reachable:
+        projection.mark_observed(runtime.AGENT)
+    else:
+        projection.mark_degraded(runtime.AGENT)
+
+    pointers = await projection.read("registry", sources.serving_pointers)
+    if pointers is None and not agent_reachable:
+        return projection.envelope(None)
+
+    engines = {e.get("engine_id"): e for e in (engines_body["data"] or {}).get("engines") or []}
+    admission = admission_body["data"] or {}
+    job_holds_gpu = bool(admission.get("job_barrier") or admission.get("active_job"))
+
+    rows = [
+        endpoints.endpoint(
+            modality=pointer.get("modality") or "unknown",
+            desired=pointer,
+            engine=engines.get(pointer.get("engine")),
+            job_holds_gpu=job_holds_gpu,
+            agent_reachable=agent_reachable)
+        for pointer in pointers or []]
+    return projection.envelope(rows)
+
+
+@router.get("/console/endpoints/{endpoint_id}")
+async def console_endpoint(endpoint_id: str):
+    body = await console_endpoints()
+    rows = body["data"] or []
+    match = [row for row in rows if row["id"] == endpoint_id]
+    return {**body, "data": match[0] if match else None}
 
 
 async def _nothing():

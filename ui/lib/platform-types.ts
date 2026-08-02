@@ -364,6 +364,206 @@ export type JobConflict = {
   lastConsistentAt?: string | null;
 };
 
+// -- evaluations, gates, drift ------------------------------------------------------------------
+
+/** Metrics are modality-native. There is no shared "score" type here, deliberately (FR-399). */
+export type EvaluationMetric = {
+  name: string;
+  value: number;
+  /** Without this, a number cannot be read as good or bad — and a surface assuming higher-better
+   * would rank every WER backwards. */
+  direction: 'higher-better' | 'lower-better';
+};
+
+export type GateRule = {
+  metric: string;
+  operator: 'gt' | 'gte' | 'lt' | 'lte' | 'between';
+  threshold: number | null;
+  scope: string | null;
+};
+
+/** A failure carries its evidence: the rule, the observed value, and the incumbent (SC-191). */
+export type GateView = {
+  outcome: 'passed' | 'failed' | 'warning' | 'not-evaluated' | 'incomplete';
+  reason?: string | null;
+  mode?: string | null;
+  tolerance?: number | null;
+  failedRule: GateRule | null;
+  observedValue: number | null;
+  comparedAgainst: { version: string; value: number } | null;
+  delta?: number | null;
+  /** An override with no reason is indistinguishable from a gate that was never enforced. */
+  override: { applied: boolean; reason: string | null };
+};
+
+export type EvaluationResult = {
+  id: string;
+  modelName: string;
+  version: string;
+  modality: string | null;
+  datasetRef: string | null;
+  benchmarkName: string | null;
+  benchmarkDigest: string | null;
+  metrics: EvaluationMetric[];
+  gate: GateView;
+  sourceJobId: string | null;
+  createdAt: string | null;
+};
+
+export type GateConfig = {
+  mode: string;
+  tolerance: number;
+  missingMetricPolicy: string;
+  rules: { metric: string; operator: string; scope?: string }[];
+};
+
+/** Six dimensions, kept apart. There is no combined verdict field, and that is the design. */
+export type ComparisonView = {
+  challenger: { name: string; version: string };
+  champion: { name: string; version: string } | null;
+  quality: { challenger: EvaluationMetric | null; champion: EvaluationMetric | null };
+  latency: { challenger: number | null; champion: number | null };
+  resources: { challenger: number | null; champion: number | null };
+  artifacts: { challenger: string | null; champion: string | null };
+  datasets: { challenger: string | null; champion: string | null };
+  policy: { gate: GateView };
+};
+
+export type DriftReportView = {
+  modelName: string | null;
+  endpointId: string | null;
+  referenceWindow: { from: string | null; to: string | null };
+  currentWindow: { from: string | null; to: string | null };
+  featureCount: number;
+  /** `null`, not `0`, when nothing was measurable — a max of zero reads as "no drift". */
+  maxStatistic: number | null;
+  features: { name: string; statistic: number | null; state: string | null }[];
+  /** Shipped with the report so the interface never restates the 0.10/0.25 convention (FR-405). */
+  thresholds: { warning: number; significant: number; configurable: true };
+  calculatedAt: string | null;
+};
+
+export type DriftView = { reports: DriftReportView[]; limitations: string[] };
+
+// -- inference ------------------------------------------------------------------------------------
+
+export type PredictionRecord = {
+  id: string;
+  timestamp: string | number | null;
+  endpointId: string | null;
+  modelName: string | null;
+  registryVersion: string | null;
+  modality: string;
+  status: 'ok' | 'error';
+  latencyMs: number | null;
+  captureState: 'not-captured' | 'captured' | 'expired' | 'sampled-out';
+  labelState: 'unlabeled' | 'pending-review' | 'labeled' | 'disputed' | 'excluded';
+  traceId: string | null;
+  policyResult: string | null;
+  error: string | null;
+};
+
+/**
+ * `preview` is **optional and absent by default** — not an empty string, not null. The content is
+ * never sent unless explicitly requested, so a component cannot render a payload it was never
+ * given. That is what makes hidden-by-default hold under refactoring (FR-408).
+ */
+export type PayloadPreview = {
+  available: boolean;
+  revealed: boolean;
+  truncated: boolean;
+  /** The TRUE stored size, even when `preview` is truncated. */
+  totalBytes: number | null;
+  redactedFields: string[];
+  preview?: string;
+};
+
+export type PredictionDetail = PredictionRecord & { payload: PayloadPreview };
+
+export type CaptureRow = {
+  predictionId: string;
+  modality: string | null;
+  modelName: string | null;
+  capturedAt: string | number | null;
+  labelState: string;
+  /** Whether a payload exists — NOT a link to it. Bytes move only through the explicit reveal. */
+  hasPayload: boolean;
+};
+
+export type ReviewItem = {
+  predictionId: string;
+  modality: string | null;
+  modelName: string | null;
+  labelState: string;
+  /** Every item states which signals put it here; a queue that ranks silently is taken on faith. */
+  signals: string[];
+  reason: string;
+  capturedAt: string | number | null;
+};
+
+/** A generic span tree. No token-oriented fields: three of five modalities have no tokens. */
+export type TraceSpan = {
+  spanId: string;
+  parentSpanId: string | null;
+  name: string;
+  startMs: number;
+  durationMs: number;
+  attributes: Record<string, unknown>;
+  events: { name: string; timeMs: number }[];
+  status: 'ok' | 'error';
+  error: string | null;
+  depth?: number;
+};
+
+export type TraceDetail = {
+  traceId: string | null;
+  predictionId: string | null;
+  modelVersion: string | null;
+  totalDurationMs: number;
+  spans: TraceSpan[];
+};
+
+// -- deployments ----------------------------------------------------------------------------------
+
+/**
+ * `healthy` requires resident confirmation; desired-only is `pending`. A GPU modality that is not
+ * resident because a job holds the GPU is `stopped`, **not** `failed` — on-demand loading is the
+ * design, and calling it a failure misrepresents Principle II as a fault.
+ */
+export type EndpointStatus =
+  | 'unconfigured'
+  | 'pending'
+  | 'starting'
+  | 'healthy'
+  | 'degraded'
+  | 'draining'
+  | 'stopped'
+  | 'failed'
+  | 'unknown';
+
+export type PlatformEndpoint = {
+  id: string;
+  modality: string;
+  desired: {
+    modelName: string | null;
+    version: string | null;
+    alias: string | null;
+    activationState: string | null;
+  };
+  resident: {
+    /** The agent-reported LOADED identity, never the registry's desired pointer. */
+    modelIdentity: string | null;
+    registryVersion: string | null;
+    engineId: string | null;
+    host: string | null;
+  };
+  status: EndpointStatus;
+  /** `null` rather than zeros: per-endpoint traffic is not measured here, and zeros read as "none". */
+  traffic: null;
+  conflict: JobConflict | null;
+  lastUpdated: string | null;
+};
+
 // -- tracking -----------------------------------------------------------------------------------
 
 /** Tracking vocabulary preserved verbatim (FR-366): run, experiment, metric, param. */

@@ -105,6 +105,25 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'console/runs' }, // run listing — net-new
   { method: 'GET', pattern: 'console/experiments' },
   { method: 'GET', pattern: 'console/studies/:id/trials' }, // recorded trials, not a live search (FR-396/397)
+  // evaluations, gates, drift (US5)
+  { method: 'GET', pattern: 'console/evaluations' }, // modality-native metrics, not coerced (FR-399)
+  { method: 'GET', pattern: 'console/evaluations/:name/:version' }, // failure + its evidence (FR-400)
+  { method: 'GET', pattern: 'console/gates' },
+  { method: 'GET', pattern: 'console/compare' }, // six dimensions kept separate (FR-403)
+  { method: 'GET', pattern: 'console/drift' }, // thresholds inline (FR-405)
+  // inference (US6). The one write-SHAPED entry mutates nothing: it is a POST specifically so the
+  // payload reference travels in the body rather than a URL, where it would reach logs, history,
+  // and referrers (SC-192). The matcher keys on method, so this does not widen GET access.
+  { method: 'GET', pattern: 'console/predictions' }, // from the gateway record, not traces (FR-407)
+  { method: 'GET', pattern: 'console/predictions/:id' }, // PayloadPreview WITHOUT content (FR-408)
+  { method: 'POST', pattern: 'console/predictions/:id/payload' }, // the explicit reveal (FR-409)
+  { method: 'GET', pattern: 'console/captures' },
+  { method: 'GET', pattern: 'console/review-queue' }, // prioritized, each item naming its signal
+  { method: 'GET', pattern: 'console/traces' },
+  { method: 'GET', pattern: 'console/traces/:id' }, // generic span tree, no token assumptions
+  // deployments (US7)
+  { method: 'GET', pattern: 'console/endpoints' }, // synthesized; desired vs resident separated
+  { method: 'GET', pattern: 'console/endpoints/:id' },
   { method: 'GET', pattern: 'runtime/hosts' }, // a list even with one host (FR-374/382)
   { method: 'GET', pattern: 'runtime/hosts/:host/devices' }, // per-device topology (FR-375)
   { method: 'GET', pattern: 'runtime/engines' }, // enriched EngineState (FR-376)
