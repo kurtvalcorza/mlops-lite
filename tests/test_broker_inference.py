@@ -32,34 +32,20 @@ def _guard():
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _isolate_gateway_app():
-    """Leave the process as this module found it.
+def _isolate_gateway_metrics():
+    """Leave the process's Prometheus registry as this module found it.
 
-    This suite is the first in the repo to import the real `gateway.app.main`, which registers the
-    `platform_metrics` collectors in the **global default** Prometheus registry as a side effect of
-    import. `tests/test_platform_health.py` loads that same file again under a different module name
-    (`app.platform_metrics`) with stubbed settings, and a second registration of `mlops_gpu_free_mib`
-    raises `DuplicateTimeseries` — so importing the app here made that suite fail depending on
-    collection order, which is exactly the ordering bug its own fixture exists to prevent.
+    The repo loads `gateway/app/*.py` under two module names — the existing suites synthesize an
+    `app` package, this one imports the real `gateway.app.main` — and both define the same
+    module-level metrics. The global default registry refuses a second registration, so whichever
+    identity comes second raises `Duplicated timeseries`, and which one that is depends on collection
+    order.
 
-    Snapshot and restore both the `gateway.app*` module entries and the collectors our import added.
-    Fixing it here rather than loosening the other suite keeps the invariant where it belongs: a
-    suite that mutates global registries cleans them up.
+    The isolation spans the whole module, not just the import, because the app registers metrics
+    *after* import too: `main.py`'s startup handler lazily imports `gateway.app.scheduler`, which
+    defines `gateway_policy_checks_total` the moment a `TestClient` enters its lifespan.
     """
-    import sys
-
-    from prometheus_client import REGISTRY
-
-    saved_modules = {k: v for k, v in sys.modules.items()
-                     if k == "gateway" or k.startswith("gateway.")}
-    collectors_before = set(REGISTRY._collector_to_names)
-    yield
-    for key in [k for k in list(sys.modules)
-                if (k == "gateway" or k.startswith("gateway.")) and k not in saved_modules]:
-        sys.modules.pop(key, None)
-    for collector in list(REGISTRY._collector_to_names):
-        if collector not in collectors_before:
-            REGISTRY.unregister(collector)
+    yield from _gwimport.isolate_module_metrics()
 
 
 @pytest.fixture()
@@ -367,7 +353,12 @@ def test_killing_the_process_mid_settle_settles_exactly_once_on_restart(env, mon
     def boom(*a, **k):
         raise RuntimeError("killed mid-settle")
 
-    monkeypatch.setattr(store, "settle", boom)
+    # Patch the store object `metering` actually holds, not the one this module imported. They are
+    # usually the same, but `tests/test_store_facade.py` pops `platformlib.store` from `sys.modules`
+    # and re-imports it, so a suite running after it can be holding a different module object than
+    # `metering` bound at ITS import — and patching the wrong one makes this test silently assert
+    # nothing. Reaching through `metering._store` is exact regardless of module-identity churn.
+    monkeypatch.setattr(metering._store, "settle", boom)
     result = metering.settle("op-crash", 7.25)
     assert result["deferred"] is True, "a settle that cannot reach the store is deferred, not lost"
     assert wal.exists() and "op-crash" in wal.read_text()

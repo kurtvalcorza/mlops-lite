@@ -11,7 +11,9 @@ Reachability is decided by `BROKER_TEST_DSN` (or the platform's ordinary `GATEWA
 harness call creates a uniquely-named database, applies the real migrations to it, and drops it
 afterwards — so a run never depends on, or leaves behind, another run's state.
 """
+import atexit
 import os
+import threading
 import time
 import uuid
 
@@ -53,6 +55,64 @@ def _db_dsn(admin: str, name: str) -> str:
     return f"{head}/{name}"
 
 
+#: A once-per-session **template** database with the migrations already applied. Every scratch
+#: database is then `CREATE DATABASE … TEMPLATE <this>`, which Postgres serves as a file copy.
+#:
+#: Without it each of the ~90 database-backed tests re-ran the full migration set — advisory lock,
+#: ledger reads, and every statement in three files — to produce a schema identical to the last
+#: one's. That was the dominant cost of the suite on CI and bought nothing: the tests need a
+#: *pristine* database, not a freshly-*migrated* one, and the template gives the same isolation
+#: because each test still gets its own database.
+_TEMPLATE = {"name": None}
+_TEMPLATE_LOCK = threading.Lock()
+
+
+def _template(admin: str) -> str:
+    """The migrated template's name, creating it on first use."""
+    import psycopg
+
+    with _TEMPLATE_LOCK:
+        if _TEMPLATE["name"] is not None:
+            return _TEMPLATE["name"]
+        name = f"broker_tmpl_{uuid.uuid4().hex[:10]}"
+        with psycopg.connect(admin, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute(f'CREATE DATABASE "{name}"')
+
+        from platformlib import migrations
+        migrations.apply(dsn=_db_dsn(admin, name), applied_by="test-template",
+                         log=lambda *a: None)
+
+        # `CREATE DATABASE … TEMPLATE` refuses while any session is connected to the template, and
+        # `migrations.apply` opens its own. Nothing above holds one now, but say so explicitly:
+        # a stray session here would fail *every* later scratch creation, far from its cause.
+        with psycopg.connect(admin, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = %s AND pid <> pg_backend_pid()", (name,))
+        _TEMPLATE["name"] = name
+        atexit.register(_drop_template, admin, name)
+        return name
+
+
+def _drop_template(admin: str, name: str) -> None:
+    """Drop the session's template at interpreter exit.
+
+    Without this a developer's local Postgres accumulates one template per test run — small, but
+    exactly the kind of residue this harness promises not to leave.
+    """
+    import psycopg
+
+    try:
+        with psycopg.connect(admin, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = %s AND pid <> pg_backend_pid()", (name,))
+                cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
+    except Exception:  # noqa: BLE001 — at exit there is nobody left to tell
+        pass
+
+
 class ScratchDB:
     """A freshly-migrated database, dropped on exit.
 
@@ -73,11 +133,14 @@ class ScratchDB:
     def __enter__(self):
         import psycopg
 
+        # Clone the migrated template rather than migrating again — same isolation (this is still a
+        # database of its own), a fraction of the cost. `apply_migrations=False` skips the template
+        # entirely, for the few tests that want a bare database.
+        template = _template(self.admin) if self._apply else None
+        clause = f' TEMPLATE "{template}"' if template else ""
         with psycopg.connect(self.admin, autocommit=True) as c:
             with c.cursor() as cur:
-                cur.execute(f'CREATE DATABASE "{self.name}"')
-        if self._apply:
-            self.migrate()
+                cur.execute(f'CREATE DATABASE "{self.name}"{clause}')
         return self
 
     def migrate(self) -> dict:

@@ -21,6 +21,13 @@ from tests import _gwimport  # noqa: E402
 with _gwimport.isolated_metrics():
     from gateway.app import console  # noqa: E402
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_gateway_metrics():
+    """See `tests/test_broker_inference.py` — the isolation spans the module because the app also
+    registers metrics from lazy imports during `TestClient` startup, not only at import."""
+    yield from _gwimport.isolate_module_metrics()
+
 OWNER_KEY = "console-owner-key"
 
 

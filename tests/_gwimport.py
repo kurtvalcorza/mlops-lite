@@ -51,7 +51,34 @@ def isolated_metrics():
 
 
 def gateway_app():
-    """The real FastAPI app, imported with its metrics isolated. Safe to call repeatedly."""
+    """The real FastAPI app, imported with its metrics isolated. Safe to call repeatedly.
+
+    **Not sufficient on its own.** The app registers metrics well after import: `main.py`'s startup
+    handler lazily imports `gateway.app.scheduler`, which defines `gateway_policy_checks_total` when
+    a `TestClient` enters its lifespan. Wrapping only the import left that registration exposed. Use
+    `isolate_module_metrics()` so the isolation spans the whole module's tests.
+    """
     with isolated_metrics():
         from gateway.app.main import app
     return app
+
+
+def isolate_module_metrics():
+    """A module-scoped autouse fixture body: hold the isolation open for every test in the module.
+
+    Written as a generator to be wrapped by `@pytest.fixture(scope="module", autouse=True)`. Spanning
+    the module rather than the import is what catches registrations from **lazy** imports — the
+    startup handler's, and any a request path triggers — which is where the second collision came
+    from after the first was fixed.
+    """
+    import sys
+
+    saved_modules = {k: v for k, v in sys.modules.items()
+                     if k == "gateway" or k.startswith("gateway.")}
+    with isolated_metrics():
+        yield
+    # Drop the gateway modules this module imported, so a later suite that loads the same files
+    # under its own identity starts clean.
+    for key in [k for k in list(sys.modules)
+                if (k == "gateway" or k.startswith("gateway.")) and k not in saved_modules]:
+        sys.modules.pop(key, None)
