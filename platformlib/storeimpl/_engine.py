@@ -16,8 +16,11 @@ SCHEMA_VERSION = 1
 #: The tables the schema must present — used by tests and shape checks. The DDL itself moved to
 #: `platformlib/migrations/001_baseline.sql` (023 US4, FR-297): ordered migration files are the
 #: ONLY schema authority now; the embedded full-schema DDL string and its init.sql mirror are gone.
+#: 026 T618 added the broker slice (tenants/api_keys/quotas/usage_ledger/usage_reservation +
+#: broker_jobs/broker_sessions) in `003_broker.sql`.
 TABLES = ("meta", "predictions", "labels", "capture_index", "jobs", "policies", "suggestions",
-          "serving_llm")
+          "serving_llm", "tenants", "api_keys", "quotas", "usage_ledger", "usage_reservation",
+          "broker_jobs", "broker_sessions")
 
 
 def dsn() -> str:

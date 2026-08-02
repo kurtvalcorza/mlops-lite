@@ -18,12 +18,12 @@ are ready to build.
 
 ## Phase 0 — Foundational (blocks everything; no story tag)
 
-- [ ] **T618** Create the `tenants`, `api_keys`, `quotas`, `usage_ledger`, and `usage_reservation` tables per [data-model.md](./data-model.md), with Alembic migration and rollback. Check: migration applies and reverts cleanly against a scratch Postgres.
-- [ ] **T619** `[P]` Implement `api_key` issuance and hashing (store `key_hash` + non-secret `prefix`; raw key returned once, never persisted). Check: a raw key never appears in the DB or logs.
-- [ ] **T620** `[P]` Implement bearer-token auth middleware in the gateway resolving key → tenant, refusing when `api_key.status != 'active'` OR `tenant.status != 'active'` (FR-002). Check: revoking either status refuses the next request.
-- [ ] **T621** Add the reserved **system tenant** used by policy-triggered retrains (see T651). Check: it exists after migration and cannot be deleted via the admin API.
-- [ ] **T622** Characterization tests capturing today's single-slot `hostagent/admission.py` behaviour before the redesign touches it. Check: tests pass against unmodified `admission.py` and are referenced by T634.
-- [ ] **T623** Extend `.specify/memory/hardware-profile.md` tunables into a typed config object (`safety_reserve`, `safety_headroom`, `max_admission_attempts`, `drain_timeout`, `job_drain_timeout`, `admission_backoff`). Check: every tunable referenced by [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) resolves from config, none hardcoded.
+- [X] **T618** Create the `tenants`, `api_keys`, `quotas`, `usage_ledger`, and `usage_reservation` tables per [data-model.md](./data-model.md), with Alembic migration and rollback. Check: migration applies and reverts cleanly against a scratch Postgres.
+- [X] **T619** `[P]` Implement `api_key` issuance and hashing (store `key_hash` + non-secret `prefix`; raw key returned once, never persisted). Check: a raw key never appears in the DB or logs.
+- [X] **T620** `[P]` Implement bearer-token auth middleware in the gateway resolving key → tenant, refusing when `api_key.status != 'active'` OR `tenant.status != 'active'` (FR-002). Check: revoking either status refuses the next request.
+- [X] **T621** Add the reserved **system tenant** used by policy-triggered retrains (see T651). Check: it exists after migration and cannot be deleted via the admin API.
+- [X] **T622** Characterization tests capturing today's single-slot `hostagent/admission.py` behaviour before the redesign touches it. Check: tests pass against unmodified `admission.py` and are referenced by T634.
+- [X] **T623** Extend `.specify/memory/hardware-profile.md` tunables into a typed config object (`safety_reserve`, `safety_headroom`, `max_admission_attempts`, `drain_timeout`, `job_drain_timeout`, `admission_backoff`). Check: every tunable referenced by [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) resolves from config, none hardcoded.
 
 ---
 

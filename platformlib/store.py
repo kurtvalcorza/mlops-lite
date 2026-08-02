@@ -115,3 +115,35 @@ from platformlib.storeimpl.suggestions import (  # noqa: F401 — re-exported
     list_suggestions,
     resolve_suggestion,
 )
+
+# -- broker tenancy repository: tenants / api keys / quotas (storeimpl/tenancy, 026 T619-T621) -------
+from platformlib.storeimpl.tenancy import (  # noqa: F401 — re-exported
+    SYSTEM_TENANT_NAME,
+    create_tenant,
+    delete_tenant,
+    ensure_system_tenant,
+    get_quota,
+    get_tenant,
+    get_tenant_by_name,
+    hash_key,
+    issue_key,
+    list_api_keys,
+    list_tenants,
+    resolve_key,
+    revoke_key,
+    rotate_key,
+    set_quota,
+    set_tenant_status,
+)
+
+# -- broker metering repository: reserve -> settle GPU-seconds (storeimpl/metering, 026 T628-T631) ---
+from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
+    QuotaExhausted,
+    consumption,
+    get_reservation,
+    list_ledger,
+    reconciliation,
+    release,
+    reserve,
+    settle,
+)
