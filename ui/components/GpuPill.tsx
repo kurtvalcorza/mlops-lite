@@ -2,7 +2,8 @@
 
 // 021 T427 (FR-211): the persistent GPU-lease pill — always visible in the header, off the loop
 // axis. Shows lease holder + resident model + swap/idle state from the shared LiveState
-// (serving/state + platform/events); click-through lands on /serving (the full LeaseView).
+// (serving/state + platform/events); click-through lands on /runtime, which is where 027 puts the
+// full picture: devices, engine processes, and the admission decision behind the current state.
 // Principle II visualize-only: this surface READS the lease, it never touches it.
 
 import Link from 'next/link';
@@ -38,7 +39,7 @@ export function GpuPill({ live }: { live: LiveState }) {
 
   return (
     <Link
-      href="/serving"
+      href="/runtime"
       title={title}
       className="hairline flex max-w-[260px] items-center gap-2 rounded-full bg-soft px-3 py-0.5 text-caption-md text-ink hover:bg-card"
     >

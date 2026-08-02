@@ -73,22 +73,22 @@ than building them into the fetch layer (plan.md Summary).
   last-known-good retention with data age (FR-430/SC-195), and per-resource cadence from spec §19.
   **Retention must be bounded** — an unbounded history here is the most likely cause of an SC-199
   footprint regression.
-- [ ] **T696** [P] Write `ui/lib/charts/` — six hand-rolled SVG primitives (sparkline, time series
+- [X] **T696** [P] Write `ui/lib/charts/` — six hand-rolled SVG primitives (sparkline, time series
   with band, threshold bar, span waterfall, parallel coordinates, matrix heatmap) per research R11.
   **No charting dependency**; `ui/package.json` dependencies must remain exactly `next`, `react`,
   `react-dom` (SC-198).
-- [ ] **T697** Build the `ui/app/(console)/` route group and the ten-area shell — sidebar with
+- [X] **T697** Build the `ui/app/(console)/` route group and the ten-area shell — sidebar with
   `NavArea` secondary navigation, and the header from data-model §14 (FR-362/367). Enforce the
   naming rule: no navigation item may be named after a backing service (FR-365).
 - [X] **T698** Implement `GET /console/health` (`PlatformHealth` incl. resolved `mode`) and
   `GET /console/capabilities` in `gateway/app/console/` + `routers/console.py`. `mode` resolves from
   **reachability**, never a configured string (research R14). Capabilities (FR-433) is what lets the interface
   **omit** an unsupported control rather than render one that fails — the mechanism behind FR-418.
-- [ ] **T699** Implement the 021→027 redirects for every row of data-model §10 in `ui/app/`, and
+- [X] **T699** Implement the 021→027 redirects for every row of data-model §10 in `ui/app/`, and
   delete the 021 stage directories (`serving`, `data`, `training`, `models`, `monitoring`,
   `retraining`) per research R12. **Keep** `ui/app/api/gw/` and the 004/005 security guards — they
   are not 021 artifacts.
-- [ ] **T700** Write `tests/test_ui_redirects.py` — one case per data-model §10 row; every retired
+- [X] **T700** Write `tests/test_ui_redirects.py` — one case per data-model §10 row; every retired
   path resolves to a successor area, none returns not-found (FR-364/SC-186).
 
 **Checkpoint**: the shell renders, navigates, degrades honestly, and no retired path 404s.
@@ -109,14 +109,23 @@ That is the slice plan.md sequences first and calls "the increment's differentia
 its own slice" — and it is additive: the Runtime area is a new route, so nothing that worked before
 stopped working.
 
-**Not started**: the IA replacement (T696, T697, T699, T700 and Phases 3, 5–13). The reason is stated
-rather than assumed: **T699 deletes the six 021 stage directories**, and the ten areas that replace
-them are Phases 3–12. Doing the deletion without the replacement would leave the console with dead
-navigation and less working functionality than it has today — strictly worse than not starting, and
-not what "stop cleanly at a checkpoint" means. plan.md's Complexity Tracking names US1/US2/US3/US10 as
-the irreducible core; **US2 is complete, US1/US3/US10 are not**, so the IA swap is not yet safe to
-make. The next increment should take T696/T697 (charts + shell) and Phase 3 together with T699/T700,
-as one atomic change.
+**Also shipped**: the IA replacement — the six hand-rolled SVG chart primitives (T696), the
+ten-area shell replacing 021's loop nav (T697), and every retired path resolving to its successor
+(T699/T700, `tests/test_ui_redirects.py`). The loop nav encoded *order* with directional connectors;
+ten areas of concern have no order to encode, so keeping the arrows would have made them mean
+nothing.
+
+The 021 stage views were **moved, not deleted** — `/serving` became `/deployments`, `/data` became
+`/datasets`, `/monitoring` became `/observability`, `/retraining` became `/evaluations/drift`, and
+`/health` moved under Observability. Their content came with them, so the IA swap cost the console no
+working functionality. `/overview`, `/inference`, and `/administration` are net-new areas.
+
+**Not started**: the per-area depth in Phases 5–12 — the catalog join, the training workspace, gate
+detail and comparison, the prediction record and trace waterfall, the deployments read model,
+dataset/artifact browsing, and the observability/administration surfaces. Where an area's deeper
+views are not built, the area says so and links to what exists rather than rendering empty panels: a
+console that shows placeholder panels for views with no data behind them teaches an operator that the
+interface is unreliable.
 
 **Also not started**: the `[HW]` legs (T718, T719 and the other `[HW]` tasks), which need the RTX
 5070 Ti and cannot be validated in a container. The offline suite pins everything around them with
