@@ -10,7 +10,7 @@ were already written against an interface, so they should not have to learn a ne
 
 | legacy call | coordinator |
 |---|---|
-| `acquire(id, "serving", est)` | `admit_serving(id, est)` → a claim held on the caller's behalf |
+| `acquire(id, "serving", est)` | `admit_serving(id, est)` → resident; the load claim is released at once |
 | `acquire(id, "job", est)` | `admit_job(id)` — whole GPU, never preempted |
 | `release(id)` | release the claim / `end_job` |
 | `holder()` | the exclusive job if one runs, else the most recently used resident |
@@ -44,6 +44,13 @@ from hostagent import coordinator as co
 
 _GIB = 1024 ** 3
 
+#: Marks an engine as RESIDENT in the shim's own map, holding no coordinator claim.
+#:
+#: Distinct from `None`, which the map already uses for an exclusive job. Three states, three
+#: values: absent (not ours), `_RESIDENT` (a serving engine we admitted), `None` (a job holding the
+#: whole GPU).
+_RESIDENT = object()
+
 
 def enabled() -> bool:
     return os.getenv("BROKER_COORDINATOR_ADMISSION", "0").lower() in ("1", "true", "yes", "on")
@@ -74,9 +81,10 @@ class RuntimeLifecycle:
     child and it is not this module.
     """
 
-    def __init__(self):
+    def __init__(self, drain_timeout_s: float = 10.0):
         #: engine_id -> the `EngineRuntime` that owns that engine's child.
         self._runtimes = {}
+        self._drain_timeout_s = drain_timeout_s
 
     def register(self, engine_id: str, runtime) -> None:
         self._runtimes[engine_id] = runtime
@@ -98,7 +106,13 @@ class RuntimeLifecycle:
             # failure; the coordinator's caller cannot act on it either way, and the accounting drop
             # is still correct. Logged by the coordinator's own eviction path.
             return None
-        return runtime.unload(drain_timeout_s=0)
+        # A real drain budget, not a hard cut. The coordinator has already decided this model
+        # should go; the runtime is the layer that knows whether a request is in flight, and its
+        # lock is what inference holds. Passing 0 would cut a live request mid-response, which is
+        # exactly what `evict()`'s drain phase exists to avoid — and with the shim no longer
+        # holding a permanent claim, the coordinator's own `active_requests` can no longer do the
+        # waiting on its behalf.
+        return runtime.unload(drain_timeout_s=self._drain_timeout_s)
 
 
 class CoordinatorAdmission:
@@ -107,10 +121,13 @@ class CoordinatorAdmission:
     def __init__(self, coordinator, clock=None):
         self.coordinator = coordinator
         self._clock = clock or __import__("time").time
-        #: engine_id -> the claim this shim holds for it. One per engine, because the legacy surface
-        #: is `acquire(engine_id)` / `release(engine_id)` — a per-request claim would have nowhere to
-        #: live in that vocabulary. The coordinator's ref-count still protects the child; this shim
-        #: simply holds one long-lived claim while the engine is resident, and `evict` drains it.
+        #: engine_id -> `_RESIDENT` for a serving engine, `None` for an exclusive job.
+        #:
+        #: **No long-lived claim.** An earlier version held one coordinator claim per engine for the
+        #: whole resident lifetime, which kept `active_requests` above zero and deadlocked eviction:
+        #: `evict()` waits for zero before calling the unload that would have released it. Residency
+        #: lives in the coordinator's resident entry; request lifetime lives in the runtime, whose
+        #: lock inference actually holds.
         self._claims = {}
         self._lock = threading.RLock()
 
@@ -151,8 +168,22 @@ class CoordinatorAdmission:
             # every one of them growing a case for it.
             raise adm.Held({"tenant": self._current_holder_name() or "another tenant",
                             "kind": "serving"})
+
+        # **Release the load claim immediately.** Residency is the resident entry; the claim is a
+        # per-REQUEST reference count, and holding one for the whole resident lifetime deadlocked
+        # eviction outright: `Coordinator.evict()` waits for `active_requests == 0` before calling
+        # the unload that would have released the claim keeping it above zero. Capacity-pressure
+        # eviction and exclusive-job drain could therefore never complete in production — only in
+        # tests, which released the claim by hand first.
+        #
+        # Draining real in-flight work still happens, in the layer that knows about it: eviction
+        # calls back through `RuntimeLifecycle.unload` into `EngineRuntime.unload`, which drains
+        # under the runtime lock that inference actually holds. The coordinator owns residency
+        # accounting; the runtime owns request lifetime. Splitting them this way is what the two
+        # were always separately about.
+        result.claim.release()
         with self._lock:
-            self._claims[tenant] = result.claim
+            self._claims[tenant] = _RESIDENT
         return self._holder_dict(tenant, kind, est_gb)
 
     def release(self, tenant: str) -> None:
@@ -185,7 +216,8 @@ class CoordinatorAdmission:
         if claim is None:
             self.coordinator.end_job(tenant)
             return
-        claim.release()
+        if claim is not _RESIDENT:
+            claim.release()   # a real claim (legacy path); residency markers hold none
 
         lifecycle = getattr(self.coordinator.lifecycle, "inner", self.coordinator.lifecycle)
         runtime = getattr(lifecycle, "_runtimes", {}).get(tenant)
@@ -225,6 +257,11 @@ class CoordinatorAdmission:
                 # "the process has not allocated yet" than "this model is free", and adopting it
                 # would drop the model out of the budget entirely.
                 entry.vram_accounted_bytes = measured
+                # The bytes are now real and visible in live-free, so invariant 2 must stop
+                # deducting them — continuing would double-count this model against itself and
+                # refuse admissions that genuinely fit. An unreadable probe leaves the flag as it
+                # was: still deducting an estimate is conservative, which is the safe direction.
+                entry.materialized = True
 
     def holder(self):
         """The exclusive job if one runs, else the most recently used resident — see the module

@@ -272,15 +272,55 @@ def test_two_tenants_issuing_identical_requests_are_attributed_separately(client
     assert len(rows) == 2, "identical requests from two tenants are two separately attributed records"
 
 
-def test_a_retried_request_id_is_charged_once(client, conn, upstream):
-    """Idempotency: a client unsure whether its request landed retries with the same id."""
+def test_a_request_id_is_billed_once_and_executed_once(client, conn, upstream):
+    """Idempotency has to cover EXECUTION, not just the charge.
+
+    The old version asserted only that one ledger row existed — which is exactly what a *free
+    re-run* produces. `store.reserve()` returns an already-settled reservation for a repeated op id,
+    so the route ran the model again and `settle()`, idempotent by design, recorded nothing. A
+    tenant replaying one `X-Request-Id` got unlimited free inference, and this test could not see it
+    because it never counted upstream calls.
+
+    A completed request is now refused on replay. The genuine retry case is unaffected: an attempt
+    that never settled leaves its reservation `reserved`, and retrying resolves to it normally —
+    only a *finished* one is refused.
+    """
     alice = _tenant(client, "alice")
     body = {"messages": [{"role": "user", "content": "hi"}]}
     headers = {**_auth(alice), "X-Request-Id": "op-fixed"}
+
     assert client.post("/v1/chat/completions", json=body, headers=headers).status_code == 200
-    assert client.post("/v1/chat/completions", json=body, headers=headers).status_code == 200
-    rows = [r for r in store.list_ledger(conn) if r["ref_id"] == "op-fixed"]
+    assert len(upstream.calls) == 1
+
+    replay = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert replay.status_code == 403, "a settled request id must not authorize new GPU work"
+    assert len(upstream.calls) == 1, "the replay reached the GPU — it was billed to nobody"
+
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-fixed")]
     assert len(rows) == 1, "the same op id must not be billed twice"
+
+
+def test_two_tenants_using_the_same_request_id_do_not_collide(client, conn, upstream):
+    """`X-Request-Id` is client-supplied, and reservations were keyed on it alone — so two tenants
+    picking the same value (`1`, `test`, a framework default) shared one global namespace. The
+    second tenant's request resolved to the FIRST tenant's reservation and ran GPU work against
+    someone else's quota."""
+    alice = _tenant(client, "alice", budget=1000)
+    bob = _tenant(client, "bob", budget=1000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+
+    assert client.post("/v1/chat/completions", json=body,
+                       headers={**_auth(alice), "X-Request-Id": "shared"}).status_code == 200
+    assert client.post("/v1/chat/completions", json=body,
+                       headers={**_auth(bob), "X-Request-Id": "shared"}).status_code == 200, \
+        "bob's request was refused as a replay of alice's — the ids collided"
+
+    ledger = store.list_ledger(conn)
+    refs = [r["ref_id"] for r in ledger if r["ref_id"].endswith("shared")]
+    assert len(refs) == 2, "each tenant must have its own reservation"
+    assert len(set(refs)) == 2, f"the two tenants shared one op id: {refs}"
+    tenants = {r["tenant_id"] for r in ledger if r["ref_id"].endswith("shared")}
+    assert len(tenants) == 2, "the charges must land on two different tenants"
 
 
 # -- T628: the reserve step is hard and atomic --------------------------------------------------------------
@@ -746,7 +786,7 @@ def test_a_streamed_request_is_charged_for_the_time_the_stream_actually_took(cli
         assert r.status_code == 200
         body = "".join(chunk for chunk in r.iter_text())
 
-    rows = [row for row in store.list_ledger(conn) if row["ref_id"] == "op-streamed"]
+    rows = [row for row in store.list_ledger(conn) if row["ref_id"].endswith("op-streamed")]
     assert len(rows) == 1, "the stream must settle exactly once"
     charged = float(rows[0]["gpu_seconds"])
     assert charged >= delay, (
@@ -855,3 +895,61 @@ def test_a_settlement_appended_during_compaction_is_not_erased(monkeypatch, tmp_
     assert "op-new" in op_ids, "an append during compaction was erased — the outbox lost a record"
     assert "op-old" in op_ids, "an unrelated pending settlement must survive compaction"
     assert "op-doomed" not in op_ids, "a confirmed settlement is still dropped"
+
+
+def test_a_refused_stream_is_not_charged_at_all(client, conn, monkeypatch):
+    """A refusal before execution consumed no GPU, so it is released in full — not charged for the
+    round trip.
+
+    The non-streaming path already called `meter.abandon()` here. The streaming generator's
+    `finally` called `meter.finish(elapsed)` unconditionally, so a tenant was billed for being told
+    the GPU was busy — the one outcome they had no way to avoid. The earlier regression checked only
+    that the `ok` counter did not move, which this failure mode does not touch.
+    """
+    import httpx
+
+    class FakeStream:
+        status_code = 503
+
+        async def aiter_lines(self):
+            yield ""
+
+        async def aread(self):
+            return b"gpu busy"
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    alice = _tenant(client, "alice", budget=1000)
+    headers = {**_auth(alice), "X-Request-Id": "op-refused"}
+
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=headers) as r:
+        body = "".join(chunk for chunk in r.iter_text())
+    assert "error" in body.lower()
+
+    charged = [row for row in store.list_ledger(conn)
+               if row["ref_id"].endswith("op-refused") and float(row["gpu_seconds"]) > 0]
+    assert charged == [], f"a refusal was billed {charged}"
+
+    reservation = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-refused")]
+    assert all(float(r["gpu_seconds"]) == 0 for r in reservation), \
+        "the reservation must be released, not settled to elapsed time"

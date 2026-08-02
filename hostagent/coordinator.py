@@ -153,7 +153,7 @@ class ResidentModel:
     carries the estimate during that window, and counting both would double-count it."""
 
     __slots__ = ("model_key", "state", "vram_accounted_bytes", "active_requests", "last_used_at",
-                 "child")
+                 "child", "materialized")
 
     def __init__(self, model_key, state=LOADING, vram_accounted_bytes=0.0, clock=time.time):
         self.model_key = model_key
@@ -162,6 +162,15 @@ class ResidentModel:
         self.active_requests = 0
         self.last_used_at = clock()
         self.child = None
+        #: Whether these bytes are **physically allocated** and therefore already visible in
+        #: live-free. True for a normal load, which measures a real process before committing.
+        #:
+        #: False only for a DEFERRED commit, where the runtime spawns after admission returns. That
+        #: window is real wall-clock time for a large model, and during it invariant 2 has to keep
+        #: deducting these bytes from live-free — otherwise a concurrent admission for a different
+        #: model measures free memory the first model is on its way to taking. Invariant 1 covers it
+        #: throughout via `_accounted()`; this is what gives invariant 2 the same coverage.
+        self.materialized = True
 
     def snapshot(self) -> dict:
         return {"model": self.model_key, "state": self.state,
@@ -442,8 +451,23 @@ class Coordinator:
                 + sum(res.est_bytes for res in self.reservations.values()))
 
     def _unmaterialized(self) -> float:
-        """Invariant 2's deduction: reservations whose bytes are not yet visible in live-free."""
-        return sum(res.est_bytes for res in self.reservations.values() if not res.materialized)
+        """Invariant 2's deduction: every byte this coordinator has committed to but that is not yet
+        physically allocated, and therefore not yet reflected in `live_free`.
+
+        **Two sources, not one.** Reservations cover a load in flight. Residents cover the deferred
+        window — a commit whose process the *runtime* spawns after admission returns. Counting only
+        reservations left that window unprotected: the reservation is deleted at commit, the bytes
+        move to the resident, and invariant 2 then measured free memory the model was about to take.
+
+        With an unaccounted consumer present that is not a theoretical gap. On a 12 GiB card with 3
+        GiB held externally, two 5 GiB models could both be admitted during each other's spawn
+        window — 13 GiB committed on a 12 GiB card — because invariant 1 (which caps at the usable
+        budget) has no visibility into the external 3 GiB, and invariant 2, which does, could not
+        see the pending 5.
+        """
+        return (sum(res.est_bytes for res in self.reservations.values() if not res.materialized)
+                + sum(r.vram_accounted_bytes for r in self.residents.values()
+                      if not r.materialized))
 
     def _generation_of(self, model_key) -> int:
         return self._generation.get(model_key, 0)
@@ -528,9 +552,16 @@ class Coordinator:
         same child. Returns `[]` when no eligible set satisfies both bounds — including the case
         where evicting *everything* still would not, which is how a genuinely oversized model is
         distinguished from transient contention.
+
+        **A not-yet-materialized resident is also excluded.** It is `resident` and idle by every
+        signal this function reads, but its process is still spawning — the runtime is inside
+        `adapter.spawn()` right now. Evicting it would unload a child that does not exist yet and
+        leave the runtime about to report a PID for an entry that has been forgotten. It looks like
+        the emptiest slot on the GPU precisely because nothing has allocated for it yet, which makes
+        it the *first* thing an eviction would reach for.
         """
         eligible = [r for k, r in self.residents.items()
-                    if k != model_key and r.state == RESIDENT]
+                    if k != model_key and r.state == RESIDENT and r.materialized]
         eligible.sort(key=lambda r: (r.active_requests > 0, r.last_used_at))
 
         capacity = self.usable_capacity()
@@ -898,6 +929,11 @@ class Coordinator:
                     entry.vram_accounted_bytes = real_bytes
                     entry.child = child
                     entry.last_used_at = self._wallclock()
+                    # A deferred commit's bytes are an ESTIMATE of memory nothing has allocated yet.
+                    # Invariant 2 keeps deducting them from live-free until `set_child()` reports
+                    # the real PID and re-measures; a normal load already measured a live process,
+                    # so its bytes are in live-free and deducting them again would double-count.
+                    entry.materialized = not deferred
                     # Claims for the loader AND every joiner, atomic with `state = resident` (T682).
                     # The registry read and the assignment are one critical section, so a waiter
                     # cannot deregister between the count and the assignment.

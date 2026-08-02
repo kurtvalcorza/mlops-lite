@@ -445,7 +445,11 @@ def test_the_lane_connection_is_reopened_after_a_failure(monkeypatch):
     monkeypatch.setattr(main_mod, "_RUNTIME_LIFECYCLE", None)
 
     _coordinator, scheduler = main_mod.build_broker()
-    assert scheduler.snapshot()["jobs_lane"] == [], "a down store degrades the view, not the read"
+    snap = scheduler.snapshot()
+    # `None`, not `[]`. An unreadable lane rendered as an empty list claims "no jobs are waiting" —
+    # a statement about the lane, made by a reader that could not see it.
+    assert snap["jobs_lane"] is None, "a down store degrades the view, not the read"
+    assert snap["jobs_lane_readable"] is False
 
     state["fail"] = False
     scheduler.snapshot()

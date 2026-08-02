@@ -111,6 +111,19 @@ def _wal_compact(done_op_ids: set) -> None:
 
 # -- reserve --------------------------------------------------------------------------------------
 
+def _existing_settled(c, op_id: str) -> bool:
+    """Whether a reservation under this op id has already settled.
+
+    Best-effort: an unreadable store here must not fail the request, because the reserve below has
+    its own fail-closed handling and would refuse for a better-stated reason.
+    """
+    try:
+        existing = _store.get_reservation(c, op_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(existing) and existing.get("state") == "settled"
+
+
 def reserve_or_refuse(op_id: str, tenant: dict, est_gpu_seconds: float = None, *,
                       kind: str = "inference", modality: str = "") -> dict:
     """Pre-authorize GPU-seconds, or raise the HTTP refusal that matches the reason.
@@ -125,6 +138,24 @@ def reserve_or_refuse(op_id: str, tenant: dict, est_gpu_seconds: float = None, *
         c = conn()
     except BrokerStoreError as e:
         raise refuse("metering_unavailable", f"usage cannot be recorded: {e}")
+
+    # Idempotency has to cover EXECUTION, not just accounting.
+    #
+    # `store.reserve()` returns an existing reservation for a repeated op id, which is right for a
+    # client retrying a request it is unsure landed. But a reservation that has already **settled**
+    # is finished, and returning it let the caller run GPU work again — while `settle()`, idempotent
+    # by design, recorded nothing the second time. A tenant replaying one `X-Request-Id` therefore
+    # got unlimited free inference, and the retry test could not see it: it asserted one ledger row,
+    # which is exactly what a free re-run produces.
+    #
+    # Refused rather than silently re-reserved: a client reusing a settled id has a bug, and minting
+    # a fresh charge under an id it believes is idempotent would surprise it in the other direction.
+    settled = _existing_settled(c, op_id)
+    if settled:
+        raise refuse("forbidden",
+                     f"request id {op_id.split(':', 1)[-1]!r} has already been settled — reusing it "
+                     "would run new GPU work under a finished reservation. Send a new X-Request-Id.")
+
     try:
         return _store.reserve(c, op_id, tenant["id"], est, kind=kind, modality=modality)
     except QuotaExhausted as e:

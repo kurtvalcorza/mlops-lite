@@ -129,16 +129,27 @@ async def require_tenant(request: Request, authorization: str = Header(None)) ->
         # tenant. Distinguishing them tells an attacker which of their guesses was a real key.
         raise refuse("unauthorized", "invalid or revoked API key")
     request.state.tenant = tenant
-    request.state.op_id = _op_id(request)
+    request.state.op_id = _op_id(request, tenant)
     return tenant
 
 
-def _op_id(request: Request) -> str:
+def _op_id(request: Request, tenant: dict = None) -> str:
+    """The idempotency key a reservation is written under.
+
+    **Namespaced by tenant.** `X-Request-Id` is client-supplied, and reservations were looked up by
+    it alone — so two tenants choosing the same value (`1`, `test`, a framework's default) collided
+    in one global namespace. The second tenant's request then resolved to the *first* tenant's
+    reservation and ran GPU work against someone else's quota.
+
+    A tenant id is not secret and is derived from the authenticated key, so prefixing it costs
+    nothing and makes the collision impossible rather than unlikely.
+    """
     supplied = (request.headers.get("x-request-id") or "").strip()
+    prefix = (tenant or {}).get("id") or "anon"
     if supplied:
-        return supplied[:200]
+        return f"{prefix}:{supplied[:200]}"
     import uuid
-    return f"req-{uuid.uuid4()}"
+    return f"{prefix}:req-{uuid.uuid4()}"
 
 
 def require_own_tenant(tenant: dict, path_tenant_id: str) -> None:

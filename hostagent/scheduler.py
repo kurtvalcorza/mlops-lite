@@ -165,21 +165,33 @@ class Scheduler:
         `GET /admin/queue` (T689)."""
         snap = self.coordinator.snapshot()
         conn = self._conn()
-        jobs_lane = []
+
+        # `None`, not `[]`, when the lane cannot be read.
+        #
+        # An unreadable persisted queue rendered as an empty list says "no jobs are waiting" — a
+        # claim about the lane, made by a reader that could not see the lane. It is the same
+        # falsehood 027 spent an entire increment removing from the console, and it arrives here
+        # through the payload that console reads.
+        jobs_lane = None
         if conn is not None and self._store is not None:
             try:
                 jobs_lane = [{"job_id": j["id"], "tenant_id": j["tenant_id"], "pos": j["queue_pos"],
                               "kind": j["kind"]} for j in self._store.list_queued_broker_jobs(conn)]
             except Exception:  # noqa: BLE001 — a store blip degrades the view, never the scheduler
-                jobs_lane = []
+                jobs_lane = None
         snap["jobs_lane"] = jobs_lane
+        snap["jobs_lane_readable"] = jobs_lane is not None
         drain = self.drain_mode()
         snap["inference_lane"] = {"drain_mode": drain,
                                   "admissions_since_job_queued": self._inference_since_job_queued}
         try:  # T670: lane depth and drain mode, best-effort like the coordinator's own gauges
             from hostagent.metrics import REGISTRY
 
-            REGISTRY.set_gauge("hostagent_jobs_lane_depth", len(jobs_lane))
+            # Depth is published only when it was actually observed. A gauge is a time series an
+            # alert reads, and writing 0 for "unreadable" is worse there than writing nothing: the
+            # series looks like a drained queue, indefinitely, with no gap to notice.
+            if jobs_lane is not None:
+                REGISTRY.set_gauge("hostagent_jobs_lane_depth", len(jobs_lane))
             REGISTRY.set_gauge("hostagent_job_drain_mode", 1 if drain else 0)
         except Exception:  # noqa: BLE001
             pass

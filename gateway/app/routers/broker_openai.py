@@ -297,6 +297,12 @@ async def _chat_stream(prompt: str, body: ChatCompletionRequest, meter: "_Meter"
                               "temperature": body.temperature}) as upstream:
                     if upstream.status_code != 200:
                         text = (await upstream.aread()).decode("utf-8", "replace")
+                        # A refusal BEFORE execution. The work never reached the GPU, so the
+                        # reservation is released in full rather than charged for the round trip —
+                        # the same call the non-streaming path already made. Charging here billed a
+                        # tenant for being told the GPU was busy, which is the one outcome they had
+                        # no way to avoid.
+                        outcome["refused_before_execution"] = True
                         yield _sse_error(upstream.status_code, text)
                         return
                     outcome["status"] = "ok"
@@ -312,7 +318,14 @@ async def _chat_stream(prompt: str, body: ChatCompletionRequest, meter: "_Meter"
             # THE settlement for a streamed request. `elapsed()` here spans the actual stream,
             # because this runs when the generator finishes — normally, on error, or on a client
             # disconnect (Starlette closes the body, which raises GeneratorExit into this frame).
-            meter.finish(meter.elapsed())
+            #
+            # Two outcomes, and they settle differently. A stream that RAN and then failed or was
+            # cut still consumed the GPU, so it is charged for what it spent. A stream refused
+            # before it ran consumed nothing and is released in full.
+            if outcome.get("refused_before_execution"):
+                meter.abandon()
+            else:
+                meter.finish(meter.elapsed())
             state = quota_state(meter.tenant["id"])
             usage = {"gpu_seconds": round(meter.gpu_seconds, 3),
                      "quota_remaining": state.get("remaining_gpu_seconds")}

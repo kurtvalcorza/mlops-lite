@@ -151,14 +151,43 @@ def test_contention_raises_the_legacy_held():
 
 
 def test_release_is_idempotent_and_own_engine_only():
+    """`acquire` no longer parks a long-lived claim, so `active_requests` is 0 from the moment the
+    model is resident — which is what lets eviction ever run. Release stays idempotent and
+    own-engine-only; it just has no reference count left to decrement."""
     a, coord, gpu, life = _shim(sizes={"llm": 2 * GIB})
     a.acquire("llm", "serving", 2.0)
     a.release("asr")  # not ours — a no-op
-    assert coord.residents["llm"].active_requests == 1
+    assert coord.residents["llm"].active_requests == 0, \
+        "a resident engine holds no per-request claim; residency is the resident entry"
     a.release("llm")
     a.release("llm")
+    assert "llm" in coord.residents, "release means idle, not gone"
     assert coord.residents["llm"].active_requests == 0
     coord.assert_invariants()
+
+
+def test_capacity_pressure_eviction_needs_no_manual_claim_release():
+    """The deadlock, asserted directly.
+
+    The shim used to hold one claim for the whole resident lifetime, so `active_requests` never
+    reached 0 and `evict()` — which waits for 0 before calling the unload that would have released
+    that very claim — could never complete. Every eviction test passed only because it released the
+    claim by hand first, which production capacity pressure does not do.
+    """
+    a, coord, gpu, life = _shim(total=12 * GIB, sizes={"llm": 4 * GIB})
+    a.acquire("llm", "serving", 4.0)
+
+    assert coord.evict("llm") == "evicted", "eviction must complete without help"
+    assert "llm" not in coord.residents
+
+
+def test_an_exclusive_job_can_drain_a_resident_serving_engine():
+    """Same deadlock, reached through the job barrier rather than capacity pressure."""
+    a, coord, gpu, life = _shim(total=12 * GIB, sizes={"llm": 4 * GIB})
+    a.acquire("llm", "serving", 4.0)
+
+    assert a.acquire("train", "job", 0.0), "the job must be able to take the GPU"
+    assert coord.residents == {}, "the resident was drained rather than deadlocking the barrier"
 
 
 # -- jobs stay exclusive through the shim -----------------------------------------------------------------
@@ -337,24 +366,72 @@ def test_the_accounted_vram_is_reconciled_against_the_real_process(monkeypatch):
         "both VRAM bounds are enforced against this number; it must be measured, not estimated"
 
 
-def test_a_deferred_load_is_not_marked_materialized_before_the_process_exists():
-    """Materialized means 'these bytes are already visible in live-free'. For a process that has not
-    spawned they are not, and saying otherwise stops deducting memory that is about to be taken —
-    admitting a second model against VRAM the first is on its way to using."""
+def test_a_deferred_commit_keeps_deducting_its_bytes_from_live_free():
+    """Invariant 2 must cover the window between commit and spawn.
+
+    An earlier version of this test asserted over `coord.reservations` *after* `admit_serving()`
+    returned — but `_stage3` deletes the reservation at commit on every path, so the assertion ran
+    over an empty dict and passed no matter what the code did. It was vacuous, and it was hiding a
+    real gap: the bytes moved to the resident and stopped being deducted from live-free entirely.
+
+    Asserting on `_unmaterialized()` instead states the property directly, and it is the number both
+    the bound and the `/admin/queue` payload actually use.
+    """
+    coord, _gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+
+    result = coord.admit_serving("llm", 4.0 * GIB)
+    assert not isinstance(result, co.Refuse)
+    assert coord.reservations == {}, "the reservation is gone at commit — do not assert over it"
+    assert coord.residents["llm"].materialized is False, "nothing has spawned yet"
+    assert coord._unmaterialized() == 4.0 * GIB, \
+        "the bytes must still be deducted from live-free until the process exists"
+
+
+def test_a_second_model_cannot_be_admitted_against_vram_the_first_is_about_to_take():
+    """The concrete over-admission, with an unaccounted consumer present — which is the case
+    invariant 2 exists for, since invariant 1 has no visibility into it.
+
+    12 GiB card, 3 GiB held externally, usable budget 11 GiB. Two 5 GiB models both fit the budget,
+    so invariant 1 admits both; only invariant 2 can catch that 3 + 5 + 5 exceeds the card. Before
+    the fix it could not see the first model's pending allocation and admitted 13 GiB onto 12.
+    """
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    gpu.external = 3 * GIB
+
+    assert not isinstance(coord.admit_serving("A", 5.0 * GIB), co.Refuse)
+    assert isinstance(coord.admit_serving("B", 5.0 * GIB), co.Refuse), \
+        "B was admitted against the 5 GiB A has not allocated yet"
+
+    committed = sum(r.vram_accounted_bytes for r in coord.residents.values())
+    assert committed + gpu.external <= gpu.total_bytes(), \
+        f"{(committed + gpu.external) / GIB} GiB committed on a {gpu.total_bytes() / GIB} GiB card"
+
+
+def test_the_deduction_stops_once_the_real_process_reports():
+    """The other half: keep deducting forever and the model is counted twice against itself, which
+    refuses admissions that genuinely fit."""
     coord, gpu, _life = make(total=12 * GIB, sizes={})
     coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
     shim = coordadmission.CoordinatorAdmission(coord)
 
-    adapter = _FakeAdapter("llm", pid=99, est_gb=4.0)
-    runtime = _runtime(adapter, shim)
-    coord.lifecycle.inner.register("llm", runtime)
+    coord.admit_serving("A", 5.0 * GIB)
+    gpu.loaded[777] = ("A", 5 * GIB)          # the process is now real and visible in live-free
+    shim.set_child("A", 777)
 
-    # Admit without spawning: exactly the window between `acquire` and `set_child`.
-    result = coord.admit_serving("llm", 4.0 * GIB)
-    assert not isinstance(result, co.Refuse)
-    reservations = [r for r in coord.reservations.values()]
-    assert all(not r.materialized for r in reservations), \
-        "a not-yet-spawned model's bytes are not in live-free"
+    assert coord.residents["A"].materialized is True
+    assert coord._unmaterialized() == 0, "deducting materialized bytes double-counts the model"
+    assert not isinstance(coord.admit_serving("C", 2.0 * GIB), co.Refuse)
+
+
+def test_a_normally_loaded_resident_is_materialized_immediately():
+    """A non-deferred load measures a live process before committing, so its bytes are already in
+    live-free — deducting them again would refuse admissions that fit."""
+    coord, _gpu, _life = make(total=12 * GIB, sizes={"llm": 4 * GIB})
+    coord.admit_serving("llm", 4.0 * GIB)
+    assert coord.residents["llm"].materialized is True
+    assert coord._unmaterialized() == 0
 
 
 def test_a_coordinator_eviction_unloads_the_real_engine():
@@ -485,3 +562,52 @@ def test_forget_is_a_no_op_when_the_entry_is_already_gone():
 
     assert coord.forget("llm") is False, "already removed by the unload"
     assert coord.forget("never-existed") is False
+
+
+def test_a_second_runtime_cannot_be_admitted_while_the_first_is_still_spawning():
+    """The acquire→spawn window, driven concurrently through two real `EngineRuntime`s.
+
+    This is the window the deferred-commit fix protects, exercised the way it actually occurs rather
+    than by inspecting a flag: runtime A is paused *inside* `adapter.spawn()` — after admission
+    committed and before `set_child()` reports the PID — while runtime B attempts its own admission.
+
+    With an unaccounted 3 GiB consumer present, invariant 1 admits both 5 GiB models (10 <= 11 GiB
+    budget) and only invariant 2 can catch that 3 + 5 + 5 exceeds a 12 GiB card. B must be refused.
+    """
+    import threading
+
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    shim = coordadmission.CoordinatorAdmission(coord)
+    gpu.external = 3 * GIB
+
+    spawning = threading.Event()
+    release_spawn = threading.Event()
+
+    class BlockingAdapter(_FakeAdapter):
+        def spawn(self):
+            spawning.set()               # admission has committed; the process does not exist yet
+            release_spawn.wait(5.0)      # hold the window open
+            return super().spawn()
+
+    a_adapter = BlockingAdapter("A", pid=1111, est_gb=5.0)
+    a_runtime = _runtime(a_adapter, shim)
+    coord.lifecycle.inner.register("A", a_runtime)
+
+    thread = threading.Thread(target=a_runtime.ensure_loaded, daemon=True)
+    thread.start()
+    assert spawning.wait(5.0), "A never reached its spawn"
+
+    try:
+        b_refused = False
+        try:
+            shim.acquire("B", "serving", 5.0)
+        except (adm.Held, adm.VramExceeded):
+            b_refused = True
+        assert b_refused, (
+            "B was admitted during A's spawn window, against 5 GiB A has not allocated yet — "
+            f"{(sum(r.vram_accounted_bytes for r in coord.residents.values()) + gpu.external) / GIB}"
+            f" GiB committed on a {gpu.total_bytes() / GIB} GiB card")
+    finally:
+        release_spawn.set()
+        thread.join(5.0)
