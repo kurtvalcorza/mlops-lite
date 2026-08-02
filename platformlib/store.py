@@ -56,6 +56,26 @@ from platformlib.storeimpl.activations import (  # noqa: F401 — re-exported
     list_resumable_activations,
 )
 
+# -- broker jobs repository: the persisted FIFO lane (storeimpl/brokerjobs, 026 T647/T680/T685) ------
+#
+# Every name is `*_broker_job(s)` / lane-specific. The broker lane and the agent's journal are two
+# different lanes with two different state machines, and the facade already exports `get_job` and
+# `list_jobs` for the journal — binding the broker's over them would silently repoint ~24 existing
+# call sites at a table that does not hold their rows. Distinct names, not shadowing.
+from platformlib.storeimpl.brokerjobs import (  # noqa: F401 — re-exported
+    cancel_broker_job,
+    enqueue_broker_job,
+    finish_broker_job,
+    get_broker_job,
+    list_broker_jobs,
+    list_queued_broker_jobs,
+    pin_broker_job,
+    recover_broker_lane,
+    reorder_broker_job,
+    running_broker_job,
+    start_broker_job,
+)
+
 # -- capture-index repository (storeimpl/capture) ---------------------------------------------------
 from platformlib.storeimpl.capture import (  # noqa: F401 — re-exported
     capture_exists,
@@ -80,6 +100,18 @@ from platformlib.storeimpl.jobs import (  # noqa: F401 — re-exported (_job_spl
 
 # -- write-once labels repository (storeimpl/labels) ------------------------------------------------
 from platformlib.storeimpl.labels import attach_label  # noqa: F401 — re-exported
+
+# -- broker metering repository: reserve -> settle GPU-seconds (storeimpl/metering, 026 T628-T631) ---
+from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
+    QuotaExhausted,
+    consumption,
+    get_reservation,
+    list_ledger,
+    reconciliation,
+    release,
+    reserve,
+    settle,
+)
 
 # -- policy + pending + status repository (storeimpl/policies) --------------------------------------
 from platformlib.storeimpl.policies import (  # noqa: F401 — re-exported
@@ -135,36 +167,4 @@ from platformlib.storeimpl.tenancy import (  # noqa: F401 — re-exported
     rotate_key,
     set_quota,
     set_tenant_status,
-)
-
-# -- broker metering repository: reserve -> settle GPU-seconds (storeimpl/metering, 026 T628-T631) ---
-from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
-    QuotaExhausted,
-    consumption,
-    get_reservation,
-    list_ledger,
-    reconciliation,
-    release,
-    reserve,
-    settle,
-)
-
-# -- broker jobs repository: the persisted FIFO lane (storeimpl/brokerjobs, 026 T647/T680/T685) ------
-#
-# Every name is `*_broker_job(s)` / lane-specific. The broker lane and the agent's journal are two
-# different lanes with two different state machines, and the facade already exports `get_job` and
-# `list_jobs` for the journal — binding the broker's over them would silently repoint ~24 existing
-# call sites at a table that does not hold their rows. Distinct names, not shadowing.
-from platformlib.storeimpl.brokerjobs import (  # noqa: F401 — re-exported
-    cancel_broker_job,
-    enqueue_broker_job,
-    finish_broker_job,
-    get_broker_job,
-    list_broker_jobs,
-    list_queued_broker_jobs,
-    pin_broker_job,
-    recover_broker_lane,
-    reorder_broker_job,
-    running_broker_job,
-    start_broker_job,
 )

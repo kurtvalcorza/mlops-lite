@@ -7,7 +7,6 @@ statement about *time* and a real clock would make it either slow or flaky.
 """
 import os
 import sys
-import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:

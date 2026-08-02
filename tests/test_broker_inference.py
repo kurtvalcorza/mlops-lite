@@ -546,7 +546,6 @@ def test_streamed_completion_reports_usage_as_a_terminal_event_not_a_header(clie
     """Headers precede the body, so a settled X-GPU-Seconds cannot exist at flush time."""
     import httpx
 
-    from gateway.app.routers import broker_openai
 
     class FakeStream:
         status_code = 200

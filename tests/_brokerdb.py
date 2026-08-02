@@ -18,7 +18,18 @@ _DEFAULT_ADMIN_DSN = "postgresql://mlops:mlops@127.0.0.1:5432/postgres"
 
 
 def admin_dsn() -> str:
-    return os.getenv("BROKER_TEST_DSN") or os.getenv("GATEWAY_DB_URL") or _DEFAULT_ADMIN_DSN
+    """The Postgres to create scratch databases on.
+
+    `TEST_MIGRATIONS_ADMIN_DSN` is included deliberately: CI already runs an ephemeral Postgres
+    service under that name for `tests/test_migrations.py`, and without it every broker suite would
+    *skip* on the one runner where they most need to run. A suite that silently skips in CI is
+    indistinguishable from one that passes, which is the failure mode these guards exist to avoid —
+    so the guard reaches for the database CI already provides rather than requiring a second one.
+    """
+    return (os.getenv("BROKER_TEST_DSN")
+            or os.getenv("TEST_MIGRATIONS_ADMIN_DSN")
+            or os.getenv("GATEWAY_DB_URL")
+            or _DEFAULT_ADMIN_DSN)
 
 
 def available() -> bool:

@@ -17,7 +17,6 @@ if REPO not in sys.path:
 import pytest  # noqa: E402
 
 from platformlib import store  # noqa: E402
-from platformlib.storeimpl import tenancy  # noqa: E402
 from tests import _brokerdb  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("_broker_db_guard")

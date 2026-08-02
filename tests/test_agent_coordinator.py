@@ -651,7 +651,7 @@ def test_a_claim_works_as_a_context_manager():
     assert coord.residents["a"].active_requests == 0
 
 
-# -- T642/T690: exclusive jobs, the barrier, and the in-flight load ------------------------------------------------------
+# -- T642/T690: exclusive jobs, the barrier, and the in-flight load ------------------------------------
 
 def test_a_job_acquires_the_gpu_once_the_serving_set_drains():
     coord, gpu, life = make(sizes={"a": 4 * GIB})
@@ -778,7 +778,6 @@ def test_invariants_hold_under_a_randomized_concurrent_workload():
     release or eviction produced between two decisions."""
     import random
 
-    rng = random.Random(20260802)
     models = {f"m{i}": (i + 1) * GIB for i in range(5)}
     coord, gpu, life = make(total=24 * GIB, sizes=models, drain_timeout=0.2,
                             job_drain_timeout=0.5, max_attempts=2)

@@ -17,8 +17,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 from . import platform_health, platform_metrics, tracing
 from .auth import auth_mode, require_api_key
-from .routers import (
+from .routers import (  # 026: the LAN broker surface
     batch,
+    broker_admin,
+    broker_openai,
     datasets,
     embed,
     infer,
@@ -31,11 +33,10 @@ from .routers import (
     validation,
     vision,
 )
+from .routers import console as console_router  # 027: the console read surface
 from .routers import (
     policies as policies_router,
 )
-from .routers import broker_admin, broker_openai  # 026: the LAN broker surface
-from .routers import console as console_router  # 027: the console read surface
 
 _log = logging.getLogger("gateway.main")
 
