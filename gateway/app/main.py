@@ -8,6 +8,7 @@ Phase 8: GPU/daemon metrics proxied into /metrics; OpenAPI exported for contract
 002 hardening (US1): the lifecycle routers below require an API key (FR-016); `/healthz`,
 `/metrics`, and `/` stay open for liveness and Prometheus.
 """
+import logging
 import os
 
 from fastapi import Depends, FastAPI
@@ -33,6 +34,9 @@ from .routers import (
 from .routers import (
     policies as policies_router,
 )
+from .routers import broker_admin, broker_openai  # 026: the LAN broker surface
+
+_log = logging.getLogger("gateway.main")
 
 app = FastAPI(title="MLOps-Lite Gateway", version="1.2.0")
 
@@ -51,6 +55,13 @@ app.include_router(tabular.router, tags=["tabular"], dependencies=_protected)  #
 app.include_router(validation.router, tags=["validation"], dependencies=_protected)  # 014 US2
 app.include_router(batch.router, tags=["batch"], dependencies=_protected)  # 014 US1 (offline batch)
 app.include_router(policies_router.router, tags=["policies"], dependencies=_protected)  # 018 US3
+
+# 026: the LAN broker surface. Deliberately NOT under `_protected` — these routers carry their own
+# auth (`require_tenant` / `require_owner`), because they authenticate a TENANT or the OWNER rather
+# than the operator's platform key. Stacking the operator key on top would mean every LAN tenant
+# needed it too, which would hand each of them the whole lifecycle surface (026 T620/T624/T633).
+app.include_router(broker_openai.router, tags=["broker-inference"])
+app.include_router(broker_admin.router, tags=["broker-admin"])
 
 REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"])
 
@@ -166,6 +177,31 @@ def _apply_migrations():
             last_err = f"database unreachable ({e.__class__.__name__})"
     _MIGRATION_STATUS.update(state="error", error=last_err)
     _MIG_OUTCOMES.labels(outcome="error").inc()
+
+
+# --- 026 (T621, T629): broker startup — the system tenant, then the settlement outbox ---------------
+# Both run AFTER migrations because both need the 003_broker tables. Both are best-effort: a broker
+# that cannot reach the store yet must not stop the gateway from serving the routes that do not need
+# it, and each retries naturally (the tenant on the next boot, the outbox on the next settle).
+
+@app.on_event("startup")
+def _broker_startup():
+    if _MIGRATION_STATUS["state"] == "error":
+        return
+    from platformlib import store as _store
+
+    from . import broker, metering
+
+    try:
+        _store.ensure_system_tenant(broker.conn())
+    except Exception as e:  # noqa: BLE001
+        _log.warning("broker: could not materialize the system tenant: %s", e)
+    try:
+        # Replays settlements a previous process wrote to the WAL but did not confirm. Idempotent —
+        # a re-settled operation is a no-op, which is what makes at-least-once delivery exactly-once.
+        metering.replay_outbox()
+    except Exception as e:  # noqa: BLE001
+        _log.warning("broker: settlement outbox replay failed, will retry on next settle: %s", e)
 
 
 # --- 023 US5 (T524, FR-309..311): activation reconciliation from gateway lifespan -------------------
