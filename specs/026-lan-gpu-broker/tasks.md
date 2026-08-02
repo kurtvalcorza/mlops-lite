@@ -173,6 +173,31 @@ without the other, since the barrier is only airtight when both the drain and th
 - [X] **T689** `[US3]` *(Phase 3)* Expose both terms of **both VRAM bounds** on `GET /admin/queue` — `usable_capacity`, `accounted`, `reserved`, `live_free`, `safety_headroom`, plus per-resident `state`/`active_requests`, outstanding `reservations`, and `job_barrier` — named as [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) names them. Check: Drill 3 step 3 can assert invariants 1 and 2 by reading this response alone, with no recourse to agent logs.
 - [X] **T690** `[US1]` *(Phase 2)* Add the **barrier re-check to stage 3's commit** — `barred = job_barrier or exclusive_job` as a third rollback condition alongside `stale`/`drift`, unloading outside the lock and disposing joiners with retryable `gpu_busy`. Check: a load in flight when a job's barrier rises never becomes resident — `admit_job`'s closing `assert residents empty and reservations empty` cannot be tripped by it — and the refused request retries successfully once the job completes.
 
+## Implementation status (as of this branch)
+
+**59 of 73 tasks complete.** Every ungated task is done and verified: Phase 0 (foundational), Phase 1
+(P1 inference + metering), Phase 2 (the coordinator redesign), Phase 3 (scheduler and lanes),
+Phase 4 (modalities), Phase 7 (cross-cutting), and all of Phases 8–9's review corrections.
+
+**The 14 open tasks are exactly the gated ones**, left unstarted on purpose per the gate discipline
+at the top of this file:
+
+| Open tasks | Phase | Gate |
+|---|---|---|
+| T658–T664, T679 | 5 (P2 exclusive jobs) | native-Linux GPU host + a **passing** sandbox re-run + a new-runtime constitution amendment. The spike is complete and negative: WSL2's GPU is paravirtualized (`/dev/dxg`, no `/dev/nvidia*`), so gVisor `nvproxy` and Kata VFIO cannot function. |
+| T665–T669, T686 | 6 (P5 sessions) | the session admission class is undecided (T665) — exclusive lease vs sandboxed job vs a further amendment. |
+
+Neither gate can be cleared from a container: one needs different hardware, the other needs an owner
+decision and a constitution amendment. Starting either would mean shipping the weaker posture FR-026
+exists to prevent, or building against an admission class nobody has chosen.
+
+**Co-residency ships behind `BROKER_COORDINATOR_ADMISSION=1`, default off.** The coordinator, the
+lanes, and the whole broker surface are complete and tested; the flag is the phase gate made
+operational, since P3/P4 are verified on hardware before they become the default. With it off the
+agent's behaviour is byte-identical to 018's.
+
+---
+
 ## Traceability
 
 | Story | Priority | Tasks |

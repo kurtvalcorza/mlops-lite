@@ -95,6 +95,35 @@ than building them into the fetch layer (plan.md Summary).
 
 ---
 
+## Implementation status (as of this branch)
+
+**Shipped**: Phase 1 verification (T692), the response envelope (T693), the normalized type layer
+(T694), the live-fetch layer (T695), `GET /console/health` + `/console/capabilities` (T698), and the
+**whole of US2's backend and its console area** — devices (T708), the admission decision ring
+(T709), the paged journal (T710), the `EngineState` extension (T711), the three agent routes (T712),
+the gateway agent proxy (T713), the five gateway runtime routes (T714), the Runtime area (T715/T716),
+and the allowlist delta (T717), with `tests/test_runtime_api.py` (T707),
+`tests/test_console_read_api.py`, and `tests/test_console_allowlist.py`.
+
+That is the slice plan.md sequences first and calls "the increment's differentiator", which "ships as
+its own slice" — and it is additive: the Runtime area is a new route, so nothing that worked before
+stopped working.
+
+**Not started**: the IA replacement (T696, T697, T699, T700 and Phases 3, 5–13). The reason is stated
+rather than assumed: **T699 deletes the six 021 stage directories**, and the ten areas that replace
+them are Phases 3–12. Doing the deletion without the replacement would leave the console with dead
+navigation and less working functionality than it has today — strictly worse than not starting, and
+not what "stop cleanly at a checkpoint" means. plan.md's Complexity Tracking names US1/US2/US3/US10 as
+the irreducible core; **US2 is complete, US1/US3/US10 are not**, so the IA swap is not yet safe to
+make. The next increment should take T696/T697 (charts + shell) and Phase 3 together with T699/T700,
+as one atomic change.
+
+**Also not started**: the `[HW]` legs (T718, T719 and the other `[HW]` tasks), which need the RTX
+5070 Ti and cannot be validated in a container. The offline suite pins everything around them with
+injected fakes, exactly as the plan intends.
+
+---
+
 ## Phase 3: User Story 1 — Ten-area shell and Overview (Priority: P1) 🎯 core
 
 **Goal**: the landing view answers health / what's running / what needs attention / what next.
