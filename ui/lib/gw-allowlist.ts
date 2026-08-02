@@ -97,6 +97,9 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'console/attention' }, // severity-ranked issues (FR-373)
   { method: 'GET', pattern: 'console/activity' }, // normalized lifecycle timeline (FR-363)
   { method: 'GET', pattern: 'console/search' }, // composed resolver across six kinds (FR-368)
+  { method: 'GET', pattern: 'console/catalog' }, // the five-system join (FR-383/384)
+  { method: 'GET', pattern: 'console/catalog/:name/:version' }, // detail + lineage (FR-386/390)
+  { method: 'GET', pattern: 'console/catalog/:name/:version/compatibility' }, // FR-387/388
   { method: 'GET', pattern: 'console/jobs' }, // gateway lane ⋈ agent table ⋈ tracking runs (FR-372)
   { method: 'GET', pattern: 'console/jobs/:id' }, // + timeline, resources, StateConflict (FR-391)
   { method: 'GET', pattern: 'console/runs' }, // run listing — net-new

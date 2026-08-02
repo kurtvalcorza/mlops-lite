@@ -217,6 +217,74 @@ export type JournalPage = {
   has_more: boolean;
 };
 
+// -- catalog ------------------------------------------------------------------------------------
+
+/** `unknown` is a member so an unrecognized task tag renders rather than being filtered out. */
+export type Modality =
+  | 'text-generation'
+  | 'image-classification'
+  | 'embedding'
+  | 'asr'
+  | 'tabular'
+  | 'unknown';
+
+export type EvaluationState = 'passed' | 'failed' | 'warning' | 'not-evaluated' | 'incomplete';
+
+export type PlatformModel = {
+  id: string;
+  name: string;
+  version: string;
+  modality: Modality;
+  registeredModelName: string | null;
+  aliases: string[];
+  sourceRunId: string | null;
+  artifactUri: string | null;
+  artifactDigest: string | null;
+  artifactSizeBytes: number | null;
+  /** Tri-state. `null` is "we did not check", which is NOT "the object is missing". */
+  artifactPresent: boolean | null;
+  evaluationState: EvaluationState;
+  deploymentIds: string[];
+  lineage: { baseModel: string | null; baseResolvable: boolean; parentRunId: string | null } | null;
+  tags: Record<string, string>;
+  serving: boolean;
+};
+
+export type CheckResult = 'pass' | 'fail' | 'unknown';
+
+/**
+ * `unknown` is never collapsed into `incompatible`: an unreachable agent is not a compatibility
+ * fact, and reporting it as one would send an operator to rebuild a model that was fine.
+ */
+export type CompatibilityVerdict =
+  | 'eligible'
+  | 'not-currently-eligible'
+  | 'incompatible'
+  | 'unknown';
+
+export type RuntimeCompatibility = {
+  requiredEngine: string | null;
+  acceleratorRequired: boolean;
+  requiredComputeCapability: string | null;
+  artifactAvailable: boolean | null;
+  hostCompatible: boolean | null;
+  estimatedVramGb: number | null;
+  usableBudgetGb: number | null;
+  accountedResidentGb: number | null;
+  /** Σ ALL outstanding reservations → the budget check only. */
+  reservedGb: number | null;
+  /** Σ not-yet-reconciled reservations → the live-VRAM check only. */
+  unmaterializedGb: number | null;
+  liveFreeVramGb: number | null;
+  headroomGb: number | null;
+  budgetCheck: CheckResult;
+  liveVramCheck: CheckResult;
+  fitsAlone: boolean | null;
+  jobExclusive: boolean;
+  verdict: CompatibilityVerdict;
+  reasons: string[];
+};
+
 // -- jobs ---------------------------------------------------------------------------------------
 
 export type JobState =

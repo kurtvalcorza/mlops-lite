@@ -155,3 +155,34 @@ def experiments() -> list:
     return [{"experiment_id": e.experiment_id, "name": e.name,
              "lifecycle_stage": e.lifecycle_stage}
             for e in client.search_experiments()]
+
+
+def artifact_present(uri: str) -> bool:
+    """Whether the object a registry version points at actually exists (FR-384).
+
+    An **existence check**, not an inference from the URI. A registry row is a pointer, and a
+    pointer is exactly the kind of thing that outlives what it points at — inferring presence from
+    it is how a console shows a download that 404s.
+
+    Raises on an unreachable object store, so the caller records the source degraded and the field
+    stays `None`. `None` is not `False`: an unchecked artifact is not a missing one, and reporting
+    it as missing would send an operator hunting for a file that is probably there.
+    """
+    from platformlib import store
+
+    if not uri or not str(uri).startswith("s3://"):
+        # A non-S3 source (a local path from an offline run) cannot be checked from here. Unknown,
+        # not absent.
+        raise ValueError(f"not an object-store URI: {uri!r}")
+    bucket, _, key = str(uri)[len("s3://"):].partition("/")
+    client = store.s3_client()
+    try:
+        client.head_object(Bucket=bucket, Key=key.rstrip("/"))
+        return True
+    except Exception as e:  # noqa: BLE001
+        # A 404 is an answer; anything else is an unreachable store and must propagate.
+        code = getattr(getattr(e, "response", None), "get", lambda _k, _d=None: None)("Error", {})
+        status = (code or {}).get("Code")
+        if str(status) in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise

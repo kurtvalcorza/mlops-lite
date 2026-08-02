@@ -14,8 +14,8 @@ import time
 from fastapi import APIRouter, Query
 
 from .. import console, runtime
+from ..console import catalog, overview, sources
 from ..console import jobs as jobs_mod
-from ..console import overview, sources
 
 router = APIRouter()
 
@@ -206,6 +206,114 @@ async def search(q: str = Query(..., min_length=1, max_length=200),
 
     return projection.envelope(overview.search_results(
         q, models=models, jobs=jobs, datasets=datasets, predictions=preds, limit=limit))
+
+
+# -- catalog and compatibility (T721/T722) ----------------------------------------------------------
+
+@router.get("/console/catalog")
+async def console_catalog(modality: str = None, evaluation_state: str = None,
+                          deployed: bool = None, verify_artifacts: bool = False,
+                          limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    """The joined catalog across registry, object store, tracking, and evaluation (FR-383/384).
+
+    `verify_artifacts` is opt-in. An existence check per row is a round trip per row, and the
+    catalog is a list view — doing it unconditionally would make the page cost grow with the
+    registry. Unverified rows carry `artifactPresent: null`, which the console renders as
+    "unchecked" rather than as present.
+    """
+    projection = console.Projection()
+    versions = await projection.read("registry", sources.model_versions)
+    if versions is None:
+        return projection.envelope(None)
+
+    rows = []
+    for version in versions:
+        present = None
+        if verify_artifacts:
+            try:
+                present = await projection.read("objectstore",
+                                                lambda v=version: sources.artifact_present(v.get("source")))
+            except Exception:  # noqa: BLE001 — a check that cannot run leaves the field unknown
+                present = None
+        rows.append(catalog.platform_model(version, artifact_present=present))
+
+    if modality:
+        rows = [r for r in rows if r["modality"] == modality]
+    if evaluation_state:
+        rows = [r for r in rows if r["evaluationState"] == evaluation_state]
+    if deployed is not None:
+        rows = [r for r in rows if bool(r["deploymentIds"]) is deployed]
+
+    return projection.envelope({"models": rows[offset:offset + limit], "total": len(rows),
+                                "offset": offset, "limit": limit})
+
+
+@router.get("/console/catalog/{name}/{version}")
+async def console_catalog_detail(name: str, version: str, verify_artifact: bool = True):
+    """One catalog row plus lineage (FR-386/390). The artifact IS checked here — a detail view is
+    one row, so the round trip the list view avoids is affordable and the answer is what the
+    operator opened the page for."""
+    projection = console.Projection()
+    versions = await projection.read("registry", sources.model_versions)
+    if versions is None:
+        return projection.envelope(None)
+
+    match = [v for v in versions if v.get("name") == name and str(v.get("version")) == version]
+    if not match:
+        return projection.envelope(None)
+
+    present = None
+    if verify_artifact:
+        present = await projection.read("objectstore",
+                                        lambda: sources.artifact_present(match[0].get("source")))
+    return projection.envelope(catalog.platform_model(match[0], artifact_present=present))
+
+
+@router.get("/console/catalog/{name}/{version}/compatibility")
+async def console_compatibility(name: str, version: str):
+    """`RuntimeCompatibility` against **live** topology (FR-387/388/389).
+
+    A statement about *now*, so it is computed per request and not cached beyond the device
+    snapshot's own TTL — a cached "eligible" outlives the free VRAM that made it true.
+    """
+    projection = console.Projection()
+
+    admission_body = await runtime.admission(1)
+    engines_body = await runtime.engines()
+    if admission_body["data"] is None:
+        projection.mark_degraded(runtime.AGENT)
+    else:
+        projection.mark_observed(runtime.AGENT)
+
+    versions = await projection.read("registry", sources.model_versions)
+    match = [v for v in versions or [] if v.get("name") == name and str(v.get("version")) == version]
+    row = catalog.platform_model(match[0]) if match else None
+
+    engines = (engines_body["data"] or {}).get("engines") if engines_body["data"] else None
+    tags = dict((match[0] if match else {}).get("tags") or {})
+    required_engine = tags.get(catalog.ENGINE_TAG)
+    estimated = _estimated_vram_gb(engines, required_engine)
+
+    return projection.envelope(catalog.compatibility(
+        estimated_gb=estimated,
+        admission=admission_body["data"],
+        engines=engines,
+        required_engine=required_engine,
+        artifact_available=(row or {}).get("artifactPresent"),
+        base_resolvable=((row or {}).get("lineage") or {}).get("baseResolvable", True)))
+
+
+def _estimated_vram_gb(engines, required_engine):
+    """The estimate the **agent** publishes for the engine that would serve this model.
+
+    Sourced from the agent rather than computed here on purpose: the agent's estimate is the number
+    admission will actually check against, and a second estimate maintained in the gateway would
+    drift from it and produce a console that says `pass` where the coordinator says refuse.
+    """
+    for engine in engines or []:
+        if engine.get("engine_id") == required_engine:
+            return engine.get("est_vram_gb")
+    return None
 
 
 # -- jobs, runs, experiments (T726/T727) -----------------------------------------------------------

@@ -245,24 +245,24 @@ fails early if it is going to.
 **Independent Test**: catalog rows join registry, artifact, deployment, and evaluation facts; a
 compatibility panel distinguishes structural from transient ineligibility for all five modalities.
 
-- [ ] **T720** [P] [US3] Write `tests/test_console_joins.py` (catalog half) — the join is correct
+- [X] **T720** [P] [US3] Write `tests/test_console_joins.py` (catalog half) — the join is correct
   when a side is **missing**: a registry version with no artifact, an artifact with no registry
   entry, a version with no evaluation. Each renders with the missing side marked absent, **never
   dropped from the list** (spec Edge Cases).
-- [ ] **T721** [US3] Implement `gateway/app/console/catalog.py` + `GET /console/catalog` — the join
+- [X] **T721** [US3] Implement `gateway/app/console/catalog.py` + `GET /console/catalog` — the join
   per data-model §5 (FR-383). `artifactPresent` requires an **actual object-store existence check**; inferring
   presence from a registry URI is how a console shows a download that 404s.
-- [ ] **T722** [US3] Implement `GET /console/catalog/{name}/{version}/compatibility` — verdict from
+- [X] **T722** [US3] Implement `GET /console/catalog/{name}/{version}/compatibility` — verdict from
   gateway contracts + live topology (FR-387/388/389). Enforce the three-way distinction: `incompatible`
   (structural — unresolvable adapter base, missing artifact, capability mismatch),
   `not-currently-eligible` (transient — a failed budget or live-VRAM check while the model still fits
   alone, or a job holding the GPU), `unknown` (agent unreachable). A model exceeding the usable budget
   **even on an empty GPU** is `incompatible`, not transient — eviction cannot help. **Never
   collapse `unknown` into either** — an unreachable agent is not a compatibility fact.
-- [ ] **T723** [US3] Build `ui/app/(console)/models/` — catalog list (FR-384), the nine detail tabs
+- [X] **T723** [US3] Build `ui/app/(console)/models/` — catalog list (FR-384), the nine detail tabs
   (FR-386), the compatibility panel, and navigable lineage back to base model and source run
   (FR-390). Tracking vocabulary is preserved verbatim where displayed (FR-366). An unrecognized modality renders as `unknown`, not filtered out (FR-385).
-- [ ] **T724** [US3] Extend the allowlist with the three `console/catalog*` entries.
+- [X] **T724** [US3] Extend the allowlist with the three `console/catalog*` entries.
 
 **Checkpoint**: the catalog answers the platform's central model question.
 
