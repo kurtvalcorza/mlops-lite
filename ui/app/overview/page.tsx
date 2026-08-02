@@ -20,7 +20,7 @@ import { CADENCE, formatAge, useLive } from '@/lib/use-live';
 import type {
   ActivityEvent,
   AdmissionView,
-  AttentionItem,
+  AttentionView,
   Capabilities,
   PlatformHealth,
   PlatformJob,
@@ -225,7 +225,7 @@ function ActiveWork() {
 const SEVERITY_MARK: Record<string, string> = { critical: '!!', warning: ' !', info: '  ' };
 
 function Attention() {
-  const { data, ageMs, degraded } = useLive<AttentionItem[]>('console/attention', CADENCE.health);
+  const { data, ageMs, degraded } = useLive<AttentionView>('console/attention', CADENCE.health);
 
   return (
     <Panel title="Needs attention">
@@ -234,17 +234,17 @@ function Attention() {
       </div>
       {data === null ? (
         <p className="text-body-md text-mute">unknown — no source answered</p>
-      ) : data.length === 0 && degraded.length > 0 ? (
+      ) : data.items.length === 0 && degraded.length > 0 ? (
         // Distinct from "nothing needs attention". An unreachable backend cannot tell us there is
         // nothing wrong, and saying so would be the console's most dangerous falsehood.
         <p className="text-body-md text-mute">
           nothing from the sources that answered — {degraded.join(', ')} could not be read
         </p>
-      ) : data.length === 0 ? (
+      ) : data.items.length === 0 ? (
         <p className="text-body-md text-mute">nothing, based on what is currently readable</p>
       ) : (
         <ul className="font-mono text-body-md">
-          {data.map((item) => (
+          {data.items.map((item) => (
             <li key={item.id} className={item.severity === 'info' ? 'text-mute' : 'text-ink'}>
               [{SEVERITY_MARK[item.severity] ?? '  '}] {item.kind} · {item.subject} —{' '}
               <Link href={item.href} className="underline">
@@ -253,6 +253,19 @@ function Attention() {
             </li>
           ))}
         </ul>
+      )}
+      {data && data.kindsNotPolled.length > 0 && (
+        // Which checks this panel did NOT run. A kind that cannot fire is indistinguishable from a
+        // kind that found nothing wrong, and "nothing needs attention" is the most consequential
+        // sentence on this page.
+        <p className="mt-3 text-caption-md text-ash">
+          [i] not checked here: {data.kindsNotPolled.join(', ')} — both need per-version work too
+          expensive to poll, and are computed on demand in{' '}
+          <Link href="/models" className="underline">
+            Models
+          </Link>
+          .
+        </p>
       )}
     </Panel>
   );

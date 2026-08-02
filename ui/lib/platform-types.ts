@@ -784,6 +784,17 @@ export type AttentionItem = {
   observedAt: string;
 };
 
+/**
+ * The panel, plus which of the nine kinds it actually checked. Two need per-version work that is
+ * not affordable on a poll, so they are computed on demand in the Models area — and the panel says
+ * so, because a kind that cannot fire is indistinguishable from a kind that found nothing wrong.
+ */
+export type AttentionView = {
+  items: AttentionItem[];
+  kindsChecked: AttentionKind[];
+  kindsNotPolled: AttentionKind[];
+};
+
 /** The 021 loop, kept as a visualization now that it is no longer navigation. */
 export type ActivityStage = 'data' | 'train' | 'evaluate' | 'deploy' | 'infer' | 'monitor';
 

@@ -29,6 +29,21 @@ ATTENTION_KINDS = (
     "stale-agent-heartbeat",
 )
 
+#: The kinds the **polled** attention panel can actually produce.
+#:
+#: `missing-artifact` needs an object-store existence check per version and `evaluation-gate-failure`
+#: needs a gate verdict, which this platform computes at promote time and never persists — neither
+#: is affordable on a five-second poll over the whole registry. Both ARE computed on demand in the
+#: Models area (`/console/catalog?verify_artifacts=true`, `/console/evaluations/{name}/{version}`).
+#:
+#: Named here rather than left as branches that quietly never fire. `attention_items()` still emits
+#: all nine when a caller supplies the fields — that is what the catalog-backed path does — so the
+#: vocabulary stays whole and this set records what the *polled route* can claim. Same discipline as
+#: `predictions.DERIVABLE_SIGNALS`, and for the same reason: a rule that cannot fire reads exactly
+#: like a rule that found nothing wrong.
+POLLED_ATTENTION_KINDS = tuple(k for k in ATTENTION_KINDS
+                               if k not in ("missing-artifact", "evaluation-gate-failure"))
+
 #: Rank, not colour. The panel is ordered by this so the first row is the most consequential one,
 #: independent of which source happened to answer first.
 SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}

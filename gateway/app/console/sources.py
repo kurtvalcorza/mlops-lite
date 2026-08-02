@@ -73,7 +73,14 @@ def model_versions(limit: int = MODEL_LIMIT) -> list:
     out = []
     for model in registry.list_models():
         for version in registry.list_versions(model["name"]):
-            out.append({**version, "serving_version": model.get("serving_version")})
+            out.append({
+                **version,
+                "serving_version": model.get("serving_version"),
+                # Lifted out of the tag bag so composers read one field name rather than each
+                # knowing that the registry calls a modality a `task`. The console's timeline read
+                # `modality` and got nothing, because only the catalog projection unpacked it.
+                "modality": (version.get("tags") or {}).get("task"),
+            })
             if len(out) >= limit:
                 return out
     return out

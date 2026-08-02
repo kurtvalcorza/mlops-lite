@@ -80,6 +80,13 @@ def list_versions(name: str) -> list:
             "run_id": mv.run_id,
             "tags": dict(mv.tags or {}),
             "serving": str(mv.version) == serving,
+            # 027: when the version was registered. Additive — every existing consumer keys on the
+            # fields above. Without it the console's lifecycle timeline could render no model event
+            # at all: it drops undated entries on purpose (an event shown at the wrong time is worse
+            # than one not shown), so a missing timestamp silently removed the entire model half of
+            # the timeline rather than misplacing it.
+            "created_at": (mv.creation_timestamp / 1000.0
+                           if getattr(mv, "creation_timestamp", None) else None),
         }
         for mv in versions
     ]

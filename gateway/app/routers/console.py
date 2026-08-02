@@ -224,7 +224,16 @@ async def attention():
         # An unreachable agent has no heartbeat to age; the `degraded` entry already says so, and
         # emitting a stale-heartbeat item on top would report one outage as two.
         heartbeat_age_s=None)
-    return projection.envelope(items)
+    return projection.envelope({
+        "items": items,
+        # Which of the nine kinds this POLLED route can produce. Two need per-version work that is
+        # not affordable at this cadence and are computed on demand in the Models area instead. The
+        # panel says so, because a kind that cannot fire is indistinguishable from a kind that found
+        # nothing — and "nothing needs attention" is the most consequential thing this surface says.
+        "kindsChecked": list(overview.POLLED_ATTENTION_KINDS),
+        "kindsNotPolled": [k for k in overview.ATTENTION_KINDS
+                           if k not in overview.POLLED_ATTENTION_KINDS],
+    })
 
 
 @router.get("/console/summary")

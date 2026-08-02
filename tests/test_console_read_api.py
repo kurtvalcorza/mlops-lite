@@ -531,8 +531,12 @@ def test_attention_names_its_unreachable_sources(client, agent, monkeypatch):
     which sources produced them and which never answered."""
     agent.up = False
     body = client.get("/console/attention", headers=_auth()).json()
-    assert body["data"] == [] or isinstance(body["data"], list)
+    assert isinstance(body["data"]["items"], list)
     assert "agent" in body["degraded"], "an unreachable agent must be named, not silently omitted"
+    # And the panel says which of the nine kinds it actually checked. Two need per-version work too
+    # expensive to poll; leaving them as branches that never fire would make "nothing needs
+    # attention" cover checks that were never run.
+    assert set(body["data"]["kindsNotPolled"]) == {"missing-artifact", "evaluation-gate-failure"}
 
 
 @pytest.mark.parametrize("path", ["/console/attention", "/console/activity", "/console/search?q=x"])
