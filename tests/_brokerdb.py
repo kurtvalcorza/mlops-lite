@@ -12,6 +12,7 @@ harness call creates a uniquely-named database, applies the real migrations to i
 afterwards — so a run never depends on, or leaves behind, another run's state.
 """
 import os
+import time
 import uuid
 
 _DEFAULT_ADMIN_DSN = "postgresql://mlops:mlops@127.0.0.1:5432/postgres"
@@ -110,15 +111,27 @@ class ScratchDB:
                 c.close()
             except Exception:  # noqa: BLE001
                 pass
-        try:
-            with psycopg.connect(self.admin, autocommit=True) as c:
-                with c.cursor() as cur:
-                    cur.execute(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                        "WHERE datname = %s AND pid <> pg_backend_pid()", (self.name,))
-                    cur.execute(f'DROP DATABASE IF EXISTS "{self.name}"')
-        except Exception:  # noqa: BLE001 — a leaked scratch DB must never fail a passing suite
-            pass
+        # Drop the scratch database. A stray session on it makes DROP fail, so terminate first —
+        # and retry once, because a backend takes a moment to actually go away after the signal.
+        for attempt in range(2):
+            try:
+                with psycopg.connect(self.admin, autocommit=True) as c:
+                    with c.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = %s AND pid <> pg_backend_pid()", (self.name,))
+                        cur.execute(f'DROP DATABASE IF EXISTS "{self.name}"')
+                return False
+            except Exception as e:  # noqa: BLE001
+                if attempt:
+                    # Warn rather than raise: a leaked scratch database must never fail a passing
+                    # suite, but it must not be *silent* either — silence is how a per-test leak
+                    # grows until the server hits its connection or database limit.
+                    import warnings
+                    warnings.warn(f"scratch database {self.name} was not dropped: {e}",
+                                  stacklevel=2)
+                else:
+                    time.sleep(0.2)
         return False
 
 

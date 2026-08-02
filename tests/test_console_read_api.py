@@ -16,7 +16,10 @@ if REPO not in sys.path:
 
 import pytest  # noqa: E402
 
-from gateway.app import console  # noqa: E402
+from tests import _gwimport  # noqa: E402
+
+with _gwimport.isolated_metrics():
+    from gateway.app import console  # noqa: E402
 
 OWNER_KEY = "console-owner-key"
 
@@ -111,8 +114,7 @@ def client(monkeypatch):
     monkeypatch.setattr(auth, "_KEY_HASHES", [auth._hash(OWNER_KEY)])
     monkeypatch.setattr(auth, "_KEYED", True)
     monkeypatch.setattr(auth, "_MODE", "keyed")
-    from gateway.app.main import app
-    with TestClient(app) as c:
+    with TestClient(_gwimport.gateway_app()) as c:
         yield c
 
 

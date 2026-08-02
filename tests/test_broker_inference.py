@@ -21,7 +21,7 @@ if REPO not in sys.path:
 import pytest  # noqa: E402
 
 from platformlib import store  # noqa: E402
-from tests import _brokerdb  # noqa: E402
+from tests import _brokerdb, _gwimport  # noqa: E402
 
 OWNER_KEY = "owner-test-key"
 
@@ -80,8 +80,7 @@ def env(monkeypatch, tmp_path):
 def client(env):
     from fastapi.testclient import TestClient
 
-    from gateway.app.main import app
-    with TestClient(app) as c:
+    with TestClient(_gwimport.gateway_app()) as c:
         yield c
 
 

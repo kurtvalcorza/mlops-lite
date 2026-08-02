@@ -111,7 +111,19 @@ def invalidate_conn(bad_conn=None) -> None:
 
 
 def reset_conn() -> None:
-    """Test seam: drop the cached connection + bootstrap flag."""
+    """Test seam: CLOSE and drop the cached connection + bootstrap flag.
+
+    Closing matters as much as dropping. A reset that only cleared the reference left the socket
+    open until garbage collection, which kept a session on the database — enough to make a
+    subsequent `DROP DATABASE` fail with "database is being accessed by other users", and a test
+    harness that creates a scratch database per test then leaks one per reset.
+    """
     with _conn_lock:
+        stale = _conn_state["conn"]
         _conn_state["conn"] = None
         _conn_state["bootstrapped"] = False
+    if stale is not None:
+        try:
+            stale.close()  # outside the lock: closing is I/O, and the lock guards state only
+        except Exception:  # noqa: BLE001
+            pass
