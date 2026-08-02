@@ -156,15 +156,44 @@ class CoordinatorAdmission:
         return self._holder_dict(tenant, kind, est_gb)
 
     def release(self, tenant: str) -> None:
-        """Drop this engine's claim (idempotent, own-tenant only)."""
+        """Drop this engine's claim (idempotent, own-tenant only), and forget the resident **iff the
+        engine that owns it is actually gone**.
+
+        `release(engine_id)` carries two different meanings depending on who calls it, and the
+        difference matters enormously:
+
+          * **idle** — the engine has no in-flight work. The model stays resident so the next
+            request finds it warm, and the claim drop is precisely what makes it *evictable*. This
+            is co-residency working as designed; forgetting here would throw away a loaded model's
+            accounting while its process is still holding the VRAM.
+          * **gone** — `EngineRuntime._teardown` calls this after killing the child. The model is
+            off the GPU, and keeping it accounted permanently shrinks the usable budget for a
+            process that no longer exists. Every idle reap and operator unload did exactly that.
+
+        The caller cannot tell us which it meant — the legacy surface has one verb — so this asks
+        the registered runtime instead: a runtime whose `child` is `None` has no process. That is a
+        fact about the world rather than an inference about intent, which is the only basis on which
+        these two cases can be told apart.
+
+        With no runtime registered (the shim driven directly, as the co-residency suites do) the
+        resident is kept, because nothing has claimed the child is dead.
+        """
         with self._lock:
             claim = self._claims.pop(tenant, "absent")
         if claim == "absent":
             return
         if claim is None:
             self.coordinator.end_job(tenant)
-        else:
-            claim.release()
+            return
+        claim.release()
+
+        lifecycle = getattr(self.coordinator.lifecycle, "inner", self.coordinator.lifecycle)
+        runtime = getattr(lifecycle, "_runtimes", {}).get(tenant)
+        if runtime is not None and getattr(runtime, "child", None) is None:
+            # `forget()` rather than `evict()`: the child is already stopped, and evicting would
+            # drain and unload something gone. The coordinator's own eviction path removes the entry
+            # before reaching here, so that case is a harmless no-op.
+            self.coordinator.forget(tenant)
 
     def set_child(self, tenant: str, pid: int) -> None:
         """Install the **real** spawned PID and reconcile the accounted VRAM against it.

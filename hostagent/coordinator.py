@@ -1032,6 +1032,27 @@ class Coordinator:
             self._cond.notify_all()
         return "evicted"
 
+    def forget(self, model_key) -> bool:
+        """Drop a resident the **caller** has already unloaded. Returns whether an entry was removed.
+
+        The counterpart to `evict()` for a lifecycle the coordinator does not drive. `evict()` is
+        coordinator-initiated: it drains, unloads, then removes the entry. But when the engine
+        runtime unloads on its own — an idle reap, an operator unload, a failed spawn after
+        admission — nothing tells the coordinator, and `_release_claim()` only decrements the
+        ref-count. The entry survives with its VRAM still accounted, so every such unload
+        permanently shrinks the usable budget for a process that no longer exists.
+
+        Deliberately does **not** call the lifecycle: the caller has already stopped the child, and
+        unloading again would be a second teardown of something gone. It also bumps the generation,
+        like `evict()`, so a load in flight against the old entry recognizes itself as displaced.
+        """
+        with self._locked():
+            removed = self.residents.pop(model_key, None) is not None
+            if removed:
+                self._bump_generation(model_key)
+                self._cond.notify_all()
+        return removed
+
     def _evict_all(self, victims, deadline) -> None:
         """Evict each victim, bounded by `drain_timeout` per victim.
 

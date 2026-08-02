@@ -372,7 +372,12 @@ def test_a_coordinator_eviction_unloads_the_real_engine():
     child = runtime.child
     assert child is not None, "the engine is up"
 
-    shim.release("llm")           # drop the shim's long-lived claim so the model is evictable
+    # Drop the claim so the model is idle and therefore evictable. The engine is still LOADED — the
+    # resident must survive this, which is what makes co-residency a warm cache rather than a
+    # load-per-request.
+    shim.release("llm")
+    assert "llm" in coord.residents, "an idle model stays resident and evictable"
+
     coord.evict("llm")
 
     assert child.terminated, "eviction must stop the REAL child, not call a no-op"
@@ -394,3 +399,89 @@ def test_production_wiring_does_not_use_the_null_lifecycle(monkeypatch):
     assert not isinstance(inner, co.NullLifecycle), \
         "production must not run the coordinator on a lifecycle that loads and unloads nothing"
     assert isinstance(inner, coordadmission.RuntimeLifecycle)
+
+
+# -- the resident set is not leaked when the RUNTIME unloads ---------------------------------------
+#
+# `evict()` is coordinator-initiated and removes the entry itself. But the runtime also unloads on
+# its own — an idle reap, an operator unload, a spawn that fails after admission — and in those
+# cases nothing told the coordinator. `release()` decremented the claim and left the resident
+# accounted, so the usable budget shrank permanently for a process that no longer existed.
+
+def _wired(pid=1234, est_gb=4.0):
+    coord, gpu, _life = make(total=12 * GIB, sizes={})
+    coord.lifecycle = co.LifecycleGuard(coordadmission.RuntimeLifecycle(), coord)
+    shim = coordadmission.CoordinatorAdmission(coord)
+    adapter = _FakeAdapter("llm", pid=pid, est_gb=est_gb)
+    runtime = _runtime(adapter, shim)
+    coord.lifecycle.inner.register("llm", runtime)
+    return coord, gpu, shim, adapter, runtime
+
+
+def test_an_ordinary_unload_frees_the_accounted_vram():
+    """The compounding one: every idle reap and operator unload used to shrink the usable budget by
+    that model's accounted size, for the rest of the agent's life."""
+    coord, gpu, _shim, _adapter, runtime = _wired()
+    gpu.loaded[1234] = ("llm", 5 * GIB)
+
+    runtime.ensure_loaded()
+    assert coord.residents["llm"].vram_accounted_bytes == 5 * GIB
+
+    assert runtime.unload(drain_timeout_s=0)["status"] == "unloaded"
+    assert "llm" not in coord.residents, \
+        "the model is gone from the GPU; accounting for it starves every later admission"
+    assert sum(r["vram_accounted_bytes"] for r in coord.snapshot()["resident"]) == 0
+
+
+def test_a_spawn_that_fails_after_admission_leaves_nothing_accounted():
+    """Admission commits a resident before the runtime spawns. If the spawn then fails, the entry
+    would otherwise survive at its ESTIMATE with a child that was never real."""
+    coord, _gpu, _shim, adapter, runtime = _wired()
+
+    def boom():
+        raise RuntimeError("spawn failed")
+
+    adapter.spawn = boom
+    with pytest.raises(Exception):
+        runtime.ensure_loaded()
+
+    assert "llm" not in coord.residents, "nothing loaded, so nothing may be accounted"
+
+
+def test_repeated_load_and_unload_cycles_do_not_erode_the_budget():
+    """The failure an operator would actually notice: admissions start refusing after enough reaps,
+    with an empty GPU."""
+    coord, gpu, _shim, _adapter, runtime = _wired()
+    gpu.loaded[1234] = ("llm", 5 * GIB)
+
+    for _ in range(5):
+        runtime.ensure_loaded()
+        runtime.unload(drain_timeout_s=0)
+
+    assert coord.residents == {}
+    # And the budget still admits a model that fits.
+    assert not isinstance(coord.admit_serving("fresh", 5 * GIB), co.Refuse)
+
+
+def test_an_idle_release_keeps_the_model_resident():
+    """The distinction the fix turns on. A claim drop from a LOADED engine means idle — the model
+    stays resident so the next request finds it warm, and dropping the claim is exactly what makes
+    it evictable. Forgetting here would discard the accounting for VRAM the process still holds."""
+    coord, gpu, shim, _adapter, runtime = _wired()
+    gpu.loaded[1234] = ("llm", 5 * GIB)
+    runtime.ensure_loaded()
+
+    shim.release("llm")
+    assert "llm" in coord.residents, "an idle model is still on the GPU"
+    assert coord.residents["llm"].active_requests == 0, "and is now evictable"
+
+
+def test_forget_is_a_no_op_when_the_entry_is_already_gone():
+    """The eviction path removes the resident itself, then unloads through the runtime, whose
+    `_teardown` calls `release()`. That second removal must be harmless."""
+    coord, _gpu, _shim, _adapter, runtime = _wired()
+    runtime.ensure_loaded()
+    runtime.unload(drain_timeout_s=0)
+
+    assert coord.forget("llm") is False, "already removed by the unload"
+    assert coord.forget("never-existed") is False
