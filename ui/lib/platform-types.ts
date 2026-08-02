@@ -217,6 +217,129 @@ export type JournalPage = {
   has_more: boolean;
 };
 
+// -- jobs ---------------------------------------------------------------------------------------
+
+export type JobState =
+  | 'Draft'
+  | 'Queued'
+  | 'AdmissionCheck'
+  | 'Admitted'
+  | 'Starting'
+  | 'Running'
+  | 'Completing'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Cancelled'
+  | 'Rejected'
+  | 'Orphaned'
+  | 'Unknown';
+
+/**
+ * One unit of work across its three identifiers. The three native states are kept alongside the
+ * normalized one (FR-392): the normalization is for scanning a list, the natives are for debugging,
+ * and dropping them would send the operator back to the three systems this join exists to replace.
+ */
+export type PlatformJob = {
+  id: string;
+  type: 'training' | 'hpo' | 'batch' | 'shadow' | 'evaluation' | 'inference';
+  normalizedState: JobState;
+  gatewayState: string | null;
+  agentState: string | null;
+  trackingRunState: string | null;
+  runId: string | null;
+  studyId: string | null;
+  modelId: string | null;
+  assignedHost: string | null;
+  assignedDevice: number | null;
+  admissionReason: string | null;
+  createdAt: number | null;
+  startedAt: number | null;
+  completedAt: number | null;
+  observed: Record<string, string | null>;
+  conflict: JobConflict | null;
+  timeline?: { at: number; event: string }[];
+  resources?: { device_index: number | null; vram_gb: number | null; host: string | null };
+};
+
+/**
+ * `skewExceeded` suppresses the claim rather than reporting it. A stale reading disagreeing with a
+ * fresh one is not evidence of inconsistency, and a banner that cries wolf costs the real conflicts
+ * their audience.
+ */
+export type JobConflict = {
+  entity: 'job' | 'model' | 'endpoint' | 'engine';
+  entityId: string;
+  sources: { source: string; state: string | null; observedAt: string | null }[];
+  skewExceeded: boolean;
+  conflict: boolean;
+  suggestedAction: 'refresh' | 'inspect-journal' | 'reconcile';
+  lastConsistentAt?: string | null;
+};
+
+// -- overview -----------------------------------------------------------------------------------
+
+/**
+ * The eight Overview cards. Every one is `| null` — that is the type system carrying the
+ * null-is-not-zero rule, so a component cannot quietly write `?? 0` without the compiler having
+ * shown it the alternative.
+ *
+ * `admissionDecisions` occupies the slot FR-371 calls "pending admissions". There is no pending
+ * count: admission decides synchronously and has no queue, so that card would read `0` forever —
+ * and a permanent zero teaches an operator that requests never wait, which is the opposite of what
+ * a refusal means.
+ */
+export type SummaryCards = {
+  activeEndpoints: number | null;
+  runningJobs: number | null;
+  gpuUtilization: number | null;
+  admissionDecisions: { admitted: number; refused: number } | null;
+  failedJobs: number | null;
+  modelsRequiringReview: number | null;
+  unlabeledCaptures: number | null;
+  driftWarnings: number | null;
+};
+
+export type AttentionKind =
+  | 'engine-crash'
+  | 'gpu-memory-pressure'
+  | 'failed-training-run'
+  | 'evaluation-gate-failure'
+  | 'drift-significant'
+  | 'unlabeled-backlog'
+  | 'version-unsigned'
+  | 'missing-artifact'
+  | 'stale-agent-heartbeat';
+
+export type AttentionItem = {
+  id: string;
+  kind: AttentionKind;
+  severity: 'critical' | 'warning' | 'info';
+  subject: string;
+  detail: string;
+  href: string;
+  observedAt: string;
+};
+
+/** The 021 loop, kept as a visualization now that it is no longer navigation. */
+export type ActivityStage = 'data' | 'train' | 'evaluate' | 'deploy' | 'infer' | 'monitor';
+
+export type ActivityEvent = {
+  at: string;
+  stage: ActivityStage;
+  kind: string;
+  subject: string;
+  detail: string;
+  href: string;
+};
+
+export type SearchResult = {
+  kind: 'model' | 'run' | 'dataset' | 'job' | 'endpoint' | 'prediction';
+  id: string;
+  label: string;
+  href: string;
+  exact: boolean;
+};
+
 // -- navigation ---------------------------------------------------------------------------------
 
 /**

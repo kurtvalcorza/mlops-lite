@@ -107,10 +107,15 @@ console/admin/system
 ```
 console/health
 console/capabilities
+console/summary
 console/search
 console/activity
 console/attention
 ```
+
+`console/summary` was added during implementation: the eight Overview cards need the
+null-is-not-zero rule enforced in one place, and that place is the server (see
+[console-read-api.md](./console-read-api.md)).
 
 ---
 

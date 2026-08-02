@@ -8,9 +8,14 @@ scattered across the existing routers because they are a distinct *surface* — 
 model — and mixing them into the lifecycle routers would blur which routes are the platform's API
 and which exist to draw a screen.
 """
+import asyncio
+import time
+
 from fastapi import APIRouter, Query
 
 from .. import console, runtime
+from ..console import jobs as jobs_mod
+from ..console import overview, sources
 
 router = APIRouter()
 
@@ -91,6 +96,192 @@ def _registry_reachable() -> bool:
     from .. import registry
     registry.list_models()
     return True
+
+
+# -- attention, activity, search (T701/T702/T703) -------------------------------------------------
+
+@router.get("/console/attention")
+async def attention():
+    """Severity-ranked `AttentionItem[]` covering all nine kinds (FR-373).
+
+    Composed from whatever answered. A source that fails contributes **nothing** and is named in
+    `degraded`, so the panel can render "unknown" — an attention panel that says "nothing needs
+    attention" while half the platform is unreadable is the console's most dangerous falsehood, and
+    it is the exact failure this route is shaped to avoid.
+    """
+    projection = console.Projection()
+
+    agent_body = await runtime.health()
+    agent_data = agent_body["data"]
+    if agent_data is None:
+        projection.mark_degraded(runtime.AGENT)
+    else:
+        projection.mark_observed(runtime.AGENT)
+
+    admission_body = await runtime.admission(64)
+    admission_data = admission_body["data"]
+    if admission_data is None and agent_data is not None:
+        projection.mark_degraded(runtime.AGENT)
+
+    # Concurrently: four sequential timeouts would make a fully-degraded console take twenty
+    # seconds to report that it knows nothing.
+    jobs, unlabeled, drift, versions = await asyncio.gather(
+        projection.read("store", sources.jobs),
+        projection.read("store", sources.unlabeled_count),
+        projection.read("objectstore", sources.drift_reports),
+        projection.read("registry", sources.model_versions))
+
+    items = overview.attention_items(
+        now=console.utcnow(), agent=agent_data, admission=admission_data, jobs=jobs, drift=drift,
+        versions=versions, unlabeled=unlabeled,
+        # An unreachable agent has no heartbeat to age; the `degraded` entry already says so, and
+        # emitting a stale-heartbeat item on top would report one outage as two.
+        heartbeat_age_s=None)
+    return projection.envelope(items)
+
+
+@router.get("/console/summary")
+async def summary():
+    """The eight Overview cards (FR-371), each `null` when its source did not answer.
+
+    Computed here rather than in the client so the null-is-not-zero rule has one home. A card that
+    fell back to `0` in the browser would be indistinguishable from a genuine zero, and "0 running
+    jobs" during an agent outage is the exact falsehood SC-195 exists to catch.
+    """
+    projection = console.Projection()
+
+    agent_body = await runtime.health()
+    if agent_body["data"] is None:
+        projection.mark_degraded(runtime.AGENT)
+    else:
+        projection.mark_observed(runtime.AGENT)
+    device_body = await runtime.devices()
+    admission_body = await runtime.admission(64)
+
+    jobs, unlabeled, drift, versions = await asyncio.gather(
+        projection.read("store", sources.jobs),
+        projection.read("store", sources.unlabeled_count),
+        projection.read("objectstore", sources.drift_reports),
+        projection.read("registry", sources.model_versions))
+
+    return projection.envelope(overview.summary_cards(
+        agent=agent_body["data"], devices=(device_body["data"] or {}).get("devices"),
+        admission=admission_body["data"], jobs=jobs, versions=versions, unlabeled=unlabeled,
+        drift=drift))
+
+
+@router.get("/console/activity")
+async def activity(limit: int = Query(50, ge=1, le=200)):
+    """The normalized lifecycle timeline (FR-363).
+
+    021 navigated by loop stage; 027 navigates by area and keeps the loop **here**, as a
+    visualization. The stages still describe how work moves through the platform — they just no
+    longer decide where an operator clicks.
+    """
+    projection = console.Projection()
+    jobs, versions, drift = await asyncio.gather(
+        projection.read("store", sources.jobs),
+        projection.read("registry", sources.model_versions),
+        projection.read("objectstore", sources.drift_reports))
+    return projection.envelope(
+        overview.activity_events(jobs=jobs, versions=versions, drift=drift, limit=limit))
+
+
+@router.get("/console/search")
+async def search(q: str = Query(..., min_length=1, max_length=200),
+                 limit: int = Query(20, ge=1, le=100)):
+    """Composed resolver across models, runs, datasets, jobs, endpoints, predictions (FR-368).
+
+    The prediction table is queried **only** for a query that looks like an identifier. It is the
+    largest table on the platform, and letting a two-character name fragment scan it would make the
+    search box the most expensive control in the console.
+    """
+    projection = console.Projection()
+    models, jobs, datasets, preds = await asyncio.gather(
+        projection.read("registry", sources.model_versions),
+        projection.read("store", sources.jobs),
+        projection.read("objectstore", sources.datasets),
+        (projection.read("store", lambda: sources.predictions(prediction_id=q))
+         if overview.looks_like_id(q) else _nothing()))
+
+    return projection.envelope(overview.search_results(
+        q, models=models, jobs=jobs, datasets=datasets, predictions=preds, limit=limit))
+
+
+# -- jobs, runs, experiments (T726/T727) -----------------------------------------------------------
+
+@router.get("/console/jobs")
+async def console_jobs(limit: int = Query(100, ge=1, le=500)):
+    """The unified active-work list (FR-372): gateway lane ⋈ agent table ⋈ tracking runs.
+
+    One unit of work carries three identifiers on this platform. An operator investigating a stuck
+    fine-tune should not have to hold all three and query three systems, which is what this join
+    replaces.
+    """
+    projection = console.Projection()
+    gateway_jobs, agent_jobs, runs = await asyncio.gather(
+        projection.read("gateway", lambda: sources.broker_jobs(limit)),
+        projection.read("store", lambda: sources.jobs(limit)),
+        projection.read("tracking", lambda: sources.tracking_runs(limit)))
+
+    observed = {name: (stamp, time.time()) for name, stamp in projection.observed.items()}
+    rows = jobs_mod.join(gateway_jobs=gateway_jobs, agent_jobs=agent_jobs, tracking_runs=runs,
+                         observed=observed)
+    # A source that did not answer must not be summarized away: `null` rather than an empty list is
+    # what stops the console from rendering "no work in flight" during an outage.
+    return projection.envelope(rows[:limit] if projection.observed else None)
+
+
+@router.get("/console/jobs/{job_id}")
+async def console_job(job_id: str):
+    """One `PlatformJob` with its timeline, resources, and any `StateConflict` (FR-391/393/394)."""
+    projection = console.Projection()
+    gateway_jobs, agent_jobs, runs = await asyncio.gather(
+        projection.read("gateway", sources.broker_jobs),
+        projection.read("store", sources.jobs),
+        projection.read("tracking", sources.tracking_runs))
+
+    observed = {name: (stamp, time.time()) for name, stamp in projection.observed.items()}
+    match = [row for row in jobs_mod.join(gateway_jobs=gateway_jobs, agent_jobs=agent_jobs,
+                                          tracking_runs=runs, observed=observed)
+             if row["id"] == job_id]
+    if not match:
+        return projection.envelope(None)
+
+    row = match[0]
+    agent_record = next((j for j in agent_jobs or [] if j.get("job_id") == job_id), {})
+    row["timeline"] = [
+        {"at": agent_record.get(field), "event": event}
+        for field, event in (("submitted_at", "submitted"), ("started_at", "started"),
+                             ("ended_at", "ended"))
+        if agent_record.get(field) is not None]
+    row["resources"] = {"device_index": agent_record.get("device_index"),
+                        "vram_gb": agent_record.get("vram_gb"),
+                        "host": row.get("assignedHost")}
+    return projection.envelope(row)
+
+
+@router.get("/console/runs")
+async def console_runs(limit: int = Query(100, ge=1, le=500)):
+    """Run listing — net-new. Only `GET /runs/{id}` existed before 027."""
+    projection = console.Projection()
+    runs = await projection.read("tracking", lambda: sources.tracking_runs(limit))
+    return projection.envelope(runs)
+
+
+@router.get("/console/experiments")
+async def console_experiments():
+    projection = console.Projection()
+    return projection.envelope(await projection.read("tracking", sources.experiments))
+
+
+async def _nothing():
+    """An already-satisfied leg, so a skipped source still has a slot in the `gather` tuple.
+
+    A skipped source is `[]` and **not** degraded: the search deliberately did not ask, which is
+    different from asking and getting no answer.
+    """
+    return []
 
 
 def _broker_enabled() -> bool:

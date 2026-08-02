@@ -141,22 +141,22 @@ injected fakes, exactly as the plan intends.
 cards each showing data age, a unified active-work table joining three sources, a severity-ranked
 attention panel, and a normalized activity timeline.
 
-- [ ] **T701** [US1] Implement `GET /console/attention` in `gateway/app/console/` — severity-ranked
+- [X] **T701** [US1] Implement `GET /console/attention` in `gateway/app/console/` — severity-ranked
   items covering all nine `AttentionItem.kind` values (FR-373). Include
   `integrity: "verification-failed"` artifacts, which are a data-integrity incident and must surface
   here rather than sit quietly in a detail view (data-model §12).
-- [ ] **T702** [P] [US1] Implement `GET /console/activity` — the normalized lifecycle timeline that
+- [X] **T702** [P] [US1] Implement `GET /console/activity` — the normalized lifecycle timeline that
   preserves the loop as a *visualization* now that it is no longer navigation (FR-363).
-- [ ] **T703** [P] [US1] Implement `GET /console/search` — composed resolver across models, runs,
+- [X] **T703** [P] [US1] Implement `GET /console/search` — composed resolver across models, runs,
   datasets, jobs, endpoints, predictions by id or name (FR-368).
-- [ ] **T704** [US1] Build `ui/app/(console)/overview/` — the eight summary cards (FR-371), the
+- [X] **T704** [US1] Build `ui/app/(console)/overview/` — the eight summary cards (FR-371), the
   unified active-work table (FR-372), the attention panel, and the activity timeline. Every card
   renders its own data age; `activeJobCount` renders `unknown` (not `0`) when its source is
   unreachable.
-- [ ] **T705** [P] [US1] Build the header's health indicator + per-service panel (FR-369/370).
+- [X] **T705** [P] [US1] Build the header's health indicator + per-service panel (FR-369/370).
   `critical` is reserved for gateway/database loss; **agent loss is `degraded`**, because CPU
   modalities still serve and asserting otherwise overstates the outage (data-model §2).
-- [ ] **T706** [US1] Extend `tests/test_ui_smoke.py` — all ten areas render with their secondary
+- [X] **T706** [US1] Extend `tests/test_ui_smoke.py` — all ten areas render with their secondary
   navigation; Overview is the landing view; summary cards and the active-work join populate from
   fixtures (SC-184/185).
 
@@ -275,10 +275,10 @@ compatibility panel distinguishes structural from transient ineligibility for al
 **Independent Test**: a fine-tune shows a normalized state alongside all three native states, an
 execution timeline, a resource panel, and streaming logs.
 
-- [ ] **T725** [P] [US4] Write the job-normalization half of `tests/test_console_joins.py` — every
+- [X] **T725** [P] [US4] Write the job-normalization half of `tests/test_console_joins.py` — every
   row of the data-model §3 table maps to exactly one normalized state **and** retains each native
   state (FR-392/SC-190).
-- [ ] **T726** [US4] Implement `gateway/app/console/jobs.py` + `GET /console/jobs`,
+- [X] **T726** [US4] Implement `gateway/app/console/jobs.py` + `GET /console/jobs`,
   `GET /console/jobs/{id}` — the three-way join (FR-391), timeline (FR-393), and resource panel (FR-394).
 - [ ] **T727** [P] [US4] Implement `GET /console/runs`, `GET /console/experiments`,
   `GET /console/studies/{id}/trials` — run and experiment **listing is net-new**; only
@@ -302,11 +302,11 @@ stopped in turn produces its documented degradation; fixture mode is badged.
 
 **Note**: the fetch-layer half lands in Phase 2; this phase is the detection logic and its proofs.
 
-- [ ] **T730** [US10] Implement `StateConflict` detection in `gateway/app/console/jobs.py` per
+- [X] **T730** [US10] Implement `StateConflict` detection in `gateway/app/console/jobs.py` per
   data-model §4. **Only compare observations within the skew threshold** — beyond it emit
   `skewExceeded` and *suppress the conflict claim*, because a stale read disagreeing with a fresh one
   is not evidence of inconsistency and reporting it would train operators to ignore the banner.
-- [ ] **T731** [US10] Derive the `Orphaned` state (gateway says running, agent has no process) and
+- [X] **T731** [US10] Derive the `Orphaned` state (gateway says running, agent has no process) and
   ensure it **always** carries a `StateConflict`, never stands alone (data-model §3).
 - [ ] **T732** [P] [US10] Build the conflict banner component — both source states with observation
   times, last consistent timestamp, and refresh / inspect-journal actions (FR-427). `reconcile` is
@@ -317,7 +317,7 @@ stopped in turn produces its documented degradation; fixture mode is badged.
   matrix** (data-model §11, SC-193). The load-bearing case: with the agent down, runtime reads `unknown` and
   **jobs are NOT reported stopped** (FR-428). An empty `devices: []` here is a **failing** assertion,
   not a pass.
-- [ ] **T735** [US10] Add a conflict-detection test to `tests/test_console_joins.py` — an induced
+- [X] **T735** [US10] Add a conflict-detection test to `tests/test_console_joins.py` — an induced
   disagreement produces a disclosure in 100% of cases, never a silently chosen answer (SC-194).
 
 **Checkpoint**: every other surface can now be trusted not to confidently lie.
