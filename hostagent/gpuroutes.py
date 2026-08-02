@@ -70,7 +70,7 @@ def job_override(store, conn, job_id: str, action: str, position: int = None) ->
     running job is untouchable by design — FR-010/FR-023a, enforced here so the rule holds for every
     caller rather than only the one route that remembered it.
     """
-    job = store.get_job(conn, job_id)
+    job = store.get_broker_job(conn, job_id)
     if job is None:
         return 404, {"error": "unknown job"}
     if job["state"] == "running" and action != "cancel":
@@ -78,23 +78,23 @@ def job_override(store, conn, job_id: str, action: str, position: int = None) ->
 
     try:
         if action == "pin":
-            store.pin_job(conn, job_id)
+            store.pin_broker_job(conn, job_id)
         elif action == "reorder":
-            store.reorder_job(conn, job_id, int(position or 1))
+            store.reorder_broker_job(conn, job_id, int(position or 1))
         elif action == "cancel":
-            store.cancel_job(conn, job_id)
+            store.cancel_broker_job(conn, job_id)
         elif action in ("pause", "resume"):
             # Pause/resume is expressed as lane position rather than a second state: a paused job
             # parked at the tail cannot start, and it re-enters at its arrival position on resume.
             # A distinct `paused` state would need its own recovery, override, and metering rules
             # for no behaviour the lane cannot already express.
-            queued = store.list_queued(conn)
-            store.reorder_job(conn, job_id, len(queued) if action == "pause" else 1)
+            queued = store.list_queued_broker_jobs(conn)
+            store.reorder_broker_job(conn, job_id, len(queued) if action == "pause" else 1)
         else:
             return 400, {"error": f"unknown override {action!r}"}
     except store.StoreError as e:
         return 409, {"error": str(e)}
 
-    return 200, {"job": store.get_job(conn, job_id),
+    return 200, {"job": store.get_broker_job(conn, job_id),
                  "jobs_lane": [{"job_id": j["id"], "pos": j["queue_pos"]}
-                               for j in store.list_queued(conn)]}
+                               for j in store.list_queued_broker_jobs(conn)]}

@@ -53,12 +53,35 @@ ENGINE_STATES = ("disabled", "unavailable", "cold", "loading", "ready",
 
 @dataclass
 class EngineState(_Base):
-    """One engine's row in the agent's /engines listing (data-model.md §EngineAdapter)."""
+    """One engine's row in the agent's /engines listing (data-model.md §EngineAdapter).
+
+    027 T711 adds process enrichment as **optional fields only**, so every 018/019 conformance check
+    and every existing consumer keeps working against the original five: a listing that omits them
+    is still a valid `EngineState`, which is what makes this a backward-compatible extension rather
+    than a version bump.
+    """
     engine_id: str = ""
     state: str = "cold"
     gpu: bool = False
     optional: bool = False
     reason: Optional[str] = None       # set when state == "unavailable"/"wedged"
+
+    # -- 027 process enrichment (all optional) ------------------------------------------------------
+    pid: Optional[int] = None
+    device_index: Optional[int] = None
+    vram_gb: Optional[float] = None
+    #: The **agent-reported loaded identity** (022) — what is actually resident. Deliberately NOT the
+    #: registry's desired pointer: sourcing it there would manufacture the exact falsehood the
+    #: console's conflict detection exists to catch, and the two legitimately diverge during an
+    #: in-flight activation, which is precisely when an operator is looking.
+    model_identity: Optional[str] = None
+    registry_version: Optional[str] = None
+    started_at: Optional[float] = None
+    active_requests: Optional[int] = None
+    #: The coordinator's residency state for this engine's model. DISTINCT from `state`, which is the
+    #: engine PROCESS's health — is this child up, warming, wedged. Collapsing them would lose the
+    #: difference between "the child is fine but its model is being evicted" and "the child is sick".
+    residency_state: Optional[str] = None
 
     def validate(self):
         self._require("engine_id")

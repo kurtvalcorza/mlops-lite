@@ -47,7 +47,7 @@ def _row(row) -> dict:
 _LANE_LOCK_KEY = 0x6272_6F6B_6572_6A62  # "brokerjb"
 
 
-def enqueue_job(conn, tenant_id: str, kind: str, spec: dict, *, job_id: str = None,
+def enqueue_broker_job(conn, tenant_id: str, kind: str, spec: dict, *, job_id: str = None,
                 sandbox: str = "") -> dict:
     """Append a job to the tail of the lane."""
     job_id = job_id or str(uuid.uuid4())
@@ -61,31 +61,31 @@ def enqueue_job(conn, tenant_id: str, kind: str, spec: dict, *, job_id: str = No
                 "INSERT INTO broker_jobs (id, tenant_id, kind, spec, state, queue_pos, sandbox) "
                 "VALUES (%s, %s, %s, %s, 'queued', %s, %s)",
                 (job_id, tenant_id, kind, _json(spec or {}), position, sandbox))
-    return get_job(conn, job_id)
+    return get_broker_job(conn, job_id)
 
 
-def get_job(conn, job_id: str):
+def get_broker_job(conn, job_id: str):
     with conn.cursor() as cur:
         cur.execute(_JOB_SELECT + " WHERE id = %s", (job_id,))
         row = cur.fetchone()
     return _row(row) if row else None
 
 
-def list_queued(conn) -> list:
+def list_queued_broker_jobs(conn) -> list:
     """The lane, in strict FIFO order."""
     with conn.cursor() as cur:
         cur.execute(_JOB_SELECT + " WHERE state = 'queued' ORDER BY queue_pos")
         return [_row(r) for r in cur.fetchall()]
 
 
-def running_job(conn):
+def running_broker_job(conn):
     with conn.cursor() as cur:
         cur.execute(_JOB_SELECT + " WHERE state = 'running'")
         row = cur.fetchone()
     return _row(row) if row else None
 
 
-def list_jobs(conn, tenant_id: str = None, limit: int = 100) -> list:
+def list_broker_jobs(conn, tenant_id: str = None, limit: int = 100) -> list:
     where, params = "", []
     if tenant_id:
         where, params = " WHERE tenant_id = %s", [tenant_id]
@@ -95,7 +95,7 @@ def list_jobs(conn, tenant_id: str = None, limit: int = 100) -> list:
         return [_row(r) for r in cur.fetchall()]
 
 
-def start_job(conn, job_id: str) -> dict:
+def start_broker_job(conn, job_id: str) -> dict:
     """`queued -> running`. Clears `queue_pos` (a running job holds no lane position) and is guarded
     on the current state, so a job cancelled between selection and start does not start anyway."""
     with conn.cursor() as cur:
@@ -103,10 +103,10 @@ def start_job(conn, job_id: str) -> dict:
                     "started_at = now() WHERE id = %s AND state = 'queued'", (job_id,))
         if cur.rowcount == 0:
             raise StoreError(f"job {job_id!r} is not queued")
-    return get_job(conn, job_id)
+    return get_broker_job(conn, job_id)
 
 
-def finish_job(conn, job_id: str, state: str, *, gpu_seconds: float = None,
+def finish_broker_job(conn, job_id: str, state: str, *, gpu_seconds: float = None,
                artifact_ref: str = None, model_version: str = None) -> dict:
     """Move a job to a terminal state. `running` is never forced back to `queued` — no preemption."""
     if state not in TERMINAL:
@@ -119,17 +119,17 @@ def finish_job(conn, job_id: str, state: str, *, gpu_seconds: float = None,
             "model_version = coalesce(%s, model_version) "
             "WHERE id = %s AND state NOT IN ('succeeded','failed','cancelled','interrupted')",
             (state, gpu_seconds, artifact_ref, model_version, job_id))
-    return get_job(conn, job_id)
+    return get_broker_job(conn, job_id)
 
 
-def cancel_job(conn, job_id: str) -> dict:
+def cancel_broker_job(conn, job_id: str) -> dict:
     """Cancel a queued or running job, compacting the lane behind it.
 
     Idempotent: cancelling an already-terminal job returns it unchanged rather than raising, because
     a tenant retrying a cancel it is unsure landed must not be an error — and (T679) a cancel that
     settled its reservation each time would progressively exhaust the tenant's quota.
     """
-    job = get_job(conn, job_id)
+    job = get_broker_job(conn, job_id)
     if job is None:
         raise StoreError(f"no such job {job_id!r}")
     if job["state"] in TERMINAL:
@@ -139,7 +139,7 @@ def cancel_job(conn, job_id: str) -> dict:
             cur.execute("UPDATE broker_jobs SET state = 'cancelled', queue_pos = NULL, "
                         "ended_at = now() WHERE id = %s", (job_id,))
         _compact(conn)
-    return get_job(conn, job_id)
+    return get_broker_job(conn, job_id)
 
 
 def _compact(conn) -> None:
@@ -161,20 +161,20 @@ def _compact(conn) -> None:
 
 # -- owner override (T649) ------------------------------------------------------------------------
 
-def reorder_job(conn, job_id: str, position: int) -> list:
+def reorder_broker_job(conn, job_id: str, position: int) -> list:
     """Move a QUEUED job to a 1-based position. A running job is never touched.
 
     Raises `StoreError` for a running job rather than silently no-opping: an operator who typed the
     wrong id should be told, not left believing a reorder happened.
     """
-    job = get_job(conn, job_id)
+    job = get_broker_job(conn, job_id)
     if job is None:
         raise StoreError(f"no such job {job_id!r}")
     if job["state"] != "queued":
         raise StoreError(f"job {job_id!r} is {job['state']}, not queued — a running job is never "
                          f"preempted or reordered")
     with conn.transaction():
-        queued = [j["id"] for j in list_queued(conn)]
+        queued = [j["id"] for j in list_queued_broker_jobs(conn)]
         queued.remove(job_id)
         index = max(0, min(len(queued), int(position) - 1))
         queued.insert(index, job_id)
@@ -185,17 +185,17 @@ def reorder_job(conn, job_id: str, position: int) -> list:
                             (offset + 1000000, jid))
             cur.execute("UPDATE broker_jobs SET queue_pos = queue_pos - 1000000 "
                         "WHERE state = 'queued'")
-    return list_queued(conn)
+    return list_queued_broker_jobs(conn)
 
 
-def pin_job(conn, job_id: str) -> list:
+def pin_broker_job(conn, job_id: str) -> list:
     """Move a queued job to the head of the lane."""
-    return reorder_job(conn, job_id, 1)
+    return reorder_broker_job(conn, job_id, 1)
 
 
 # -- restart recovery (T680) --------------------------------------------------------------------------
 
-def recover_after_restart(conn) -> dict:
+def recover_broker_lane(conn) -> dict:
     """Resolve the lane after a host-agent restart.
 
     Returns `{"interrupted": [job_id], "queued": n}`. The caller settles each interrupted job's
@@ -212,4 +212,4 @@ def recover_after_restart(conn) -> dict:
                         "ended_at = now() WHERE state = 'running'")
     # `queued` jobs are deliberately NOT touched: they keep their `queue_pos` order, which is the
     # whole reason the lane is persisted.
-    return {"interrupted": interrupted, "queued": len(list_queued(conn))}
+    return {"interrupted": interrupted, "queued": len(list_queued_broker_jobs(conn))}

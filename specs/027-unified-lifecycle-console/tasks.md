@@ -44,7 +44,7 @@ script written for this feature reported 19 phantom uncovered requirements befor
   for SC-200. Also record the **idle memory baseline** (`docker stats --no-stream` with the stack up
   and the 021 console open) — SC-199 compares against this number and an unrecorded baseline makes
   the criterion unfalsifiable.
-- [ ] **T692** Confirm no schema migration is required (research R7 — endpoints are synthesized, not
+- [X] **T692** Confirm no schema migration is required (research R7 — endpoints are synthesized, not
   persisted). Verify `git diff master -- platformlib/migrations/` stays empty through the increment.
   If one genuinely emerges, create it as a NEW numbered `platformlib/migrations/*.sql` **before**
   dependent tasks, per FR-438.
@@ -57,7 +57,7 @@ script written for this feature reported 19 phantom uncovered requirements befor
 retrofitting data-age, degradation, and conflict handling into finished pages is far more expensive
 than building them into the fetch layer (plan.md Summary).
 
-- [ ] **T693** Add the response envelope (`data` / `observed` / `degraded` / `conflict`) as a shared
+- [X] **T693** Add the response envelope (`data` / `observed` / `degraded` / `conflict`) as a shared
   helper in `gateway/app/console/__init__.py`, per contracts/console-read-api.md. Every console read
   route returns it. **A partially-degraded projection returns 200 with the reachable parts populated
   and unreachable parts `null`** — it must not fail whole (FR-428), and `null` must never be
@@ -137,32 +137,32 @@ naming the blocking tenant and the shortfall; the journal pages and filters.
 **Note**: the largest net-new backend surface in 027 and the largest unknown — sequenced early so it
 fails early if it is going to.
 
-- [ ] **T707** [P] [US2] Write `tests/test_runtime_api.py` — offline, web-free, over a **fake NVML
+- [X] **T707** [P] [US2] Write `tests/test_runtime_api.py` — offline, web-free, over a **fake NVML
   reader and fake journal**: device snapshot shape incl. `source` provenance, the admission decision
   ring, journal paging and filters. Pin that a `static` source yields `null` fields and **never
   zeros** (FR-381), and that an unreadable GPU returns `200`, not an error.
-- [ ] **T708** [US2] Create `hostagent/devices.py` — per-device snapshot (index, name, uuid, compute
+- [X] **T708** [US2] Create `hostagent/devices.py` — per-device snapshot (index, name, uuid, compute
   capability, total/free/used VRAM, utilization, temperature, processes) built on the **existing
   1s-TTL cached `GpuReader`** (FR-375, research R2). **MUST NOT fork a subprocess per request** — that is the
   018 regression NVML was introduced to remove. Side-effect free: it may take the admission lock for
   a consistent read, never to claim, extend, or release.
-- [ ] **T709** [US2] Add a bounded in-memory decision ring (default 64) to `hostagent/admission.py`,
+- [X] **T709** [US2] Add a bounded in-memory decision ring (default 64) to `hostagent/admission.py`,
   written by `acquire()` as it returns, with the server-composed `explanation` templates from
   data-model §6 (FR-377). Record **both** constitution-v1.6.1 checks (accounted set vs usable budget,
   incoming load vs live free VRAM) and any **eviction** performed — never merge the two checks into
   one number. **This is a decision history, not a queue** (research R1) — no `pending` value, no
   queue-position field. The ring append must not perform IO or extend the critical section.
-- [ ] **T710** [US2] Add a paged/filtered read accessor to `hostagent/journal.py` (FR-380) (cursor by
+- [X] **T710** [US2] Add a paged/filtered read accessor to `hostagent/journal.py` (FR-380) (cursor by
   sequence, hard cap 500, filters by job/engine/event-type/time). Surface `checksum_state` honestly —
   a `torn` tail entry is **shown as torn**, never silently dropped, because a missing final
   transition is exactly what an operator investigating a crash needs (contracts/runtime-api.md).
-- [ ] **T711** [US2] Enrich `EngineState` in `platformlib/contracts.py` with **optional fields only**
+- [X] **T711** [US2] Enrich `EngineState` in `platformlib/contracts.py` with **optional fields only**
   (`pid`, `device_index`, `vram_gb`, `model_identity`, `registry_version`, `started_at`,
   `active_requests`) and populate them in `hostagent/lifecycle.py` (FR-376). **`model_identity` must be the
   agent-reported loaded identity (022), never the registry's desired pointer** — sourcing it from the
   pointer would manufacture the exact falsehood FR-427 exists to prevent. Verify the 018/019
   `/health` + `/engines` conformance tests still pass **unchanged**.
-- [ ] **T712** [US2] Add agent routes `GET /runtime/devices`, `GET /runtime/admission`,
+- [X] **T712** [US2] Add agent routes `GET /runtime/devices`, `GET /runtime/admission`,
   `GET /journal` in `hostagent/main.py` per contracts/runtime-api.md (FR-374/375/377/380). All behind `X-Agent-Key` —
   these are not public probes (023 US2). All read-only.
 - [ ] **T713** [US2] Create `gateway/app/runtime.py` — the agent proxy holding `X-Agent-Key`, the

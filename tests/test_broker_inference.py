@@ -31,6 +31,37 @@ def _guard():
     _brokerdb.requires_db()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_gateway_app():
+    """Leave the process as this module found it.
+
+    This suite is the first in the repo to import the real `gateway.app.main`, which registers the
+    `platform_metrics` collectors in the **global default** Prometheus registry as a side effect of
+    import. `tests/test_platform_health.py` loads that same file again under a different module name
+    (`app.platform_metrics`) with stubbed settings, and a second registration of `mlops_gpu_free_mib`
+    raises `DuplicateTimeseries` — so importing the app here made that suite fail depending on
+    collection order, which is exactly the ordering bug its own fixture exists to prevent.
+
+    Snapshot and restore both the `gateway.app*` module entries and the collectors our import added.
+    Fixing it here rather than loosening the other suite keeps the invariant where it belongs: a
+    suite that mutates global registries cleans them up.
+    """
+    import sys
+
+    from prometheus_client import REGISTRY
+
+    saved_modules = {k: v for k, v in sys.modules.items()
+                     if k == "gateway" or k.startswith("gateway.")}
+    collectors_before = set(REGISTRY._collector_to_names)
+    yield
+    for key in [k for k in list(sys.modules)
+                if (k == "gateway" or k.startswith("gateway.")) and k not in saved_modules]:
+        sys.modules.pop(key, None)
+    for collector in list(REGISTRY._collector_to_names):
+        if collector not in collectors_before:
+            REGISTRY.unregister(collector)
+
+
 @pytest.fixture()
 def env(monkeypatch, tmp_path):
     """A configured broker: scratch DB, owner key, plaintext allowed, a private settlement WAL."""

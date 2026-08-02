@@ -372,6 +372,14 @@ class Coordinator:
         self._claims = {}         # model_key -> set of claim ids
         self._claim_ids = itertools.count(1)
 
+        #: 027 T709: the bounded admission decision ring. A DECISION HISTORY, not a queue — the
+        #: coordinator decides immediately, so there is no pending state to report. The append is
+        #: IO-free and happens outside every critical section, so observability can never refuse a
+        #: request.
+        from hostagent import admissionlog as _admissionlog
+
+        self.admission_log = _admissionlog.AdmissionLog()
+
         #: Every disposition handed to a waiter, for invariant 5.
         self._waiter_dispositions = {}
         #: Every registered waiter that has not yet reached a disposition, so invariant 5 can name
@@ -547,6 +555,13 @@ class Coordinator:
             plan, payload = self._stage1(model_key, est_bytes, op_id)
 
             if isinstance(plan, Outcome):
+                # A refusal carries the context stage 1 captured UNDER the lock, so the record's
+                # numbers are the ones the decision used rather than a re-read taken afterwards.
+                context = payload or {}
+                self._log_decision("refused", model_key=model_key, est_bytes=est_bytes,
+                                   op_id=op_id, reason=context.get("reason"), attempt=attempt,
+                                   blocking_tenant=context.get("blocking_tenant"),
+                                   bounds=context.get("bounds"))
                 return plan
 
             if plan == "load":
@@ -564,6 +579,15 @@ class Coordinator:
                 continue
 
             if plan == "evict_then_retry":
+                # `evicted-retry` is its own recorded outcome, never merged with the admission that
+                # follows: the protocol is evict-then-RECOMPUTE, so the later attempt may still
+                # refuse. A record claiming one event both evicted and admitted would assert a
+                # causal link the coordinator deliberately does not guarantee.
+                self._log_decision(
+                    "evicted-retry", model_key=model_key, est_bytes=est_bytes, op_id=op_id,
+                    attempt=attempt,
+                    evicted=[{"model_key": v.model_key, "policy": "idle-first",
+                              "freed_gb": v.vram_accounted_bytes / self._GIB} for v in payload])
                 try:
                     self._evict_all(payload, deadline)
                 except EvictFailed:
@@ -577,6 +601,55 @@ class Coordinator:
         _observe("refuse", "attempts_exhausted")
         return Refuse(GPU_BUSY, "admission attempts exhausted", self._retry_after())
 
+    _GIB = 1024 ** 3
+
+    def _log_decision(self, decision, *, model_key=None, est_bytes=None, op_id=None, reason=None,
+                      attempt=None, evicted=None, blocking_tenant=None, detail=None,
+                      bounds=None) -> None:
+        """Append one decision record (027 T709). Called OUTSIDE every critical section.
+
+        `bounds` is captured by the caller while it still holds the lock, because re-reading it here
+        would report the state at logging time rather than at decision time — and a record whose
+        numbers do not match the decision they explain is worse than no record.
+        """
+        try:
+            bounds = bounds or {}
+            self.admission_log.record(
+                op_id=op_id, tenant=model_key, kind="serving", model_key=model_key,
+                requested_gb=None if est_bytes is None else est_bytes / self._GIB,
+                decision=decision, reason=reason, attempt=attempt,
+                residents=bounds.get("residents") or [], evicted=evicted or [],
+                usable_budget_gb=bounds.get("usable_budget_gb"),
+                accounted_resident_gb=bounds.get("accounted_resident_gb"),
+                reserved_gb=bounds.get("reserved_gb"),
+                unmaterialized_gb=bounds.get("unmaterialized_gb"),
+                live_free_gb=bounds.get("live_free_gb"),
+                headroom_gb=self.config.safety_headroom_bytes / self._GIB,
+                blocking_tenant=blocking_tenant, detail=detail)
+        except Exception:  # noqa: BLE001 — observability must never fail an admission
+            pass
+
+    def _bounds_snapshot(self) -> dict:
+        """Both checks' terms, captured under the lock. Caller MUST hold `_lock`.
+
+        The two reservation terms are reported separately because the checks do not take the same
+        one: the budget check counts every outstanding reservation, the live-VRAM check deducts only
+        the not-yet-materialized ones.
+        """
+        return {
+            "usable_budget_gb": self.usable_capacity() / self._GIB,
+            "accounted_resident_gb": sum(
+                r.vram_accounted_bytes for r in self.residents.values()) / self._GIB,
+            "reserved_gb": sum(r.est_bytes for r in self.reservations.values()) / self._GIB,
+            "unmaterialized_gb": self._unmaterialized() / self._GIB,
+            "live_free_gb": self.gpu.free_bytes() / self._GIB,
+            "residents": [{"model_key": k, "kind": "serving",
+                           "vram_gb": round(r.vram_accounted_bytes / self._GIB, 2),
+                           "state": r.state.replace("_", "-"),
+                           "active_requests": r.active_requests}
+                          for k, r in self.residents.items()],
+        }
+
     def _stage1(self, model_key, est_bytes, op_id):
         """Decide under the lock, performing NO lifecycle I/O. Returns `(plan, payload)`.
 
@@ -586,8 +659,11 @@ class Coordinator:
         with self._locked():
             if self.exclusive_job is not None or self.job_barrier:
                 _observe("refuse", "exclusive_job" if self.exclusive_job else "job_barrier")
+                blocking = (self.exclusive_job or {}).get("job_id") or "a starting job"
                 return Refuse(GPU_BUSY, "an exclusive job holds the GPU",
-                              self._retry_after()), None
+                              self._retry_after()), {"reason": "job-exclusive",
+                                                     "blocking_tenant": blocking,
+                                                     "bounds": self._bounds_snapshot()}
 
             entry = self.residents.get(model_key)
 
@@ -642,11 +718,16 @@ class Coordinator:
                     _observe("refuse", "model_too_large")
                     return Refuse(MODEL_TOO_LARGE,
                                   f"{model_key} needs {est_bytes:.0f} bytes; usable capacity minus "
-                                  f"headroom is {capacity - headroom:.0f}"), None
-                # Name the bound that actually failed, not just "busy".
+                                  f"headroom is {capacity - headroom:.0f}"), \
+                        {"reason": "cannot-fit-alone", "bounds": self._bounds_snapshot()}
+                # Name the bound that actually failed, not just "busy". The two have OPPOSITE
+                # remedies — eviction fixes a budget failure and does nothing for a live-VRAM one —
+                # so collapsing them sends an operator to the wrong one.
+                failed = "budget" if not fits_budget else "live-vram"
                 _observe("refuse", "budget_bound" if not fits_budget else "live_free_bound")
                 return Refuse(GPU_BUSY, "no evictable capacity right now",
-                              self._retry_after()), None
+                              self._retry_after()), {"reason": failed,
+                                                     "bounds": self._bounds_snapshot()}
 
             # Evict-then-recompute (T636): mark, then release the lock and complete the eviction.
             # The reservation is NOT recorded here — invariant 3 forbids a reservation backed by a
@@ -806,6 +887,7 @@ class Coordinator:
                     rollback = False
                     outcome = Grant(claim)
                     _observe("grant")
+                    commit_bounds = self._bounds_snapshot()
                 self._cond.notify_all()
 
         if rollback:
@@ -817,6 +899,8 @@ class Coordinator:
                 GPU_BUSY, "load rolled back, retry", self._retry_after())
 
         self._dispose(waiters, outcome, owner_op_id=op_id)  # wake the joiners just handed claims
+        self._log_decision("admitted", model_key=model_key, est_bytes=real_bytes, op_id=op_id,
+                           bounds=commit_bounds)
         return outcome
 
     def _load_failed(self, model_key, op_id, child, error):
@@ -849,6 +933,11 @@ class Coordinator:
 
         _observe("refuse", "load_failed")
         logger.warning("load of %s failed, reservation released: %s", model_key, error)
+        # A model can pass BOTH bounds, be granted a reservation, and then fail to load. That is
+        # neither a budget nor a live-VRAM refusal, and filing it under one would mislead an
+        # operator about the remedy.
+        self._log_decision("refused", model_key=model_key, op_id=op_id, reason="load-failed",
+                           detail=str(error))
         outcome = Refuse(LOAD_FAILED, f"{model_key} failed to load: {error}")
         self._dispose(waiters, outcome, owner_op_id=op_id)
         return outcome

@@ -121,7 +121,7 @@ def conn():
 @pytest.fixture()
 def lane(conn):
     tenant = store.create_tenant(conn, "override-tenant")
-    ids = [store.enqueue_job(conn, tenant["id"], "batch", {"n": i})["id"] for i in range(4)]
+    ids = [store.enqueue_broker_job(conn, tenant["id"], "batch", {"n": i})["id"] for i in range(4)]
     return tenant, ids
 
 
@@ -145,27 +145,27 @@ def test_pause_parks_a_job_at_the_tail_and_resume_returns_it_to_the_head(conn, l
     already express."""
     _, ids = lane
     gpuroutes.job_override(store, conn, ids[0], "pause")
-    assert [j["id"] for j in store.list_queued(conn)][-1] == ids[0]
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)][-1] == ids[0]
     gpuroutes.job_override(store, conn, ids[0], "resume")
-    assert [j["id"] for j in store.list_queued(conn)][0] == ids[0]
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)][0] == ids[0]
 
 
 def test_a_running_job_is_never_reordered_and_says_so(conn, lane):
     _, ids = lane
-    store.start_job(conn, ids[0])
+    store.start_broker_job(conn, ids[0])
     for action in ("pin", "reorder", "pause", "resume"):
         status, payload = gpuroutes.job_override(store, conn, ids[0], action, position=1)
         assert status == 409, f"{action} touched a running job"
         assert "never preempted" in payload["error"]
-    assert store.get_job(conn, ids[0])["state"] == "running"
+    assert store.get_broker_job(conn, ids[0])["state"] == "running"
 
 
 def test_a_running_job_can_still_be_cancelled(conn, lane):
     """Cancel is not preemption-by-another-tenant: it is the job's owner ending their own work."""
     _, ids = lane
-    store.start_job(conn, ids[0])
+    store.start_broker_job(conn, ids[0])
     status, _ = gpuroutes.job_override(store, conn, ids[0], "cancel")
-    assert status == 200 and store.get_job(conn, ids[0])["state"] == "cancelled"
+    assert status == 200 and store.get_broker_job(conn, ids[0])["state"] == "cancelled"
 
 
 def test_an_unknown_job_is_404_and_an_unknown_action_is_400(conn, lane):
@@ -177,5 +177,5 @@ def test_an_unknown_job_is_404_and_an_unknown_action_is_400(conn, lane):
 def test_overriding_compacts_the_lane_to_contiguous_positions(conn, lane):
     _, ids = lane
     gpuroutes.job_override(store, conn, ids[2], "pin")
-    positions = [j["queue_pos"] for j in store.list_queued(conn)]
+    positions = [j["queue_pos"] for j in store.list_queued_broker_jobs(conn)]
     assert positions == [1, 2, 3, 4], "the lane stays contiguous, so `pos` means what it says"

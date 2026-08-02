@@ -35,6 +35,7 @@ from platformlib.storeimpl._base import (  # noqa: F401 — re-exported (store.S
 
 # -- connection + schema/migration plumbing + shape constants (storeimpl/_engine) -------------------
 from platformlib.storeimpl._engine import (  # noqa: F401 — re-exported
+    BROKER_TABLES,
     SCHEMA_VERSION,
     TABLES,
     bootstrap,
@@ -149,18 +150,21 @@ from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
 )
 
 # -- broker jobs repository: the persisted FIFO lane (storeimpl/brokerjobs, 026 T647/T680/T685) ------
+#
+# Every name is `*_broker_job(s)` / lane-specific. The broker lane and the agent's journal are two
+# different lanes with two different state machines, and the facade already exports `get_job` and
+# `list_jobs` for the journal — binding the broker's over them would silently repoint ~24 existing
+# call sites at a table that does not hold their rows. Distinct names, not shadowing.
 from platformlib.storeimpl.brokerjobs import (  # noqa: F401 — re-exported
-    cancel_job,
-    enqueue_job,
-    finish_job,
-    get_job,
-    list_queued,
-    pin_job,
-    recover_after_restart,
-    reorder_job,
-    running_job,
-    start_job,
-)
-from platformlib.storeimpl.brokerjobs import (  # noqa: F401 — `list_jobs` already names the AGENT's
-    list_jobs as list_broker_jobs,              # journal surface; the broker lane is a second lane
+    cancel_broker_job,
+    enqueue_broker_job,
+    finish_broker_job,
+    get_broker_job,
+    list_broker_jobs,
+    list_queued_broker_jobs,
+    pin_broker_job,
+    recover_broker_lane,
+    reorder_broker_job,
+    running_broker_job,
+    start_broker_job,
 )

@@ -83,7 +83,7 @@ class Scheduler:
         conn = self._conn()
         if conn is None or self._store is None:
             return list(self._queued_ids)
-        return [j["id"] for j in self._store.list_queued(conn)]
+        return [j["id"] for j in self._store.list_queued_broker_jobs(conn)]
 
     def note_job_queued(self, job_id: str = None) -> None:
         """A job entered the lane. Starts the head-job wait clock if this is now the head."""
@@ -169,7 +169,7 @@ class Scheduler:
         if conn is not None and self._store is not None:
             try:
                 jobs_lane = [{"job_id": j["id"], "tenant_id": j["tenant_id"], "pos": j["queue_pos"],
-                              "kind": j["kind"]} for j in self._store.list_queued(conn)]
+                              "kind": j["kind"]} for j in self._store.list_queued_broker_jobs(conn)]
             except Exception:  # noqa: BLE001 — a store blip degrades the view, never the scheduler
                 jobs_lane = []
         snap["jobs_lane"] = jobs_lane

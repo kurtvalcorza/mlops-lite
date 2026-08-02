@@ -140,14 +140,14 @@ def _recover_broker_lane(store, conn_factory) -> None:
     if conn is None:
         return
     try:
-        recovery = store.recover_after_restart(conn)
+        recovery = store.recover_broker_lane(conn)
         for entry in recovery["interrupted"]:
             elapsed = max(0.0, time.time() - (entry["started_at"] or time.time()))
             try:
                 store.settle(conn, entry["id"], elapsed)
             except StoreError:
                 pass  # no reservation for this job — nothing to settle, and nothing is held
-            store.finish_job(conn, entry["id"], "interrupted", gpu_seconds=elapsed)
+            store.finish_broker_job(conn, entry["id"], "interrupted", gpu_seconds=elapsed)
         if recovery["interrupted"] or recovery["queued"]:
             print(f"[broker] recovered lane: {len(recovery['interrupted'])} interrupted, "
                   f"{recovery['queued']} still queued", flush=True)
@@ -459,6 +459,20 @@ def _get_jobs(path, ctx):
     return 200, {"jobs": journal.jobs(kind=kind)}, "application/json"
 
 
+#: The device snapshotter, built once. Module-level because the whole point is the 1s-TTL cache: a
+#: per-request instance would have an empty cache every time and re-read NVML on every console poll,
+#: which is the 018 fork-per-poll regression in a new place.
+_DEVICES = None
+
+
+def _devices():
+    global _DEVICES
+    if _DEVICES is None:
+        from hostagent import devices as devices_mod
+        _DEVICES = devices_mod.DeviceSnapshotter()
+    return _DEVICES
+
+
 def _get_gpu_queue(path, ctx):
     """026 T689: the broker's residency + lane view. Degrades to the coordinator's own state when
     the store is unreachable — an operator asking "what is on the GPU" during a store outage needs
@@ -471,10 +485,48 @@ def _get_gpu_queue(path, ctx):
     return 200, gpuroutes.queue_payload(ctx.scheduler), "application/json"
 
 
+def _get_runtime_devices(path, ctx):
+    """027 T712/FR-375: per-device topology from the cached reader. Never forks per request.
+
+    An unreadable GPU returns 200 with `source: "static"` and nulls — a known operating state, not a
+    request failure, and null must never be read as zero.
+    """
+    return 200, _devices().snapshot(), "application/json"
+
+
+def _get_runtime_admission(path, ctx):
+    """027 T712/FR-377: current bounds plus the bounded decision ring. A HISTORY, not a queue."""
+    from hostagent import admissionlog
+
+    coordinator = getattr(ctx, "coordinator", None)
+    if coordinator is None:
+        return 503, {"error": "the broker coordinator is not enabled on this agent"}, \
+            "application/json"
+    limit = (parse_qs(ctx.query).get("limit") or [None])[0]
+    return 200, admissionlog.snapshot_from_coordinator(
+        coordinator, coordinator.admission_log,
+        int(limit) if limit and limit.isdigit() else None), "application/json"
+
+
+def _get_journal(path, ctx):
+    """027 T712/FR-380: paged, filtered journal. Paging is mandatory — there is no `all` mode."""
+    from hostagent import journalread
+
+    q = parse_qs(ctx.query)
+    first = lambda k: (q.get(k) or [None])[0]  # noqa: E731 — a local reader, not a public helper
+    return 200, journalread.read(
+        ctx.journal, cursor=first("cursor"), limit=first("limit") or journalread.DEFAULT_LIMIT,
+        job_id=first("job_id"), engine_id=first("engine_id"), event_type=first("event_type"),
+        since=first("since"), until=first("until")), "application/json"
+
+
 #: Ordered GET route table (T585): first matcher wins — the exact order of the prior if-ladder.
 _GET_ROUTES = (
     (lambda p: p == "/healthz", _get_healthz),
     (lambda p: p == "/gpu/queue", _get_gpu_queue),  # 026 T689
+    (lambda p: p == "/runtime/devices", _get_runtime_devices),      # 027 T712
+    (lambda p: p == "/runtime/admission", _get_runtime_admission),  # 027 T712
+    (lambda p: p == "/journal", _get_journal),                      # 027 T712
     (lambda p: p == "/readyz", _get_readyz),
     (lambda p: p == "/health", _get_health),
     (lambda p: p == "/metrics", _get_metrics),
@@ -493,7 +545,8 @@ def handle_get(path: str, query: str, *, admission, journal, manager, jobs, poli
     string, so `/jobs?kind=train` failed the exact match and a stray `/jobsxyz` fell into the jobs
     listing instead of 404. Signature unchanged — callers/tests are byte-compatible (FR-340)."""
     ctx = SimpleNamespace(query=query, admission=admission, journal=journal, manager=manager,
-                          jobs=jobs, policy=policy, scheduler=scheduler)
+                          jobs=jobs, policy=policy, scheduler=scheduler,
+                          coordinator=getattr(scheduler, "coordinator", None))
     for matcher, handler in _GET_ROUTES:
         if matcher(path):
             return handler(path, ctx)

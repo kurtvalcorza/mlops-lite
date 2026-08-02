@@ -172,20 +172,20 @@ def tenant(conn):
 
 
 def test_ordering_within_the_jobs_lane_is_arrival_ordered(conn, tenant):
-    ids = [store.enqueue_job(conn, tenant["id"], "batch", {"n": i})["id"] for i in range(5)]
-    assert [j["id"] for j in store.list_queued(conn)] == ids
-    assert [j["queue_pos"] for j in store.list_queued(conn)] == [1, 2, 3, 4, 5]
+    ids = [store.enqueue_broker_job(conn, tenant["id"], "batch", {"n": i})["id"] for i in range(5)]
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)] == ids
+    assert [j["queue_pos"] for j in store.list_queued_broker_jobs(conn)] == [1, 2, 3, 4, 5]
 
 
 def test_a_restart_mid_queue_preserves_head_of_line_order(conn, tenant):
     """T647: FIFO that does not survive a restart is not FIFO — a tenant second in line would
     silently lose its position on every agent restart."""
-    ids = [store.enqueue_job(conn, tenant["id"], "batch", {})["id"] for _ in range(4)]
-    store.start_job(conn, ids[0])
+    ids = [store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"] for _ in range(4)]
+    store.start_broker_job(conn, ids[0])
 
-    recovery = store.recover_after_restart(conn)  # the "restart"
+    recovery = store.recover_broker_lane(conn)  # the "restart"
 
-    assert [j["id"] for j in store.list_queued(conn)] == ids[1:], \
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)] == ids[1:], \
         "queued jobs keep their original order — they never occupied the GPU"
     assert [i["id"] for i in recovery["interrupted"]] == [ids[0]]
 
@@ -193,10 +193,10 @@ def test_a_restart_mid_queue_preserves_head_of_line_order(conn, tenant):
 def test_the_running_job_resolves_to_interrupted_not_failed(conn, tenant):
     """T685: in a metered broker the difference is the tenant's basis for disputing a charge, so it
     cannot be inferred from logs after the fact."""
-    job_id = store.enqueue_job(conn, tenant["id"], "finetune", {})["id"]
-    store.start_job(conn, job_id)
-    store.recover_after_restart(conn)
-    recovered = store.get_job(conn, job_id)
+    job_id = store.enqueue_broker_job(conn, tenant["id"], "finetune", {})["id"]
+    store.start_broker_job(conn, job_id)
+    store.recover_broker_lane(conn)
+    recovered = store.get_broker_job(conn, job_id)
     assert recovered["state"] == "interrupted"
     assert recovered["state"] != "failed", \
         "a broker-caused restart must be distinguishable from a tenant-code failure"
@@ -205,68 +205,68 @@ def test_the_running_job_resolves_to_interrupted_not_failed(conn, tenant):
 def test_a_queued_job_is_never_swept_to_interrupted(conn, tenant):
     """The agent's own startup path rewrites every queued job to `interrupted`; broker jobs are
     recovered explicitly precisely so that sweep does not silently empty the lane on every boot."""
-    job_id = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    store.recover_after_restart(conn)
-    assert store.get_job(conn, job_id)["state"] == "queued"
+    job_id = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    store.recover_broker_lane(conn)
+    assert store.get_broker_job(conn, job_id)["state"] == "queued"
 
 
 def test_a_running_job_is_never_forced_back_to_queued(conn, tenant):
-    job_id = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    store.start_job(conn, job_id)
-    assert store.get_job(conn, job_id)["queue_pos"] is None, "a running job holds no lane position"
+    job_id = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    store.start_broker_job(conn, job_id)
+    assert store.get_broker_job(conn, job_id)["queue_pos"] is None, "a running job holds no lane position"
     with pytest.raises(store.StoreError):
-        store.start_job(conn, job_id)  # not queued any more
+        store.start_broker_job(conn, job_id)  # not queued any more
 
 
 def test_at_most_one_job_runs_at_a_time(conn, tenant):
-    a = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    b = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    store.start_job(conn, a)
+    a = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    b = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    store.start_broker_job(conn, a)
     with pytest.raises(Exception):
-        store.start_job(conn, b)
+        store.start_broker_job(conn, b)
 
 
 def test_finishing_the_head_lets_the_next_job_start(conn, tenant):
-    a = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    b = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    store.start_job(conn, a)
-    store.finish_job(conn, a, "succeeded", gpu_seconds=12.5)
-    started = store.start_job(conn, b)
+    a = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    b = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    store.start_broker_job(conn, a)
+    store.finish_broker_job(conn, a, "succeeded", gpu_seconds=12.5)
+    started = store.start_broker_job(conn, b)
     assert started["state"] == "running"
-    assert store.get_job(conn, a)["gpu_seconds"] == 12.5
+    assert store.get_broker_job(conn, a)["gpu_seconds"] == 12.5
 
 
 # -- owner override (T649) -------------------------------------------------------------------------------
 
 def test_reordering_a_queue_with_a_running_head_leaves_the_running_job_untouched(conn, tenant):
-    running = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    store.start_job(conn, running)
-    queued = [store.enqueue_job(conn, tenant["id"], "batch", {})["id"] for _ in range(3)]
+    running = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    store.start_broker_job(conn, running)
+    queued = [store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"] for _ in range(3)]
 
-    store.reorder_job(conn, queued[2], 1)
-    assert [j["id"] for j in store.list_queued(conn)] == [queued[2], queued[0], queued[1]]
-    assert store.get_job(conn, running)["state"] == "running", "never preempted by an override"
+    store.reorder_broker_job(conn, queued[2], 1)
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)] == [queued[2], queued[0], queued[1]]
+    assert store.get_broker_job(conn, running)["state"] == "running", "never preempted by an override"
 
 
 def test_a_running_job_cannot_be_reordered(conn, tenant):
     """An operator who typed the wrong id is told, not left believing a reorder happened."""
-    job_id = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    store.start_job(conn, job_id)
+    job_id = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    store.start_broker_job(conn, job_id)
     with pytest.raises(store.StoreError, match="never"):
-        store.reorder_job(conn, job_id, 1)
+        store.reorder_broker_job(conn, job_id, 1)
 
 
 def test_pinning_moves_a_job_to_the_head(conn, tenant):
-    ids = [store.enqueue_job(conn, tenant["id"], "batch", {})["id"] for _ in range(4)]
-    store.pin_job(conn, ids[3])
-    assert [j["id"] for j in store.list_queued(conn)][0] == ids[3]
-    assert [j["queue_pos"] for j in store.list_queued(conn)] == [1, 2, 3, 4]
+    ids = [store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"] for _ in range(4)]
+    store.pin_broker_job(conn, ids[3])
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)][0] == ids[3]
+    assert [j["queue_pos"] for j in store.list_queued_broker_jobs(conn)] == [1, 2, 3, 4]
 
 
 def test_cancelling_compacts_the_lane(conn, tenant):
-    ids = [store.enqueue_job(conn, tenant["id"], "batch", {})["id"] for _ in range(4)]
-    store.cancel_job(conn, ids[1])
-    remaining = store.list_queued(conn)
+    ids = [store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"] for _ in range(4)]
+    store.cancel_broker_job(conn, ids[1])
+    remaining = store.list_queued_broker_jobs(conn)
     assert [j["id"] for j in remaining] == [ids[0], ids[2], ids[3]]
     assert [j["queue_pos"] for j in remaining] == [1, 2, 3]
 
@@ -274,9 +274,9 @@ def test_cancelling_compacts_the_lane(conn, tenant):
 def test_cancelling_is_idempotent(conn, tenant):
     """T679's shape: cancelling in a loop must not progressively consume the tenant's quota, which
     starts with the state transition itself being a no-op the second time."""
-    job_id = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    first = store.cancel_job(conn, job_id)
-    second = store.cancel_job(conn, job_id)
+    job_id = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    first = store.cancel_broker_job(conn, job_id)
+    second = store.cancel_broker_job(conn, job_id)
     assert first["state"] == second["state"] == "cancelled"
     assert first["ended_at"] == second["ended_at"], "the second cancel changed nothing"
 
@@ -286,16 +286,16 @@ def test_an_interrupted_jobs_reservation_is_settled_to_elapsed_and_the_remainder
     """T680: left `reserved`, an interrupted job's reservation holds quota against its tenant
     forever."""
     store.set_quota(conn, tenant["id"], "daily", 1000)
-    job_id = store.enqueue_job(conn, tenant["id"], "finetune", {})["id"]
+    job_id = store.enqueue_broker_job(conn, tenant["id"], "finetune", {})["id"]
     store.reserve(conn, job_id, tenant["id"], 600.0, kind="job")
-    store.start_job(conn, job_id)
+    store.start_broker_job(conn, job_id)
     assert store.consumption(conn, tenant["id"])["remaining_gpu_seconds"] == 400.0
 
-    recovery = store.recover_after_restart(conn)
+    recovery = store.recover_broker_lane(conn)
     for entry in recovery["interrupted"]:
         elapsed = 42.0  # what the caller computes from started_at
         store.settle(conn, entry["id"], elapsed)
-        store.finish_job(conn, entry["id"], "interrupted", gpu_seconds=elapsed)
+        store.finish_broker_job(conn, entry["id"], "interrupted", gpu_seconds=elapsed)
 
     state = store.consumption(conn, tenant["id"])
     assert state["settled_gpu_seconds"] == 42.0
@@ -324,25 +324,25 @@ def test_a_policy_retrain_enters_the_jobs_lane_under_the_system_tenant(conn):
     system = store.ensure_system_tenant(conn)
     tenant = store.create_tenant(conn, "ordinary")
 
-    first = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
-    retrain = store.enqueue_job(conn, system["id"], "finetune", {"policy": "drift"})["id"]
-    third = store.enqueue_job(conn, tenant["id"], "batch", {})["id"]
+    first = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
+    retrain = store.enqueue_broker_job(conn, system["id"], "finetune", {"policy": "drift"})["id"]
+    third = store.enqueue_broker_job(conn, tenant["id"], "batch", {})["id"]
 
-    assert [j["id"] for j in store.list_queued(conn)] == [first, retrain, third], \
+    assert [j["id"] for j in store.list_queued_broker_jobs(conn)] == [first, retrain, third], \
         "FIFO by arrival, with no privileged bypass for the system tenant"
 
-    store.start_job(conn, first)
+    store.start_broker_job(conn, first)
     with pytest.raises(Exception):
-        store.start_job(conn, retrain), "a retrain can never co-run with a tenant job"
+        store.start_broker_job(conn, retrain), "a retrain can never co-run with a tenant job"
 
 
 def test_a_policy_retrains_gpu_seconds_are_metered_to_the_system_tenant(conn):
     system = store.ensure_system_tenant(conn)
-    job_id = store.enqueue_job(conn, system["id"], "finetune", {})["id"]
+    job_id = store.enqueue_broker_job(conn, system["id"], "finetune", {})["id"]
     store.reserve(conn, job_id, system["id"], 300.0, kind="job")
-    store.start_job(conn, job_id)
+    store.start_broker_job(conn, job_id)
     store.settle(conn, job_id, 118.0)
-    store.finish_job(conn, job_id, "succeeded", gpu_seconds=118.0)
+    store.finish_broker_job(conn, job_id, "succeeded", gpu_seconds=118.0)
 
     ledger = [r for r in store.list_ledger(conn, tenant_id=system["id"])]
     assert len(ledger) == 1 and ledger[0]["gpu_seconds"] == 118.0, \
@@ -365,7 +365,7 @@ def test_the_system_tenant_holds_no_privileged_admission_path(conn):
 def test_the_snapshot_carries_both_lanes(conn, tenant):
     coord, _, _ = _coordinator()
     s = sched.Scheduler(coord, store=store, conn_factory=lambda: conn)
-    store.enqueue_job(conn, tenant["id"], "batch", {})
+    store.enqueue_broker_job(conn, tenant["id"], "batch", {})
     snap = s.snapshot()
     assert "jobs_lane" in snap and len(snap["jobs_lane"]) == 1
     assert snap["jobs_lane"][0]["pos"] == 1
