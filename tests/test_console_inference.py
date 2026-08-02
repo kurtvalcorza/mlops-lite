@@ -344,3 +344,27 @@ def test_every_produced_status_is_in_the_declared_vocabulary():
     for case in cases:
         status = endpoints_mod.endpoint(modality="text-generation", **case)["status"]
         assert status in endpoints_mod.STATUSES, status
+
+
+def test_the_queue_names_which_signals_this_deployment_can_actually_produce():
+    """The 001 baseline records no per-prediction confidence, sampling flag, drift attribution, or
+    manual flag, so five of FR-411's seven signals are unreachable here.
+
+    Shipping seven branches that quietly never fire would present a ranking function as a working
+    prioritizer while it only ever sorts by one thing — the same class of claim as a 'queue' view
+    over an admission path that never queues. The vocabulary stays whole because it is the
+    contract; `DERIVABLE_SIGNALS` is what the surface reports, and what changes when a column
+    arrives.
+    """
+    assert set(predictions_mod.DERIVABLE_SIGNALS) <= set(predictions_mod.PRIORITY_SIGNALS)
+    assert set(predictions_mod.DERIVABLE_SIGNALS) == {"policy-flagged", "missing-label"}
+
+
+def test_only_the_derivable_signals_fire_from_a_real_capture_row():
+    """The columns `capture_rows_for` actually selects: prediction_id, input_ref, captured_at,
+    modality, model_name, label. Nothing else exists to key on."""
+    row = {"prediction_id": "p-1", "input_ref": "s3://inputs/p-1", "captured_at": 100,
+           "modality": "vision", "model_name": "resnet", "label": None}
+    signals = predictions_mod.review_queue([row])[0]["signals"]
+    assert set(signals) <= set(predictions_mod.DERIVABLE_SIGNALS)
+    assert signals == ["missing-label"]

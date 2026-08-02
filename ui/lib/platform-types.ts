@@ -501,6 +501,18 @@ export type ReviewItem = {
   capturedAt: string | number | null;
 };
 
+/**
+ * The queue, plus what it is actually ranked by. Five of FR-411's seven signals need per-prediction
+ * columns the 001 baseline does not have, so the surface names which ones this deployment can
+ * produce — a queue presenting itself as prioritized by all seven while only ever using one would
+ * be the same class of claim as a "queue" view over an admission path that never queues.
+ */
+export type ReviewQueueView = {
+  items: ReviewItem[];
+  rankedBy: string[];
+  unavailableSignals: string[];
+};
+
 /** A generic span tree. No token-oriented fields: three of five modalities have no tokens. */
 export type TraceSpan = {
   spanId: string;

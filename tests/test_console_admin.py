@@ -308,3 +308,30 @@ def test_the_chart_primitives_import_nothing_but_react():
     source = open(os.path.join(REPO, "ui", "lib", "charts", "index.tsx"), encoding="utf-8").read()
     imports = re.findall(r"^import .*? from '([^']+)';", source, re.MULTILINE)
     assert imports == ["react"], imports
+
+
+# -- the projections read the field names the sources actually emit -------------------------------
+#
+# A class of bug this surface makes unusually quiet: everywhere else in the console, `null` renders
+# as "unknown", which is a legitimate value. So a projection reading a field name its source does
+# not emit produces a screen that looks correct and is simply blank — no error, no warning, and
+# nothing to notice unless you happen to know the value exists. These pin the mappings against the
+# vocabulary of the modules that produce them.
+
+def test_a_dataset_version_reads_the_manifests_own_digest_field():
+    """`gateway/app/datasets.py` writes `sha256`. Reading only a generic `digest` reported every
+    dataset's digest as unknown."""
+    manifest = {"name": "iris", "version": "1", "sha256": "abc123", "size_bytes": 4096,
+                "format": "csv"}
+    row = datasets_mod.dataset_version(manifest)
+    assert row["contentDigest"] == "abc123"
+    assert row["sizeBytes"] == 4096 and row["format"] == "csv"
+
+
+def test_a_dataset_version_survives_a_manifest_that_only_has_a_version():
+    """`_versions()` falls back to `{"version": ver}` when a manifest cannot be read. That row must
+    still render, with its unknowns honest rather than absent."""
+    row = datasets_mod.dataset_version({"name": "iris", "version": "2"})
+    assert row["version"] == "2" and row["contentDigest"] is None
+    assert row["validation"]["status"] == "not-validated"
+    assert row["referencedBy"] == {"runIds": [], "modelVersions": []}

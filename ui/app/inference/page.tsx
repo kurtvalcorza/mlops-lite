@@ -14,7 +14,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { PageTitle, Panel } from '@/components/Panel';
 import { CADENCE, formatAge, useLive } from '@/lib/use-live';
-import type { CaptureRow, PredictionRecord, ReviewItem } from '@/lib/platform-types';
+import type { CaptureRow, PredictionRecord, ReviewQueueView } from '@/lib/platform-types';
 
 const TABS = ['Predictions', 'Captures', 'Review queue'] as const;
 type Tab = (typeof TABS)[number];
@@ -140,7 +140,7 @@ function Captures() {
 }
 
 function ReviewQueue() {
-  const { data, ageMs, degraded } = useLive<ReviewItem[]>('console/review-queue', CADENCE.jobs);
+  const { data, ageMs, degraded } = useLive<ReviewQueueView>('console/review-queue', CADENCE.jobs);
   return (
     <Panel title="Review queue">
       <p className="mb-2 text-caption-md text-ash">
@@ -149,11 +149,11 @@ function ReviewQueue() {
       </p>
       {data === null ? (
         <p className="text-body-md text-mute">unknown — the capture index did not answer</p>
-      ) : data.length === 0 ? (
+      ) : data.items.length === 0 ? (
         <p className="text-body-md text-mute">nothing waiting</p>
       ) : (
         <ul className="font-mono text-body-md text-mute">
-          {data.map((item) => (
+          {data.items.map((item) => (
             <li key={item.predictionId}>
               <Link
                 href={`/inference/predictions/${encodeURIComponent(item.predictionId)}`}
@@ -170,6 +170,17 @@ function ReviewQueue() {
             </li>
           ))}
         </ul>
+      )}
+      {data && (
+        // What the ranking is ACTUALLY sorting by on this deployment. Five of FR-411's seven
+        // signals need per-prediction columns the schema does not have, and a queue that presented
+        // itself as prioritized by all seven while only ever using one would be the same class of
+        // claim as a "queue" view over an admission path that never queues.
+        <p className="mt-3 text-caption-md text-ash">
+          [i] ranked by {data.rankedBy.join(', ')}. Not available on this deployment:{' '}
+          {data.unavailableSignals.join(', ')} — the platform records no per-prediction confidence,
+          sampling flag, drift attribution, or manual flag.
+        </p>
       )}
     </Panel>
   );

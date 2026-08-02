@@ -54,7 +54,13 @@ def dataset_version(record, *, referenced_by=None, validation=None):
         "version": str(record.get("version")),
         # The platform's own content-addressed identity — not an object-store ETag, which changes
         # with multipart chunking and would make the same bytes look like different data.
-        "contentDigest": record.get("digest") or record.get("content_digest"),
+        #
+        # `sha256` is what the dataset manifest actually calls it (`gateway/app/datasets.py`). Reading
+        # only a generic `digest` here made every dataset report its digest as unknown, which is the
+        # quietest possible bug on this surface: "unknown" is a legitimate value everywhere else in
+        # the console, so a missing mapping looks exactly like a missing measurement.
+        "contentDigest": (record.get("sha256") or record.get("digest")
+                          or record.get("content_digest")),
         "sizeBytes": record.get("size_bytes"),
         "objectCount": record.get("object_count"),
         "format": record.get("format"),

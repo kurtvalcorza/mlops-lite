@@ -36,6 +36,10 @@ def prediction_record(row, *, capture_state=None, label_state=None):
         "modelName": row.get("model_name"),
         "registryVersion": row.get("version"),
         "modality": row.get("modality"),
+        # A row exists only because a response was produced — `quality.log_prediction` is called on
+        # the success path, and the table has no error column. So `ok` here is a fact about what was
+        # recorded, not an assumption: a failed request leaves no row at all, which is a real gap in
+        # the record and one an operator should know about rather than read as "nothing failed".
         "status": "error" if row.get("error") else "ok",
         "latencyMs": row.get("latency_ms"),
         "captureState": capture_state or ("captured" if row.get("payload_ref") else "not-captured"),
@@ -80,6 +84,19 @@ def payload_preview(*, available, total_bytes=None, redacted_fields=None, conten
 #: sorted by arrival time would bury the first behind a thousand of the second.
 PRIORITY_SIGNALS = ("policy-flagged", "low-confidence", "drift-contributor", "sampled",
                     "missing-label", "manually-flagged", "suggested")
+
+#: **What this deployment can actually produce today.** The `predictions` and `capture_index` tables
+#: (001 baseline) record `prediction_id, model_name, version, modality, served_at, streamed,
+#: payload_ref` and `input_ref, captured_at` — there is no per-prediction confidence, sampling flag,
+#: drift attribution, or manual flag anywhere in the schema.
+#:
+#: So five of the seven signals above are **unreachable on this platform**, and that is stated here
+#: rather than left as branches that quietly never fire. A ranking function full of dead conditions
+#: reads as a working prioritizer; the surface reports this set so it can say what it is actually
+#: ranking by, which is the same rule as the admission "queue" that never queues. `PRIORITY_SIGNALS`
+#: stays whole because it is the contract's vocabulary — when a column arrives, the signal lights up
+#: and this set is what changes.
+DERIVABLE_SIGNALS = ("policy-flagged", "missing-label")
 
 _SIGNAL_WEIGHT = {signal: index for index, signal in enumerate(PRIORITY_SIGNALS)}
 

@@ -681,7 +681,16 @@ async def console_review_queue(limit: int = Query(100, ge=1, le=500)):
     rows = await projection.read("store", lambda: sources.capture_rows_for(None, limit))
     if rows is None:
         return projection.envelope(None)
-    return projection.envelope(predictions.review_queue(rows, limit=limit))
+    return projection.envelope({
+        "items": predictions.review_queue(rows, limit=limit),
+        # Which signals this deployment's schema can actually produce. Five of the seven are
+        # unreachable here — there is no per-prediction confidence, sampling flag, drift
+        # attribution, or manual flag in the 001 baseline — and the surface says so rather than
+        # presenting a ranking that silently only ever sorts by one thing.
+        "rankedBy": list(predictions.DERIVABLE_SIGNALS),
+        "unavailableSignals": [s for s in predictions.PRIORITY_SIGNALS
+                               if s not in predictions.DERIVABLE_SIGNALS],
+    })
 
 
 @router.get("/console/traces")
