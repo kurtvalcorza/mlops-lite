@@ -86,6 +86,18 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'PUT', pattern: 'admin/tenants/:id/quota' },
   { method: 'POST', pattern: 'admin/keys/:id/revoke' },
   { method: 'POST', pattern: 'admin/jobs/:id/:action' }, // owner override — never touches a running job
+  // console read surface (027, contracts/allowlist-delta.md). Every entry is a GET: this surface is
+  // read-only by construction, and a write here would be a control the console is not supposed to
+  // have. NO AGENT PATH APPEARS — the console never reaches :8100. The gateway is the only holder
+  // of X-Agent-Key (023 US2, research R5), and the `runtime/*` entries below are the GATEWAY's
+  // proxy routes, not the agent's own.
+  { method: 'GET', pattern: 'console/health' }, // PlatformHealth incl. the resolved mode
+  { method: 'GET', pattern: 'console/capabilities' }, // what to render vs omit (FR-433)
+  { method: 'GET', pattern: 'runtime/hosts' }, // a list even with one host (FR-374/382)
+  { method: 'GET', pattern: 'runtime/hosts/:host/devices' }, // per-device topology (FR-375)
+  { method: 'GET', pattern: 'runtime/engines' }, // enriched EngineState (FR-376)
+  { method: 'GET', pattern: 'runtime/admission' }, // decision history, not a queue (FR-377/378)
+  { method: 'GET', pattern: 'runtime/journal' }, // paged/filtered journal (FR-380)
 ];
 
 /** True if `method` + `segments` (the path after /api/gw/) match an allowlist entry. */

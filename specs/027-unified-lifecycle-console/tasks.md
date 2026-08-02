@@ -62,13 +62,13 @@ than building them into the fetch layer (plan.md Summary).
   route returns it. **A partially-degraded projection returns 200 with the reachable parts populated
   and unreachable parts `null`** — it must not fail whole (FR-428), and `null` must never be
   serialized as `0` or `[]`.
-- [ ] **T694** [P] Add `platform-types.ts` in `ui/lib/` — the normalized types from data-model.md
+- [X] **T694** [P] Add `platform-types.ts` in `ui/lib/` — the normalized types from data-model.md
   (`PlatformHealth`, `PlatformJob`, `PlatformModel`, `StateConflict`, `RuntimeDevice`,
   `EngineProcess`, `AdmissionRecord`, `JournalEntry`, `Endpoint`, `PredictionRecord`, `TraceDetail`,
   `EvaluationResult`, `DriftReport`, `DatasetVersion`, `Artifact`, `AlertRule`, `DashboardEmbed`,
   `AdminInfo`, `NavArea`, `HeaderModel`, `AttentionItem`). This is the Principle V swappability seam:
   no component may import a backend payload shape directly.
-- [ ] **T695** [P] Write `ui/lib/use-live.ts` — the shared live-fetch hook carrying **all** of:
+- [X] **T695** [P] Write `ui/lib/use-live.ts` — the shared live-fetch hook carrying **all** of:
   visibility-gated polling (FR-431/SC-196), exponential backoff with `Retry-After` awareness,
   last-known-good retention with data age (FR-430/SC-195), and per-resource cadence from spec §19.
   **Retention must be bounded** — an unbounded history here is the most likely cause of an SC-199
@@ -172,14 +172,14 @@ fails early if it is going to.
 - [X] **T714** [US2] Add gateway routes `GET /runtime/hosts`, `/runtime/hosts/{host}/devices`,
   `/runtime/engines`, `/runtime/admission`, `/runtime/journal`. `hosts` returns a **list** even with
   one host (FR-374) so multi-host (FR-382) needs no later contract change.
-- [ ] **T715** [P] [US2] Build `ui/app/(console)/runtime/` — hosts, per-device topology, engine
+- [X] **T715** [P] [US2] Build `ui/app/(console)/runtime/` — hosts, per-device topology, engine
   processes, admission decisions, journal. **No control that would preempt a running job** (FR-379);
   refusal is presented as designed behaviour. Fallback-derived values are labelled from the `source`
   field, not guessed.
-- [ ] **T716** [P] [US2] Render admission explanations in prose from the server-composed
+- [X] **T716** [P] [US2] Render admission explanations in prose from the server-composed
   `explanation` (FR-378) — the interface must not compose its own wording, or it will drift from
   admission's real reasoning.
-- [ ] **T717** [US2] Extend the BFF allowlist with the five `runtime/*` entries
+- [X] **T717** [US2] Extend the BFF allowlist with the five `runtime/*` entries
   (contracts/allowlist-delta.md, FR-432). **No agent path may appear** — the console never reaches `:8100`.
 - [ ] **T718** [HW] [US2] On the RTX 5070 Ti: verify per-device VRAM, resident engine identity, and
   `registry_version` match the agent exactly and `source` reads `nvml` (SC-201). Confirm
