@@ -92,6 +92,13 @@ class Projection:
 
 
 def envelope(data, *, observed=None, degraded=None, conflict=None) -> dict:
-    """The envelope for a single-source read that has no join to track."""
-    return {"data": data, "observed": observed or {"gateway": utcnow()},
+    """The envelope for a single-source read that has no join to track.
+
+    `observed=None` means "no source was named, stamp it as the gateway's own read"; `observed={}`
+    means **nothing was observed** and must stay empty. The distinction matters: a fully-degraded
+    read that carried a gateway timestamp would show the console a data age for data it never got,
+    which is the same class of falsehood as rendering `null` as `0`.
+    """
+    return {"data": data,
+            "observed": {"gateway": utcnow()} if observed is None else dict(observed),
             "degraded": list(degraded or []), "conflict": conflict}

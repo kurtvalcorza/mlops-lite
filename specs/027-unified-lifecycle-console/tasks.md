@@ -80,7 +80,7 @@ than building them into the fetch layer (plan.md Summary).
 - [ ] **T697** Build the `ui/app/(console)/` route group and the ten-area shell — sidebar with
   `NavArea` secondary navigation, and the header from data-model §14 (FR-362/367). Enforce the
   naming rule: no navigation item may be named after a backing service (FR-365).
-- [ ] **T698** Implement `GET /console/health` (`PlatformHealth` incl. resolved `mode`) and
+- [X] **T698** Implement `GET /console/health` (`PlatformHealth` incl. resolved `mode`) and
   `GET /console/capabilities` in `gateway/app/console/` + `routers/console.py`. `mode` resolves from
   **reachability**, never a configured string (research R14). Capabilities (FR-433) is what lets the interface
   **omit** an unsupported control rather than render one that fails — the mechanism behind FR-418.
@@ -165,11 +165,11 @@ fails early if it is going to.
 - [X] **T712** [US2] Add agent routes `GET /runtime/devices`, `GET /runtime/admission`,
   `GET /journal` in `hostagent/main.py` per contracts/runtime-api.md (FR-374/375/377/380). All behind `X-Agent-Key` —
   these are not public probes (023 US2). All read-only.
-- [ ] **T713** [US2] Create `gateway/app/runtime.py` — the agent proxy holding `X-Agent-Key`, the
+- [X] **T713** [US2] Create `gateway/app/runtime.py` — the agent proxy holding `X-Agent-Key`, the
   **only** path to `:8100` (FR-432, research R5). On agent loss return `200` with `data: null` and
   `degraded: ["agent"]`; **never an empty list**, which the console would legitimately render as "no
   devices".
-- [ ] **T714** [US2] Add gateway routes `GET /runtime/hosts`, `/runtime/hosts/{host}/devices`,
+- [X] **T714** [US2] Add gateway routes `GET /runtime/hosts`, `/runtime/hosts/{host}/devices`,
   `/runtime/engines`, `/runtime/admission`, `/runtime/journal`. `hosts` returns a **list** even with
   one host (FR-374) so multi-host (FR-382) needs no later contract change.
 - [ ] **T715** [P] [US2] Build `ui/app/(console)/runtime/` — hosts, per-device topology, engine

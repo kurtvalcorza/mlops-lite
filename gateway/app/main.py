@@ -35,6 +35,7 @@ from .routers import (
     policies as policies_router,
 )
 from .routers import broker_admin, broker_openai  # 026: the LAN broker surface
+from .routers import console as console_router  # 027: the console read surface
 
 _log = logging.getLogger("gateway.main")
 
@@ -62,6 +63,11 @@ app.include_router(policies_router.router, tags=["policies"], dependencies=_prot
 # needed it too, which would hand each of them the whole lifecycle surface (026 T620/T624/T633).
 app.include_router(broker_openai.router, tags=["broker-inference"])
 app.include_router(broker_admin.router, tags=["broker-admin"])
+
+# 027: the console read surface. Under `_protected` — these are OPERATOR reads reached through the
+# BFF, which injects the operator key; they are not a tenant surface and must not be reachable with
+# a tenant key (a tenant could otherwise read every other tenant's runtime and catalog state).
+app.include_router(console_router.router, tags=["console"], dependencies=_protected)
 
 REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"])
 
