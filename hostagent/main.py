@@ -74,6 +74,65 @@ def build_agent():
     return admission, journal, manager, jobs
 
 
+def build_broker():
+    """Wire the 026 coordinator + shape-lane scheduler, or `(None, None)` when the broker is off.
+
+    Separate from `build_agent` on purpose. The broker is additive: the pre-broker single-slot lease
+    still serves the 018 paths that use it (`hostagent.swap`, the engine runtimes), and every
+    signature in `build_agent` is byte-compatible for the tests that pin it. A deployment that has
+    not enabled the broker gets an agent that behaves exactly as before, and `/gpu/queue` answers
+    503 rather than inventing state.
+    """
+    if os.getenv("BROKER_ENABLED", "1").lower() in ("0", "false", "no"):
+        return None, None
+    from hostagent import coordinator as coordinator_mod
+    from hostagent import scheduler as scheduler_mod
+    from platformlib import store as _store
+
+    coordinator = coordinator_mod.Coordinator()
+
+    def conn_factory():
+        try:
+            return _store.connect()
+        except StoreError:
+            return None  # the scheduler degrades its lane view rather than failing the read
+
+    scheduler = scheduler_mod.Scheduler(coordinator, store=_store, conn_factory=conn_factory)
+    _recover_broker_lane(_store, conn_factory)
+    return coordinator, scheduler
+
+
+def _recover_broker_lane(store, conn_factory) -> None:
+    """T680: resolve the persisted lane after a restart, and settle what the restart interrupted.
+
+    Runs before the agent serves: a `running` job whose reservation is left `reserved` holds quota
+    against its tenant forever, and a queued lane the agent has not yet reconciled would be served
+    to an operator as if it were live.
+    """
+    conn = conn_factory()
+    if conn is None:
+        return
+    try:
+        recovery = store.recover_after_restart(conn)
+        for entry in recovery["interrupted"]:
+            elapsed = max(0.0, time.time() - (entry["started_at"] or time.time()))
+            try:
+                store.settle(conn, entry["id"], elapsed)
+            except StoreError:
+                pass  # no reservation for this job — nothing to settle, and nothing is held
+            store.finish_job(conn, entry["id"], "interrupted", gpu_seconds=elapsed)
+        if recovery["interrupted"] or recovery["queued"]:
+            print(f"[broker] recovered lane: {len(recovery['interrupted'])} interrupted, "
+                  f"{recovery['queued']} still queued", flush=True)
+    except Exception as e:  # noqa: BLE001 — a store outage must not stop the agent from serving
+        print(f"[broker] lane recovery deferred: {e}", flush=True)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _engine_error_status(exc: BaseException) -> int:
     """Map a lifecycle/admission failure to the preserved 008–017 error vocabulary."""
     if isinstance(exc, (adm.Held, swap_mod.PreemptRefused, swap_mod.SwapError)):
@@ -373,9 +432,22 @@ def _get_jobs(path, ctx):
     return 200, {"jobs": journal.jobs(kind=kind)}, "application/json"
 
 
+def _get_gpu_queue(path, ctx):
+    """026 T689: the broker's residency + lane view. Degrades to the coordinator's own state when
+    the store is unreachable — an operator asking "what is on the GPU" during a store outage needs
+    the answer the agent already holds, not a 503."""
+    from hostagent import gpuroutes
+
+    if getattr(ctx, "scheduler", None) is None:
+        return 503, {"error": "the broker coordinator is not enabled on this agent"}, \
+            "application/json"
+    return 200, gpuroutes.queue_payload(ctx.scheduler), "application/json"
+
+
 #: Ordered GET route table (T585): first matcher wins — the exact order of the prior if-ladder.
 _GET_ROUTES = (
     (lambda p: p == "/healthz", _get_healthz),
+    (lambda p: p == "/gpu/queue", _get_gpu_queue),  # 026 T689
     (lambda p: p == "/readyz", _get_readyz),
     (lambda p: p == "/health", _get_health),
     (lambda p: p == "/metrics", _get_metrics),
@@ -386,14 +458,15 @@ _GET_ROUTES = (
 )
 
 
-def handle_get(path: str, query: str, *, admission, journal, manager, jobs, policy=None):
+def handle_get(path: str, query: str, *, admission, journal, manager, jobs, policy=None,
+               scheduler=None):
     """(status, payload, content_type) for every GET route, dispatched through the ordered
     `_GET_ROUTES` table (024 US3, T586 — first match wins; unmatched falls to the legacy job aliases,
     then 404). Routed on the PARSED path (Codex round 4, 018): the raw request path carries the query
     string, so `/jobs?kind=train` failed the exact match and a stray `/jobsxyz` fell into the jobs
     listing instead of 404. Signature unchanged — callers/tests are byte-compatible (FR-340)."""
     ctx = SimpleNamespace(query=query, admission=admission, journal=journal, manager=manager,
-                          jobs=jobs, policy=policy)
+                          jobs=jobs, policy=policy, scheduler=scheduler)
     for matcher, handler in _GET_ROUTES:
         if matcher(path):
             return handler(path, ctx)
@@ -554,8 +627,32 @@ def _is_engine_verb(path):
     return len(segs) >= 3 and segs[0] == "engines"
 
 
+def _post_gpu_job_override(path, ctx):
+    """026 T649: owner pin/pause/resume/reorder/cancel over the QUEUED lane."""
+    from hostagent import gpuroutes
+    from platformlib import store as _store
+
+    job_id = path[len("/gpu/jobs/"):-len("/override")]
+    body = _parse_json(ctx.raw_body)
+    if isinstance(body, tuple):
+        return "json", body[0], body[1]
+    try:
+        conn = _store.connect()
+    except StoreError as e:
+        return "json", 503, {"error": f"broker store unreachable: {e}"}
+    try:
+        status, payload = gpuroutes.job_override(_store, conn, job_id,
+                                                 str(body.get("action") or ""),
+                                                 body.get("position"))
+    finally:
+        conn.close()
+    return "json", status, payload
+
+
 #: Ordered POST route table (T585): first matcher wins — the exact order of the prior if-ladder.
 _POST_ROUTES = (
+    (lambda p: p.startswith("/gpu/jobs/") and p.endswith("/override"),
+     _post_gpu_job_override),  # 026 T649
     (lambda p: p == "/control/unload", _post_control_unload),
     (lambda p: p == "/control/reload", _post_control_reload),
     (lambda p: p == "/jobs", _post_jobs),
@@ -665,7 +762,7 @@ class BoundedAgentServer(ThreadingHTTPServer):
                     pass
 
 
-def make_handler(admission, journal, manager, jobs, policy=None):
+def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None):
     """The stdlib transport — a thin shell over the shared routers (T413).
 
     `policy` (023 US2, FR-281/282): the internal-credential gate, checked BEFORE any body read or
@@ -707,7 +804,8 @@ def make_handler(admission, journal, manager, jobs, policy=None):
                 url = urlparse(self.path)
                 if self._deny(url):
                     return
-                code, payload, ctype = handle_get(url.path, url.query, admission=admission,
+                code, payload, ctype = handle_get(url.path, url.query, scheduler=scheduler,
+                                                  admission=admission,
                                                   journal=journal, manager=manager, jobs=jobs,
                                                   policy=policy)
                 self._send(code, payload, content_type=ctype)
@@ -829,6 +927,7 @@ def main() -> None:
     except agent_auth.AgentAuthConfigError as e:
         raise SystemExit(f"hostagent refused to start: {e}")
     admission, journal, manager, jobs = build_agent()
+    coordinator, scheduler = build_broker()  # 026: additive; (None, None) when BROKER_ENABLED=0
     _ready_check = _make_store_ready_check()  # /readyz reports schema compatibility (FR-301)
     _interrupted_at_start = journal.mark_interrupted("agent restart")
     if _interrupted_at_start:
@@ -837,9 +936,11 @@ def main() -> None:
               f"(FR-173)", flush=True)
     threading.Thread(target=manager.run_reaper, daemon=True).start()
     server = BoundedAgentServer((AGENT_BIND, AGENT_PORT),
-                                make_handler(admission, journal, manager, jobs, policy=policy))
+                                make_handler(admission, journal, manager, jobs, policy=policy,
+                                             scheduler=scheduler))
     print(f"hostagent :{AGENT_PORT} | state={STATE_DIR} "
           f"| engines={list(manager.runtimes)} | jobs=on | vram_budget={VRAM_GB:.0f}GB "
+          f"| broker={'on' if scheduler else 'off'} "
           f"| security={policy.security_mode} "
           f"| workers={AGENT_MAX_WORKERS}+{AGENT_QUEUE_SIZE} io_timeout={AGENT_IO_TIMEOUT_S:.0f}s",
           flush=True)

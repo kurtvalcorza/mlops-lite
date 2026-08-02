@@ -147,3 +147,20 @@ from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
     reserve,
     settle,
 )
+
+# -- broker jobs repository: the persisted FIFO lane (storeimpl/brokerjobs, 026 T647/T680/T685) ------
+from platformlib.storeimpl.brokerjobs import (  # noqa: F401 — re-exported
+    cancel_job,
+    enqueue_job,
+    finish_job,
+    get_job,
+    list_queued,
+    pin_job,
+    recover_after_restart,
+    reorder_job,
+    running_job,
+    start_job,
+)
+from platformlib.storeimpl.brokerjobs import (  # noqa: F401 — `list_jobs` already names the AGENT's
+    list_jobs as list_broker_jobs,              # journal surface; the broker lane is a second lane
+)
