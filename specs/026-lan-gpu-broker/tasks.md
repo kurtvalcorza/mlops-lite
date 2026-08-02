@@ -87,11 +87,11 @@ review. Read that contract before starting — the ordering constraints below ar
 
 ## Phase 4 — P4: additional serving modalities [US4]
 
-- [ ] **T653** `[US4]` Add ASR serving behind the coordinator, co-resident when both bounds allow. Check: an ASR model and an LLM serve concurrently without evicting each other.
-- [ ] **T654** `[US4]` `[P]` Add computer-vision serving behind the coordinator. Check: same co-residency behaviour as T653.
-- [ ] **T655** `[US4]` Task-typed request surface for non-chat modalities per [contracts/inference-openai.md](./contracts/inference-openai.md). Check: a transcription request routes to the ASR model, not the chat adapter.
-- [ ] **T656** `[US4]` Console surfacing of resident set, per-model VRAM accounting, and live-free headroom. Check: the displayed accounted total matches the coordinator's internal sum during a co-resident workload.
-- [ ] **T657** `[US4]` Verify the US4 Independent Test end to end, asserting **both** bounds throughout. Check: the accounted set plus outstanding reservations never exceeds usable budget, and every individual load fit live-free minus unmaterialized minus headroom.
+- [X] **T653** `[US4]` Add ASR serving behind the coordinator, co-resident when both bounds allow. Check: an ASR model and an LLM serve concurrently without evicting each other.
+- [X] **T654** `[US4]` `[P]` Add computer-vision serving behind the coordinator. Check: same co-residency behaviour as T653.
+- [X] **T655** `[US4]` Task-typed request surface for non-chat modalities per [contracts/inference-openai.md](./contracts/inference-openai.md). Check: a transcription request routes to the ASR model, not the chat adapter.
+- [X] **T656** `[US4]` Console surfacing of resident set, per-model VRAM accounting, and live-free headroom. Check: the displayed accounted total matches the coordinator's internal sum during a co-resident workload.
+- [X] **T657** `[US4]` Verify the US4 Independent Test end to end, asserting **both** bounds throughout. Check: the accounted set plus outstanding reservations never exceeds usable budget, and every individual load fit live-free minus unmaterialized minus headroom.
 
 ---
 
@@ -133,10 +133,10 @@ serving nor the job model cleanly covers. Decide before building.
 
 ## Phase 7 — Cross-cutting
 
-- [ ] **T670** `[P]` Structured logs and metrics for admission outcomes (grant/share/refuse reason/evict/rollback), per tenant. Check: a refused request is attributable to a specific bound.
-- [ ] **T671** `[P]` Operator console views for quotas, ledger totals, and queue state. Check: SC-012 demonstrable.
-- [ ] **T672** Update [quickstart.md](./quickstart.md) and [user-guide.md](./user-guide.md) to the shipped surface, replacing illustrative endpoints with real ones and TLS URLs throughout.
-- [ ] **T673** Refresh `README.md`'s Principle II description to bounded co-residency once P3 ships — the constitution's outstanding follow-up TODO. Check: README no longer describes the system as single-tenant-in-VRAM.
+- [X] **T670** `[P]` Structured logs and metrics for admission outcomes (grant/share/refuse reason/evict/rollback), per tenant. Check: a refused request is attributable to a specific bound.
+- [X] **T671** `[P]` Operator console views for quotas, ledger totals, and queue state. Check: SC-012 demonstrable.
+- [X] **T672** Update [quickstart.md](./quickstart.md) and [user-guide.md](./user-guide.md) to the shipped surface, replacing illustrative endpoints with real ones and TLS URLs throughout.
+- [X] **T673** Refresh `README.md`'s Principle II description to bounded co-residency once P3 ships — the constitution's outstanding follow-up TODO. Check: README no longer describes the system as single-tenant-in-VRAM.
 
 ---
 

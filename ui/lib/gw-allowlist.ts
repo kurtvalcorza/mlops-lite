@@ -71,6 +71,21 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'embed/health' },
   { method: 'GET', pattern: 'transcribe/health' },
   { method: 'GET', pattern: 'training/health' },
+  // broker stage (026) — owner-only surfaces. The BFF injects the OPERATOR key, which is what
+  // `require_owner` accepts; a tenant key never reaches these routes and could not raise its own
+  // quota through them. Tenant-facing /v1/* is deliberately ABSENT: tenants hold their own keys and
+  // call the gateway directly over TLS, so proxying them through the console's operator credential
+  // would let any browser session spend any tenant's quota.
+  { method: 'GET', pattern: 'admin/queue' }, // resident set + both VRAM bounds + both lanes (T656)
+  { method: 'GET', pattern: 'admin/usage' }, // per-tenant consumption + ledger + reconciliation
+  { method: 'GET', pattern: 'admin/tenants' },
+  { method: 'POST', pattern: 'admin/tenants' }, // create tenant + first key (raw key shown once)
+  { method: 'POST', pattern: 'admin/tenants/:id/keys' }, // rotate/add
+  { method: 'POST', pattern: 'admin/tenants/:id/revoke' },
+  { method: 'POST', pattern: 'admin/tenants/:id/enable' },
+  { method: 'PUT', pattern: 'admin/tenants/:id/quota' },
+  { method: 'POST', pattern: 'admin/keys/:id/revoke' },
+  { method: 'POST', pattern: 'admin/jobs/:id/:action' }, // owner override — never touches a running job
 ];
 
 /** True if `method` + `segments` (the path after /api/gw/) match an allowlist entry. */

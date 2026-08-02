@@ -7,17 +7,38 @@ target WSL GPU host with the stack up (`nvidia-smi` must succeed — Gate Zero).
 **Except Drill 2b**, which is gated on a native-Linux GPU host and MUST NOT be run or waived on WSL2 —
 the pass criterion below is "every ungated drill passes", not "every drill passes".
 
-**Prereqs**: stack running; gateway bound to the LAN interface (research R8); at least one small serving model
-in the local zoo; a second LAN device (or a second shell on another host) for concurrency drills.
+**Prereqs**: stack running; gateway bound to the LAN interface (research R8) **over TLS**; at least one
+small serving model in the local zoo; a second LAN device (or a second shell on another host) for
+concurrency drills; the owner key in `$OWNER_KEY` (`BROKER_ADMIN_KEYS`, falling back to
+`GATEWAY_API_KEYS`).
+
+**Shipped surface.** The drills below call the real HTTP endpoints. The tenant-facing `broker` CLI
+described in [user-guide.md](./user-guide.md) is **not yet shipped** — it carries no task in
+[tasks.md](./tasks.md) and no phase exit depends on it, so every drill is written against the HTTP
+surface that does exist. Substitute the CLI freely once it lands; the endpoints it wraps are these.
+
+**Every URL is `https://`.** The broker refuses plaintext rather than redirecting (FR-002a): a redirect
+would have already carried the bearer key over `http://`. `BROKER_ALLOW_PLAINTEXT=1` exists for a
+single-tenant dev box and logs a warning on every request it lets through — it is not a drill setting.
+
+**Co-residency is behind `BROKER_COORDINATOR_ADMISSION=1`** (026 ships phase-gated). Drills 3 and 4
+require it; drills 1 and 5 pass either way.
 
 ---
 
 ## Drill 1 — Self-service inference (US1 · SC-001/002/003)
-1. Owner: `broker admin tenant create --name alice` → capture key.
-2. From a **LAN device**, call `/v1/chat/completions` with the key → expect a completion + `X-GPU-Seconds`.
+1. Owner: `curl -sX POST https://gpu.lan:8443/admin/tenants -H "X-API-Key: $OWNER_KEY" \
+   -d '{"name":"alice"}'` → capture `api_key` from the response. It is shown **once**.
+2. From a **LAN device**: `curl https://gpu.lan:8443/v1/chat/completions -H "Authorization: Bearer $KEY" \
+   -d '{"model":"qwen","messages":[{"role":"user","content":"hi"}]}' -D-` → a completion, plus
+   `X-GPU-Seconds` and `X-Quota-Remaining` response headers.
 3. From **two devices at once**, fire N chat requests → all succeed, none dropped (SC-002).
-4. Call with a bogus key → `401` and **no** GPU work (SC-003).
+4. Call with a bogus key → `401` and **no** GPU work (SC-003). Confirm no `usage_ledger` row appeared.
 5. `curl` the gateway from **off-LAN** → unreachable (SC-008).
+6. Repeat step 2 over `http://` → **refused**, not redirected, and no `Location` header (FR-002a).
+7. Repeat step 2 with `"stream": true` → **no** `X-GPU-Seconds` header (headers precede the body, so no
+   settled value exists yet); final usage arrives as an `event: usage` SSE frame immediately before
+   `data: [DONE]`.
 
 ## Drill 2 — Jobs: queue and exclusivity (US2 · SC-006/010)
 1. Tenant A: `broker submit … -- python train.py` → `202 queued`.
@@ -70,7 +91,11 @@ Once P2 is unblocked on native Linux:
 1. Owner: `broker admin quota set --tenant alice --window daily --gpu-seconds 30`.
 2. Alice runs work past 30 GPU-s → next request `403 quota_exhausted` (SC-005); a **different** tenant still
    succeeds.
-3. `GET /admin/usage` → ledger totals reconcile with work done within 5% (SC-004).
+3. `GET /admin/usage` → ledger totals reconcile with work done within 5% (SC-004). The response's
+   `reconciliation.reconciled` must be `true`: the ledger total equals the sum of settled reservations.
+   Note `consumed_gpu_seconds` counts settled rows **and** outstanding reservations — that is the number
+   the quota is enforced against, so a tenant refused while apparently inside its budget is reading only
+   the settled half.
 4. Simulate window rollover (advance window / test hook) → Alice's budget auto-resets, work resumes (SC-012).
 
 ## Drill 5 — Interactive session guard rails (US5 · SC-007) — **GATED on T665**

@@ -74,16 +74,33 @@ flowchart LR
   GR --> PR
 ```
 
-**One GPU tenant under a single race-free admission lock (Principle II, non-negotiable; constitution
-v1.5.0).** At most one tenant holds the GPU at any instant — **LLM**, **vision**, **ASR**, *or* a
-**training/HPO/batch/shadow job**. Since **018 (T364)** this is enforced **in-process**: the agent's
-`Admission` makes the free-VRAM read, the holder check, and the claim all under one re-entrant lock
-(`hostagent/admission.py`) — race-free by construction, no time-of-check/time-of-use window, and no
-cross-process lockfile to reclaim. **Live-VRAM admission** prefers NVML (`pynvml`, in-process) and
-falls back to a single `nvidia-smi` fork, with a static-budget fallback when the GPU is unreadable
-(never fail-open). The same lock makes the preemptive swap transactional. **CPU modalities (embeddings,
+**VRAM-budgeted co-residency under a single race-free admission authority (Principle II,
+non-negotiable; constitution v1.6.1).** Multiple *serving* models — **LLM**, **vision**, **ASR** — MAY
+be resident at once when they fit the VRAM budget; a **training/HPO/batch/shadow job** takes the whole
+GPU exclusively and is never preempted. Since **026** the enforcement point is
+`hostagent/coordinator.py`, a resident-set state machine holding **two distinct bounds**:
+
+1. `Σ resident accounted + Σ outstanding reservations ≤ usable_capacity` — a budget bound.
+2. each incoming load `≤ live_free − unmaterialized reservations − safety_headroom` — a physical
+   bound, which also holds when an *unaccounted external* GPU consumer is present.
+
+They are separate on purpose. The pre-1.6.1 wording ("combined VRAM ≤ live free VRAM") double-counted,
+because live free already excludes residents: 6 GiB resident on an 11 GiB usable device leaves 5 GiB
+free, and the old rule would have called that valid state invalid and evicted for nothing.
+
+The coordinator's lock guards **state only** and is never held across a load or unload — admission
+reserves under the lock, loads outside it, then commits or rolls back (the ABBA deadlock
+`hostagent/admission.py` records in its own comments). Eviction **drains before it unloads**, so it
+never interrupts an in-flight request, and a model's accounted size is reconciled to a **per-PID** NVML
+reading rather than a device-wide delta, which two concurrent loads make unattributable. **Live-VRAM
+reads** prefer NVML (`pynvml`, in-process) and fall back to a single `nvidia-smi` fork, with a
+static-budget fallback when the GPU is unreadable (never fail-open). **CPU modalities (embeddings,
 tabular) are exempt** — they hold no admission and are never idle-reaped, so RAG embed→LLM never
 thrashes.
+
+> The 018 single-slot `hostagent/admission.py` lease is still what the pre-broker paths use; co-residency
+> is enabled by `BROKER_COORDINATOR_ADMISSION=1`, which 026 ships phase-gated behind the on-hardware
+> drills in [specs/026-lan-gpu-broker/quickstart.md](specs/026-lan-gpu-broker/quickstart.md).
 
 > The pre-018 file-based lease (`serving/gpu_lease.py`, an atomic PID-stamped lockfile) and the four
 > per-daemon supervisors + trainer daemon it coordinated are **retired**. The constitution's Principle

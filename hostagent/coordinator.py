@@ -37,12 +37,33 @@ at all, so a freshly loaded model was observable as idle-and-evictable while its
 was still running.
 """
 import itertools
+import logging
 import random
 import threading
 import time
 import uuid
 
 from hostagent import gpuconfig
+
+logger = logging.getLogger("hostagent.coordinator")
+
+
+def _observe(outcome: str, reason: str = None) -> None:
+    """Record an admission outcome (T670).
+
+    Best-effort and never on the failure path of a decision: an observability import problem must
+    not be able to refuse a request. The `reason` vocabulary is closed and names the DECIDING
+    condition, so a refusal is attributable to a specific bound rather than to "the GPU was busy" —
+    which is the difference between an operator raising a budget and an operator chasing a ghost.
+    """
+    try:
+        from hostagent.metrics import REGISTRY
+
+        REGISTRY.inc("hostagent_admission_outcomes_total", labels={"result": outcome})
+        if reason:
+            REGISTRY.inc("hostagent_admission_refusals_total", labels={"reason": reason})
+    except Exception:  # noqa: BLE001
+        pass
 
 # -- outcomes ---------------------------------------------------------------------------------------
 
@@ -520,6 +541,7 @@ class Coordinator:
 
         for attempt in range(1, self.config.max_admission_attempts + 1):
             if self._clock() >= deadline:
+                _observe("refuse", "deadline")
                 return Refuse(GPU_BUSY, "admission deadline exceeded", self._retry_after())
 
             plan, payload = self._stage1(model_key, est_bytes, op_id)
@@ -552,6 +574,7 @@ class Coordinator:
                 self._backoff(attempt)
                 continue
 
+        _observe("refuse", "attempts_exhausted")
         return Refuse(GPU_BUSY, "admission attempts exhausted", self._retry_after())
 
     def _stage1(self, model_key, est_bytes, op_id):
@@ -562,12 +585,14 @@ class Coordinator:
         """
         with self._locked():
             if self.exclusive_job is not None or self.job_barrier:
+                _observe("refuse", "exclusive_job" if self.exclusive_job else "job_barrier")
                 return Refuse(GPU_BUSY, "an exclusive job holds the GPU",
                               self._retry_after()), None
 
             entry = self.residents.get(model_key)
 
             if entry is not None and entry.state == RESIDENT:
+                _observe("share")
                 return Share(self._grant_claim(model_key, op_id)), None
 
             if entry is not None and entry.state == LOADING:
@@ -614,9 +639,12 @@ class Coordinator:
                 # empty GPU but is blocked right now must get a retryable answer — telling a client
                 # to give up on a request that would have succeeded seconds later is the worse error.
                 if est_bytes > capacity - headroom:
+                    _observe("refuse", "model_too_large")
                     return Refuse(MODEL_TOO_LARGE,
                                   f"{model_key} needs {est_bytes:.0f} bytes; usable capacity minus "
                                   f"headroom is {capacity - headroom:.0f}"), None
+                # Name the bound that actually failed, not just "busy".
+                _observe("refuse", "budget_bound" if not fits_budget else "live_free_bound")
                 return Refuse(GPU_BUSY, "no evictable capacity right now",
                               self._retry_after()), None
 
@@ -627,6 +655,7 @@ class Coordinator:
                 victim.state = DRAINING
             self._evict_intent[op_id] = [v.model_key for v in victims]
             self._cond.notify_all()
+            _observe("evict")
             return "evict_then_retry", list(victims)
 
     # -- stage 2 helpers -------------------------------------------------------------------------------
@@ -743,6 +772,8 @@ class Coordinator:
                     # be able to tell that window apart from an actual abandonment.
                     self._pending_disposal[op_id] = list(waiters)
                     rollback = True
+                    _observe("rollback",
+                             "job_barrier" if barred else ("stale" if stale else "drift"))
                     if barred:
                         outcome = Refuse(GPU_BUSY, "a job claimed the GPU during this load",
                                          self._retry_after())
@@ -774,6 +805,7 @@ class Coordinator:
                     del self.reservations[op_id]
                     rollback = False
                     outcome = Grant(claim)
+                    _observe("grant")
                 self._cond.notify_all()
 
         if rollback:
@@ -815,6 +847,8 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — a partial child's cleanup must not mask the failure
                 pass
 
+        _observe("refuse", "load_failed")
+        logger.warning("load of %s failed, reservation released: %s", model_key, error)
         outcome = Refuse(LOAD_FAILED, f"{model_key} failed to load: {error}")
         self._dispose(waiters, outcome, owner_op_id=op_id)
         return outcome
@@ -1035,9 +1069,27 @@ class Coordinator:
 
     # -- observability (T689) ----------------------------------------------------------------------------
 
+    def refresh_metrics(self) -> None:
+        """Publish the residency + VRAM gauges (T670). Best-effort, like `_observe`."""
+        try:
+            from hostagent.metrics import REGISTRY
+
+            with self._locked():
+                REGISTRY.set_gauge("hostagent_residents", len(self.residents))
+                REGISTRY.set_gauge("hostagent_vram_accounted_bytes",
+                                   sum(r.vram_accounted_bytes for r in self.residents.values()))
+                REGISTRY.set_gauge("hostagent_vram_reserved_bytes",
+                                   sum(r.est_bytes for r in self.reservations.values()))
+                REGISTRY.set_gauge("hostagent_vram_unmaterialized_bytes", self._unmaterialized())
+                REGISTRY.set_gauge("hostagent_vram_usable_capacity_bytes", self.usable_capacity())
+                REGISTRY.set_gauge("hostagent_job_barrier", 1 if self.job_barrier else 0)
+        except Exception:  # noqa: BLE001
+            pass
+
     def snapshot(self) -> dict:
         """Both terms of both bounds, named as the contract names them, so an operator can assert
         invariants 1 and 2 from this response alone rather than inferring them from agent logs."""
+        self.refresh_metrics()
         with self._locked():
             reservations = [r.snapshot() for r in self.reservations.values()]
             return {

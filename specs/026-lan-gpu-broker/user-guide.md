@@ -1,6 +1,17 @@
 # User Guide — LAN Self-Service GPU Broker
 
-> **Status: PLANNED UX (spec 026, pre-implementation).** This guide describes how the broker is
+> **Status (updated at implementation).** The **HTTP surface in this guide is shipped**: the
+> OpenAI-compatible `/v1/*` routes, the owner `/admin/*` routes, TLS enforcement, per-tenant keys,
+> recurring-window quotas, and the GPU-seconds ledger all exist and are covered by tests.
+>
+> The `broker` **CLI** shown below is **not yet shipped** — it carries no task in
+> [tasks.md](./tasks.md) and no phase exit depends on it. Each `broker …` invocation is a wrapper
+> around an endpoint that does exist; until the CLI lands, use the equivalent HTTP call
+> ([quickstart.md](./quickstart.md) shows each one). Jobs (`broker submit`/`queue`/`logs`) and
+> sessions (`broker session`) are **gated**: their phases require a native-Linux GPU host with a
+> passing sandbox spike, plus a constitution amendment.
+>
+> The original note follows. This guide describes how the broker is
 > *intended* to work per [spec.md](./spec.md). Exact endpoints, command names, and flags are
 > **illustrative** and will be finalized in `/speckit-plan` (contracts) and `/speckit-implement`.
 > Each section notes the spec story/FR it traces to.

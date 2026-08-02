@@ -65,13 +65,41 @@ _interrupted_at_start = 0
 def build_agent():
     """Wire the agent's components. Admission is the single in-process GPU authority (T364 retired
     the cross-process lockfile shim)."""
-    admission = adm.Admission(vram_budget_gb=VRAM_GB)
+    admission = _build_admission()
     journal = Journal()  # US4 T375-B: durable job state lives in the Postgres `jobs` table now
     from hostagent import adapters  # one runtime per registered engine adapter (T358+)
 
     manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission))
     jobs = jobs_mod.JobManager(admission, journal)  # 018 T362: the trainer folded in
     return admission, journal, manager, jobs
+
+
+#: The coordinator the engine runtimes admit through when co-residency is enabled. Module-level so
+#: `build_agent()` and `build_broker()` share ONE — two coordinators would be two GPU authorities,
+#: which is the single thing this feature's design forbids.
+_COORDINATOR = None
+
+
+def _coordinator():
+    global _COORDINATOR
+    if _COORDINATOR is None:
+        from hostagent import coordinator as coordinator_mod
+        _COORDINATOR = coordinator_mod.Coordinator()
+    return _COORDINATOR
+
+
+def _build_admission():
+    """The single-slot lease, or the coordinator-backed shim when co-residency is enabled (T653/T654).
+
+    Default OFF: 026 ships phase-gated, and co-residency changes what the GPU does under load, so it
+    becomes the default only after the on-hardware drills in quickstart.md pass. Off, the agent's
+    behaviour is byte-identical to 018's.
+    """
+    from hostagent import coordadmission
+
+    if coordadmission.enabled():
+        return coordadmission.CoordinatorAdmission(_coordinator())
+    return adm.Admission(vram_budget_gb=VRAM_GB)
 
 
 def build_broker():
@@ -85,11 +113,10 @@ def build_broker():
     """
     if os.getenv("BROKER_ENABLED", "1").lower() in ("0", "false", "no"):
         return None, None
-    from hostagent import coordinator as coordinator_mod
     from hostagent import scheduler as scheduler_mod
     from platformlib import store as _store
 
-    coordinator = coordinator_mod.Coordinator()
+    coordinator = _coordinator()  # the SAME instance the engine runtimes admit through
 
     def conn_factory():
         try:

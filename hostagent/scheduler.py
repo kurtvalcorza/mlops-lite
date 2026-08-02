@@ -173,6 +173,14 @@ class Scheduler:
             except Exception:  # noqa: BLE001 — a store blip degrades the view, never the scheduler
                 jobs_lane = []
         snap["jobs_lane"] = jobs_lane
-        snap["inference_lane"] = {"drain_mode": self.drain_mode(),
+        drain = self.drain_mode()
+        snap["inference_lane"] = {"drain_mode": drain,
                                   "admissions_since_job_queued": self._inference_since_job_queued}
+        try:  # T670: lane depth and drain mode, best-effort like the coordinator's own gauges
+            from hostagent.metrics import REGISTRY
+
+            REGISTRY.set_gauge("hostagent_jobs_lane_depth", len(jobs_lane))
+            REGISTRY.set_gauge("hostagent_job_drain_mode", 1 if drain else 0)
+        except Exception:  # noqa: BLE001
+            pass
         return snap
