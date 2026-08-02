@@ -18,16 +18,36 @@ import { useLiveState } from '@/lib/useLiveState';
 import { CADENCE, useLive } from '@/lib/use-live';
 import type { PlatformHealth } from '@/lib/platform-types';
 
-/** The mode badge is resolved from reachability by the server, never self-declared (research R14). */
+/**
+ * 027 T733 (FR-429) — the persistent mode badge, plus the aggregate health state.
+ *
+ * Two different facts, shown side by side because they answer different questions and conflating
+ * them was a real mistake made and corrected during this increment. **Mode** is what kind of
+ * deployment this is (`offline` fixtures / `live` services / `hardware` GPU) — an operator reading
+ * a GPU number needs to know whether there is a GPU behind it. **Health** is how well that
+ * deployment is currently working. A fixture-backed console can be perfectly healthy and still must
+ * not be mistaken for the hardware one.
+ *
+ * Both are resolved from reachability by the server, never self-declared (research R14).
+ */
 function ModeBadge() {
   const { data } = useLive<PlatformHealth>('console/health', CADENCE.health);
   if (!data) {
-    // Unknown, not "full". A badge that defaults to healthy is the falsehood this exists to prevent.
+    // Unknown, not "live". A badge that defaults to a working state is the falsehood this exists
+    // to prevent — it is the first thing on screen and the last thing anyone re-checks.
     return <span className="text-caption-md text-ash">mode unknown</span>;
   }
   const tone =
-    data.mode === 'full' ? 'text-mute' : data.mode === 'degraded' ? 'text-ink' : 'text-red-700';
-  return <span className={`text-caption-md ${tone}`}>mode {data.mode}</span>;
+    data.overall === 'healthy'
+      ? 'text-mute'
+      : data.overall === 'degraded'
+        ? 'text-ink'
+        : 'text-red-700';
+  return (
+    <span className={`text-caption-md ${tone}`}>
+      {data.mode} · {data.overall}
+    </span>
+  );
 }
 
 export function AreaNav() {

@@ -186,3 +186,22 @@ def artifact_present(uri: str) -> bool:
         if str(status) in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
+
+def study(study_id: str) -> dict:
+    """One HPO study record from the trainer.
+
+    Read through the trainer's own route rather than reconstructed from tracking runs: the trainer
+    is the only thing that knows which runs belonged to which study, and rebuilding that from tags
+    would produce a second, quietly-divergent answer.
+    """
+    import httpx
+
+    from ..settings import TRAINER_URL, agent_headers
+
+    with httpx.Client(headers=agent_headers(), timeout=10.0) as client:
+        response = client.get(f"{TRAINER_URL}/study/{study_id}")
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()

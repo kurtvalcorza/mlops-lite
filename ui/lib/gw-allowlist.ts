@@ -104,6 +104,7 @@ export const ALLOWLIST: AllowEntry[] = [
   { method: 'GET', pattern: 'console/jobs/:id' }, // + timeline, resources, StateConflict (FR-391)
   { method: 'GET', pattern: 'console/runs' }, // run listing — net-new
   { method: 'GET', pattern: 'console/experiments' },
+  { method: 'GET', pattern: 'console/studies/:id/trials' }, // recorded trials, not a live search (FR-396/397)
   { method: 'GET', pattern: 'runtime/hosts' }, // a list even with one host (FR-374/382)
   { method: 'GET', pattern: 'runtime/hosts/:host/devices' }, // per-device topology (FR-375)
   { method: 'GET', pattern: 'runtime/engines' }, // enriched EngineState (FR-376)

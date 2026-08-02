@@ -50,24 +50,22 @@ function Age({ ageMs, degraded }: { ageMs: number | null; degraded: string[] }) 
 
 // -- 1. is the platform healthy? ------------------------------------------------------------------
 
+const STATE_MARK: Record<string, string> = {
+  healthy: 'ok',
+  degraded: ' !',
+  critical: '!!',
+  unknown: ' ?',
+};
+
 /**
- * FR-369/370. `critical` is reserved for gateway/database loss; **agent loss is `degraded`**,
- * because the CPU modalities still serve and asserting otherwise overstates the outage.
+ * FR-369/370. The aggregate and the per-service panel, with `overall` and `mode` kept distinct:
+ * `overall` is how well the platform is working, `mode` is what kind of deployment it is. Both are
+ * server-resolved, so the interface never has to decide that a missing field means "fine".
  */
-function overallState(health: PlatformHealth | null): 'healthy' | 'degraded' | 'critical' | 'unknown' {
-  if (!health) return 'unknown';
-  if (!health.services.store) return 'critical';
-  return Object.values(health.services).every(Boolean) ? 'healthy' : 'degraded';
-}
-
-/** Which services are REQUIRED. A non-required service going down degrades and never criticals. */
-const REQUIRED: Record<string, boolean> = { store: true, registry: false, agent: false };
-
 function Health() {
   const { data, ageMs, degraded } = useLive<PlatformHealth>('console/health', CADENCE.health);
-  const overall = overallState(data);
   return (
-    <Panel title={`Platform — ${overall}`}>
+    <Panel title={`Platform — ${data?.overall ?? 'unknown'}`}>
       <div className="mb-2">
         <Age ageMs={ageMs} degraded={degraded} />
       </div>
@@ -80,18 +78,25 @@ function Health() {
           <p className="text-body-md text-ink">
             mode <span className="font-mono">{data.mode}</span>
           </p>
-          {/* The per-service detail panel FR-369 requires: one row per service, each labelled with
-              whether its loss is a degradation or a genuine stop. */}
+          {/* One row per service, each labelled with whether its loss is a degradation or a genuine
+              stop — the difference FR-370 exists to preserve. */}
           <ul className="mt-2 font-mono text-body-md">
-            {Object.entries(data.services).map(([name, up]) => (
-              <li key={name} className={up ? 'text-mute' : 'text-ink'}>
-                [{up ? 'ok' : '!!'}] {name}
-                {!up && (
+            {data.services.map((service) => (
+              <li
+                key={service.service}
+                className={service.state === 'healthy' ? 'text-mute' : 'text-ink'}
+              >
+                [{STATE_MARK[service.state] ?? ' ?'}] {service.service}
+                {service.state !== 'healthy' && (
                   <span className="text-ash">
                     {' '}
-                    — {REQUIRED[name] ? 'required: training and inference cannot proceed' : 'optional: degrades'}
+                    —{' '}
+                    {service.required
+                      ? 'required: training and inference cannot proceed'
+                      : 'optional: degrades'}
                   </span>
                 )}
+                {service.detail && <span className="text-ash"> · {service.detail}</span>}
               </li>
             ))}
           </ul>

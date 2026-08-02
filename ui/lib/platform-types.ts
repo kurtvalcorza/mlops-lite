@@ -33,15 +33,35 @@ export type StateConflict = {
 
 // -- health -------------------------------------------------------------------------------------
 
-/** Resolved from reachability, never from a configured string. */
-export type PlatformMode = 'full' | 'degraded' | 'minimal';
+/**
+ * What KIND of deployment this is — not how well it is working. Resolved from reachability, never
+ * from a configured string. A fixture-backed console and a GPU-backed one are both legitimately
+ * `healthy`; an operator needs to know which they are looking at before trusting any number.
+ */
+export type PlatformMode = 'offline' | 'live' | 'hardware';
+
+/** How well the platform is working. Deliberately separate from `PlatformMode`. */
+export type HealthState = 'healthy' | 'degraded' | 'critical' | 'unknown';
+
+/** `required: false` means impairment degrades and never criticals (FR-370). */
+export type ServiceHealth = {
+  service: 'gateway' | 'tracking' | 'database' | 'objectstore' | 'agent' | 'metrics' | 'gpu';
+  state: HealthState;
+  required: boolean;
+  detail: string | null;
+  observedAt: string;
+};
 
 export type PlatformHealth = {
+  overall: HealthState;
   mode: PlatformMode;
-  services: Record<string, boolean>;
+  services: ServiceHealth[];
+  /** The same reachability as a map, for one-line summaries. Derived once, server-side. */
+  reachable: Record<string, boolean>;
   gpu_free_gb: number | null;
   jobs_active: number | null;
   wedged: boolean | null;
+  observedAt: string;
 };
 
 /**
@@ -342,6 +362,54 @@ export type JobConflict = {
   conflict: boolean;
   suggestedAction: 'refresh' | 'inspect-journal' | 'reconcile';
   lastConsistentAt?: string | null;
+};
+
+// -- tracking -----------------------------------------------------------------------------------
+
+/** Tracking vocabulary preserved verbatim (FR-366): run, experiment, metric, param. */
+export type TrackingRun = {
+  run_id: string;
+  name: string;
+  experiment_id: string;
+  experiment_name: string;
+  status: string;
+  start_time: number | null;
+  end_time: number | null;
+  job_id: string | null;
+  metrics: Record<string, unknown>;
+  params: Record<string, unknown>;
+};
+
+export type Experiment = { experiment_id: string; name: string; lifecycle_stage: string };
+
+/**
+ * Recorded executions of a completed sequence of trainings. Every field is past tense on purpose:
+ * there is no persistent search service, and a present-tense view would invite an operator to wait
+ * for a next trial nobody scheduled (FR-397).
+ */
+export type StudyTrials = {
+  study_id: string;
+  status: string;
+  completed: number;
+  recorded: number;
+  metric: string | null;
+  direction: string | null;
+  best: { version: string; value: number; metric: string | null } | null;
+  trials: {
+    number: number;
+    value: number | null;
+    state: string;
+    params: Record<string, unknown>;
+    version: string | null;
+    /** A trial that produced no model FAILED. It is not scored worst — that would let a crash
+     * masquerade as a bad hyperparameter choice. */
+    failed: boolean;
+  }[];
+  history: { number: number; value: number }[];
+  axes: string[];
+  /** The trial count travels with every correlation: four trials and four hundred are not the
+   * same claim, and printing them identically would be the misleading part. */
+  importance: Record<string, { correlation: number; trials: number }>;
 };
 
 // -- overview -----------------------------------------------------------------------------------

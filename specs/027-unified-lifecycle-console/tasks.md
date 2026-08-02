@@ -280,16 +280,16 @@ execution timeline, a resource panel, and streaming logs.
   state (FR-392/SC-190).
 - [X] **T726** [US4] Implement `gateway/app/console/jobs.py` + `GET /console/jobs`,
   `GET /console/jobs/{id}` — the three-way join (FR-391), timeline (FR-393), and resource panel (FR-394).
-- [ ] **T727** [P] [US4] Implement `GET /console/runs`, `GET /console/experiments`,
+- [X] **T727** [P] [US4] Implement `GET /console/runs`, `GET /console/experiments`,
   `GET /console/studies/{id}/trials` — run and experiment **listing is net-new**; only
   `GET /runs/{id}` existed.
-- [ ] **T728** [US4] Build `ui/app/(console)/training/` — experiments, runs, studies, jobs. Each job cross-links to its
+- [X] **T728** [US4] Build `ui/app/(console)/training/` — experiments, runs, studies, jobs. Each job cross-links to its
   gateway record, agent execution, and tracking run in one interaction (SC-189). Logs
   reuse the existing `/runs/{id}/events` SSE; **no new streaming surface** (research R10). An
   interrupted stream is reported, never silently truncated (FR-395). Studies render parallel
   coordinates, history, importance, and trials (FR-396) **without implying a persistent search
   service exists** (FR-397).
-- [ ] **T729** [US4] Extend the allowlist with the five training entries.
+- [X] **T729** [US4] Extend the allowlist with the five training entries.
 
 ---
 
@@ -308,12 +308,12 @@ stopped in turn produces its documented degradation; fixture mode is badged.
   is not evidence of inconsistency and reporting it would train operators to ignore the banner.
 - [X] **T731** [US10] Derive the `Orphaned` state (gateway says running, agent has no process) and
   ensure it **always** carries a `StateConflict`, never stands alone (data-model §3).
-- [ ] **T732** [P] [US10] Build the conflict banner component — both source states with observation
+- [X] **T732** [P] [US10] Build the conflict banner component — both source states with observation
   times, last consistent timestamp, and refresh / inspect-journal actions (FR-427). `reconcile` is
   surfaced but inert in 027 (MVP 3 owns it).
-- [ ] **T733** [P] [US10] Build the persistent mode badge (`offline` / `live` / `hardware`) from
+- [X] **T733** [P] [US10] Build the persistent mode badge (`offline` / `live` / `hardware`) from
   `PlatformHealth.mode` (FR-429).
-- [ ] **T734** [US10] Extend `tests/test_ui_resilience.py` with the **full seven-service degradation
+- [X] **T734** [US10] Extend `tests/test_ui_resilience.py` with the **full seven-service degradation
   matrix** (data-model §11, SC-193). The load-bearing case: with the agent down, runtime reads `unknown` and
   **jobs are NOT reported stopped** (FR-428). An empty `devices: []` here is a **failing** assertion,
   not a pass.

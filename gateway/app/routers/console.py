@@ -14,7 +14,7 @@ import time
 from fastapi import APIRouter, Query
 
 from .. import console, runtime
-from ..console import catalog, overview, sources
+from ..console import catalog, overview, sources, studies
 from ..console import jobs as jobs_mod
 
 router = APIRouter()
@@ -24,43 +24,118 @@ router = APIRouter()
 
 @router.get("/console/health")
 async def console_health():
-    """`PlatformHealth`, including the resolved **mode**.
+    """`PlatformHealth` — the seven services, the aggregate, and the resolved deployment mode.
 
-    `mode` is resolved from **reachability**, never from a configured string (research R14). A
-    deployment that declares itself "full" while its agent is down would be describing its
-    intention rather than its state, and the console would then confidently show a degraded platform
-    as healthy.
+    **`overall` and `mode` are different questions** and were briefly conflated here during
+    implementation. `overall` is *how well is this platform working* (healthy / degraded / critical
+    / unknown, FR-369). `mode` is *what kind of deployment is this* (offline / live / hardware,
+    FR-429) — a fixture-backed console and a GPU-backed one are both legitimately `healthy`, and an
+    operator needs to know which one they are looking at before trusting any number on the screen.
+
+    Both are resolved from **reachability**, never from a configured string (research R14). A
+    deployment that declared itself `hardware` while its agent was down would be describing its
+    intention rather than its state.
     """
     projection = console.Projection()
 
     agent = await runtime.health()
-    agent_reachable = agent["data"] is not None
+    agent_data = agent["data"]
+    agent_reachable = agent_data is not None
     if agent_reachable:
-        projection.mark_observed("agent")
+        projection.mark_observed(runtime.AGENT)
     else:
-        projection.mark_degraded("agent")
+        projection.mark_degraded(runtime.AGENT)
 
-    store_ok = projection.source("store", _store_reachable, default=False)
-    registry_ok = projection.source("registry", _registry_reachable, default=False)
+    store_ok = projection.source("database", _store_reachable, default=False)
+    registry_ok = projection.source("tracking", _registry_reachable, default=False)
+    objectstore_ok = projection.source("objectstore", _objectstore_reachable, default=False)
+    metrics_ok = _metrics_reachable()
 
-    if agent_reachable and store_ok and registry_ok:
-        mode = "full"
-    elif store_ok or registry_ok:
-        mode = "degraded"
-    else:
-        mode = "minimal"
+    # A GPU is not a service the platform can lose independently of the agent — the agent is what
+    # measures it. `unknown` when the agent is down, never `critical`: we cannot see the GPU, which
+    # is not the same as the GPU being broken.
+    gpu_free = (agent_data or {}).get("gpu_free_gb") if agent_reachable else None
+    gpu_state = "unknown" if not agent_reachable else (
+        "healthy" if gpu_free is not None else "degraded")
+
+    services = [
+        # `gateway` is trivially up: this response IS the gateway answering. Listed anyway, because
+        # a health panel that silently omits the component it runs inside teaches the reader that
+        # the list is not the whole list.
+        _service("gateway", "healthy", required=True, detail="answering this request"),
+        _service("database", "healthy" if store_ok else "critical", required=True),
+        _service("tracking", "healthy" if registry_ok else "degraded", required=False),
+        _service("objectstore", "healthy" if objectstore_ok else "degraded", required=False),
+        # Agent loss is `degraded`, NOT `critical`: the CPU modalities (embeddings, tabular) still
+        # serve, and asserting otherwise overstates the outage (data-model §2/§11).
+        _service("agent", "healthy" if agent_reachable else "degraded", required=False),
+        _service("metrics", "healthy" if metrics_ok else "degraded", required=False),
+        _service("gpu", gpu_state, required=False),
+    ]
 
     return projection.envelope({
-        "mode": mode,
-        "services": {
-            "agent": agent_reachable,
-            "store": store_ok,
-            "registry": registry_ok,
-        },
-        "gpu_free_gb": (agent["data"] or {}).get("gpu_free_gb") if agent_reachable else None,
-        "jobs_active": (agent["data"] or {}).get("jobs_active") if agent_reachable else None,
-        "wedged": (agent["data"] or {}).get("wedged") if agent_reachable else None,
+        "overall": _overall(services),
+        "mode": _mode(agent_data, store_ok or registry_ok),
+        "services": services,
+        # Kept as a map alongside the list: the list is the contract (data-model §2), the map is
+        # what a one-line summary needs, and deriving one from the other in three components would
+        # be three chances to derive it differently.
+        "reachable": {"gateway": True, "database": store_ok, "tracking": registry_ok,
+                      "objectstore": objectstore_ok, "agent": agent_reachable,
+                      "metrics": metrics_ok},
+        "gpu_free_gb": gpu_free,
+        "jobs_active": (agent_data or {}).get("jobs_active") if agent_reachable else None,
+        "wedged": (agent_data or {}).get("wedged") if agent_reachable else None,
+        "observedAt": console.utcnow(),
     })
+
+
+def _service(name, state, *, required, detail=None):
+    return {"service": name, "state": state, "required": required, "detail": detail,
+            "observedAt": console.utcnow()}
+
+
+def _overall(services):
+    """FR-369/370. `critical` is reserved for a **required** service being down — concretely the
+    gateway or the database, without which training and inference cannot operate safely.
+
+    `unknown` is not produced here: this response is the gateway answering, so at least one service
+    is genuinely observed. A console that cannot reach the gateway at all renders `unknown` from the
+    absence of a response, which is the only honest place for that value to come from.
+    """
+    if any(s["required"] and s["state"] == "critical" for s in services):
+        return "critical"
+    if any(s["state"] in ("degraded", "critical", "unknown") for s in services):
+        return "degraded"
+    return "healthy"
+
+
+def _mode(agent_data, any_backend):
+    """FR-429: `offline` / `live` / `hardware`, resolved from what is actually reachable.
+
+    `hardware` requires the agent to be reporting a GPU reading, not merely to be up: an agent
+    running on a host with no usable device is a `live` deployment, and badging it `hardware` would
+    tell an operator that GPU numbers on screen mean something when they do not.
+    """
+    if agent_data is not None and agent_data.get("gpu_free_gb") is not None:
+        return "hardware"
+    return "live" if (agent_data is not None or any_backend) else "offline"
+
+
+def _objectstore_reachable() -> bool:
+    from platformlib import store
+    store.s3_client().list_buckets()
+    return True
+
+
+def _metrics_reachable() -> bool:
+    """The gateway's own Prometheus registry, which is in-process and therefore always readable.
+
+    Reported rather than assumed so the seven-service matrix has an entry for it. A separate metrics
+    *store* is not part of this deployment; when one is added, this becomes a real probe and nothing
+    downstream changes.
+    """
+    return True
 
 
 @router.get("/console/capabilities")
@@ -381,6 +456,22 @@ async def console_runs(limit: int = Query(100, ge=1, le=500)):
 async def console_experiments():
     projection = console.Projection()
     return projection.envelope(await projection.read("tracking", sources.experiments))
+
+
+@router.get("/console/studies/{study_id}/trials")
+async def console_study_trials(study_id: str):
+    """The trial table, objective history, and parameter importance (FR-396).
+
+    Reported as **recorded executions**, never as the state of a running search (FR-397). There is
+    no persistent search service on this platform: a study is a sequence of trainings that already
+    happened, and a view implying an optimizer is still thinking would invite an operator to wait
+    for a next trial that nobody scheduled.
+    """
+    projection = console.Projection()
+    study = await projection.read("trainer", lambda: sources.study(study_id))
+    if study is None:
+        return projection.envelope(None)
+    return projection.envelope(studies.trial_view(study))
 
 
 async def _nothing():

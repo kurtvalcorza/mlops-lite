@@ -226,38 +226,108 @@ def test_runtime_routes_require_the_operator_key(client, agent):
 
 # -- T698: health and capabilities ----------------------------------------------------------------------
 
-def test_mode_is_resolved_from_reachability_never_from_configuration(client, agent, monkeypatch):
-    """A deployment declaring itself 'full' while its agent is down describes its intention, not its
-    state (research R14)."""
+def _all_backends_up(monkeypatch):
     from gateway.app.routers import console as console_router
 
     monkeypatch.setattr(console_router, "_store_reachable", lambda: True)
     monkeypatch.setattr(console_router, "_registry_reachable", lambda: True)
-    assert client.get("/console/health", headers=_auth()).json()["data"]["mode"] == "full"
+    monkeypatch.setattr(console_router, "_objectstore_reachable", lambda: True)
+
+
+def _state_of(body, service):
+    return next(s["state"] for s in body["data"]["services"] if s["service"] == service)
+
+
+def test_mode_and_overall_are_different_questions(client, agent, monkeypatch):
+    """These were conflated in the first cut of this route, which is why the test says so out loud.
+
+    `mode` is what KIND of deployment this is (offline / live / hardware). `overall` is how well it
+    is working. A fixture-backed console can be perfectly healthy, and badging it `hardware` would
+    tell an operator that the GPU numbers on screen mean something when they do not.
+    """
+    _all_backends_up(monkeypatch)
+    data = client.get("/console/health", headers=_auth()).json()["data"]
+    # The fake agent reports `gpu_free_gb`, so this deployment resolves to `hardware` — and is
+    # simultaneously `healthy`. The two words answer different questions.
+    assert data["mode"] == "hardware" and data["overall"] == "healthy"
+
+
+def test_mode_is_resolved_from_reachability_never_from_configuration(client, agent, monkeypatch):
+    """A deployment declaring itself `hardware` while its agent is down describes its intention,
+    not its state (research R14)."""
+    _all_backends_up(monkeypatch)
+    assert client.get("/console/health", headers=_auth()).json()["data"]["mode"] == "hardware"
 
     agent.up = False
     body = client.get("/console/health", headers=_auth()).json()
-    assert body["data"]["mode"] == "degraded"
-    assert body["data"]["services"]["agent"] is False
+    assert body["data"]["mode"] == "live", "no agent means no GPU reading to badge"
+    assert _state_of(body, "agent") == "degraded"
     assert "agent" in body["degraded"]
 
 
-def test_mode_is_minimal_when_nothing_but_the_gateway_answers(client, agent, monkeypatch):
+def test_mode_is_offline_when_nothing_but_the_gateway_answers(client, agent, monkeypatch):
     from gateway.app.routers import console as console_router
 
     agent.up = False
     monkeypatch.setattr(console_router, "_store_reachable", _boom)
     monkeypatch.setattr(console_router, "_registry_reachable", _boom)
+    monkeypatch.setattr(console_router, "_objectstore_reachable", _boom)
     body = client.get("/console/health", headers=_auth()).json()
-    assert body["data"]["mode"] == "minimal"
-    assert set(body["degraded"]) == {"agent", "store", "registry"}
+    assert body["data"]["mode"] == "offline"
+    assert set(body["degraded"]) == {"agent", "database", "tracking", "objectstore"}
+
+
+def test_agent_loss_degrades_and_never_criticals(client, agent, monkeypatch):
+    """data-model §2/§11: the CPU modalities (embeddings, tabular) still serve, so calling agent
+    loss `critical` would overstate an outage the operator can still work through."""
+    _all_backends_up(monkeypatch)
+    agent.up = False
+    body = client.get("/console/health", headers=_auth()).json()
+    assert body["data"]["overall"] == "degraded", "not critical"
+    assert _state_of(body, "agent") == "degraded"
+
+
+def test_database_loss_is_critical(client, agent, monkeypatch):
+    """The one required service besides the gateway. Without it, training and inference cannot
+    operate safely — which is the definition FR-370 reserves `critical` for."""
+    from gateway.app.routers import console as console_router
+
+    monkeypatch.setattr(console_router, "_store_reachable", _boom)
+    monkeypatch.setattr(console_router, "_registry_reachable", lambda: True)
+    monkeypatch.setattr(console_router, "_objectstore_reachable", lambda: True)
+    body = client.get("/console/health", headers=_auth()).json()
+    assert body["data"]["overall"] == "critical"
+    assert _state_of(body, "database") == "critical"
+
+
+def test_the_gpu_is_unknown_rather_than_critical_when_the_agent_is_down(client, agent, monkeypatch):
+    """We cannot see the GPU, which is not the same as the GPU being broken — and the agent is the
+    only thing that measures it."""
+    _all_backends_up(monkeypatch)
+    agent.up = False
+    body = client.get("/console/health", headers=_auth()).json()
+    assert _state_of(body, "gpu") == "unknown"
+
+
+def test_every_service_in_the_degradation_matrix_is_reported(client, agent, monkeypatch):
+    """data-model §11 drives both `required` and the resilience tests; a service missing from this
+    list is a row of the matrix nothing can assert against."""
+    _all_backends_up(monkeypatch)
+    body = client.get("/console/health", headers=_auth()).json()
+    assert {s["service"] for s in body["data"]["services"]} == {
+        "gateway", "tracking", "database", "objectstore", "agent", "metrics", "gpu"}
+
+
+def test_only_the_gateway_and_database_are_required(client, agent, monkeypatch):
+    """FR-370: optional-service impairment degrades and never criticals."""
+    _all_backends_up(monkeypatch)
+    body = client.get("/console/health", headers=_auth()).json()
+    required = {s["service"] for s in body["data"]["services"] if s["required"]}
+    assert required == {"gateway", "database"}
 
 
 def test_health_nulls_agent_derived_fields_when_the_agent_is_down(client, agent, monkeypatch):
-    from gateway.app.routers import console as console_router
-
-    monkeypatch.setattr(console_router, "_store_reachable", lambda: True)
-    monkeypatch.setattr(console_router, "_registry_reachable", lambda: True)
+    _all_backends_up(monkeypatch)
     agent.up = False
     data = client.get("/console/health", headers=_auth()).json()["data"]
     assert data["gpu_free_gb"] is None and data["jobs_active"] is None
@@ -525,24 +595,64 @@ async def test_an_abandoned_source_read_runs_on_a_daemon_thread():
 
 
 @pytest.mark.anyio
-async def test_reads_past_the_inflight_cap_are_refused_rather_than_queued():
-    """The console polls. Queueing behind a permanently hung backend converts one slow source into
-    a slow console, and grows one abandoned thread per poll."""
+async def test_a_repeat_of_an_outstanding_read_is_refused_rather_than_starting_a_second_thread():
+    """The console polls, and abandoned reads do NOT drain quickly — boto3 and the MLflow client
+    retry against an unresolvable host for minutes. Without single flight, each poll starts another
+    stuck thread against the same sick backend and the count grows with the poll rate.
+
+    This replaced a global in-flight cap, which the same fact defeated: the cap filled with stuck
+    threads within a minute and then refused every read, including the healthy ones.
+    """
+    import threading
+    import time
+
+    release = threading.Event()
+    projection = console.Projection()
+    try:
+        assert await projection.read("store", release.wait, timeout_s=0.05) is None
+        started = time.monotonic()
+        # Same source, same callable — already outstanding, so refused immediately.
+        assert await projection.read("store", release.wait, timeout_s=5) is None
+        assert time.monotonic() - started < 1.0, "the repeat waited instead of refusing"
+        assert projection.degraded == ["store"]
+    finally:
+        release.set()
+
+
+@pytest.mark.anyio
+async def test_a_different_read_of_the_same_source_is_not_blocked():
+    """Keying on the source alone would make the job listing and the unlabeled count block each
+    other even though they are separate queries against a healthy database."""
     import threading
 
     release = threading.Event()
     projection = console.Projection()
     try:
-        for _ in range(console.MAX_INFLIGHT):
-            await projection.read("store", release.wait, timeout_s=0.02)
-        # The cap is now full of abandoned reads; the next one must fail fast, not wait.
-        import time
-        started = time.monotonic()
-        assert await projection.read("registry", lambda: "fresh", timeout_s=5) is None
-        assert time.monotonic() - started < 1.0, "a capped read waited instead of refusing"
-        assert "registry" in projection.degraded
+        await projection.read("store", release.wait, timeout_s=0.05)
+        assert await projection.read("store", lambda: "other query", timeout_s=5) == "other query"
+        assert "store" in projection.observed, "the second read genuinely answered"
     finally:
         release.set()
+
+
+@pytest.mark.anyio
+async def test_a_recovered_source_frees_its_own_slot():
+    """A slot lost to a sick backend comes back when that backend answers — it does not wait on
+    anything else, which is what a shared cap would have made it do."""
+    import asyncio
+    import threading
+
+    release = threading.Event()
+    projection = console.Projection()
+    await projection.read("registry", release.wait, timeout_s=0.05)
+    assert await projection.read("registry", release.wait, timeout_s=0.05) is None
+
+    release.set()
+    for _ in range(100):
+        if console._read_key("registry", release.wait) not in console._inflight:
+            break
+        await asyncio.sleep(0.01)
+    assert await projection.read("registry", release.wait, timeout_s=1) is True
 
 
 async def _sleep():

@@ -90,6 +90,63 @@ def _check_not_ready_branch():
                 proc.terminate()
 
 
+def _check_live_degradation_matrix() -> int:
+    """The matrix's live half (027 T734).
+
+    Three claims, each checked against whatever the deployment's current state happens to be:
+
+      1. `/console/health` reports all seven services, so no row of the matrix is unobservable.
+      2. Every degraded source is NAMED. A projection that quietly drops a source is worse than one
+         that fails, because the missing data looks like absent data.
+      3. A source named in `degraded` contributes `null`, **never** `[]` or `0`. This is the whole
+         matrix in one assertion: an empty device list during an agent outage reads as "the GPU is
+         idle", which is false rather than merely incomplete.
+    """
+    failures = 0
+
+    s, body = _get(f"{UI}/api/gw/console/health")
+    try:
+        health = json.loads(body)["data"]
+    except Exception:
+        print(f"[FAIL] /console/health unreadable -> {s}")
+        return 1
+
+    expected = {"gateway", "tracking", "database", "objectstore", "agent", "metrics", "gpu"}
+    reported = {svc["service"] for svc in health.get("services", [])}
+    complete = reported == expected
+    print(f"[{'OK' if complete else 'FAIL'}] health reports all seven services "
+          f"(missing: {sorted(expected - reported) or 'none'})")
+    failures += 0 if complete else 1
+
+    # `overall` and `mode` are different questions and must both be present — a console that shows
+    # one in place of the other tells an operator a fixture deployment is a hardware one.
+    both = health.get("overall") in ("healthy", "degraded", "critical", "unknown") and \
+        health.get("mode") in ("offline", "live", "hardware")
+    print(f"[{'OK' if both else 'FAIL'}] overall={health.get('overall')} and "
+          f"mode={health.get('mode')} are both resolved")
+    failures += 0 if both else 1
+
+    for route in ("runtime/hosts", "runtime/admission", "console/summary", "console/jobs"):
+        s, body = _get(f"{UI}/api/gw/{route}")
+        if s != 200:
+            print(f"[FAIL] /api/gw/{route} -> {s} (a degraded source must not fail the request)")
+            failures += 1
+            continue
+        try:
+            envelope = json.loads(body)
+        except Exception:
+            print(f"[FAIL] /api/gw/{route} returned an unparseable envelope")
+            failures += 1
+            continue
+        # The load-bearing assertion: degraded means null, not empty.
+        lying = envelope["degraded"] and envelope["data"] in ([], {}, 0)
+        print(f"[{'FAIL' if lying else 'OK'}] {route}: degraded={envelope['degraded']} "
+              f"data={'null' if envelope['data'] is None else 'present'}")
+        failures += 1 if lying else 0
+
+    return failures
+
+
 def main() -> int:
     s, _ = _get(f"{UI}/healthz", timeout=3)
     if s != 200:
@@ -109,6 +166,13 @@ def main() -> int:
 
     # 3. Readiness is distinct from liveness — proven by the not-ready branch (dead gateway).
     failures += _check_not_ready_branch()
+
+    # 3b. 027 T734 (data-model §11, SC-193) — the degradation matrix, against a LIVE console.
+    #     Whatever is currently down here is the row being exercised; the point is that whatever is
+    #     up keeps answering and whatever is down reports `null` rather than a plausible zero.
+    #     `tests/test_console_degradation.py` drives every row offline; this half proves the same
+    #     shape survives the BFF and a real gateway.
+    failures += _check_live_degradation_matrix()
 
     # 4. ui daemon restart_count stays stable (orphan fix holds — no crash-loop).
     rc1 = _ui_restart_count()
