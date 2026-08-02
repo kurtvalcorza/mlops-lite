@@ -30,12 +30,27 @@ _VERDICT_TO_OUTCOME = {"pass": "passed", "blocked": "failed", "warn": "warning"}
 DRIFT_STATES = ("stable", "warning", "significant")
 
 
+def dataset_ref_from_tags(tags) -> str:
+    """`datasetRef` from a version's lineage tags, or `None`.
+
+    The per-version dataset lineage lives in the `dataset_name`/`dataset_version` tags written by
+    `training/flows/lineage.py` — `read_eval`'s record never carries it. Reading it from anywhere
+    else produced a `datasetRef` that was always null while the data sat one tag away.
+    """
+    tags = tags or {}
+    name, version = tags.get("dataset_name"), tags.get("dataset_version")
+    if not name:
+        return None
+    return f"{name}:{version}" if version else str(name)
+
+
 def evaluation_result(*, name, version, evaluation=None, verdict=None, modality=None,
-                      source_job_id=None, created_at=None):
+                      source_job_id=None, created_at=None, dataset_ref=None):
     """One `EvaluationResult` (FR-398/400/401).
 
     `evaluation` is `read_eval`'s record (or `None` for an unevaluated version); `verdict` is
-    `compute_verdict`'s output (or `None` when no gate has been run).
+    `compute_verdict`'s output (or `None` when no gate has been run). `dataset_ref` comes from the
+    version's lineage tags via `dataset_ref_from_tags` — see there for why.
     """
     metrics = []
     if evaluation and evaluation.get("value") is not None:
@@ -53,7 +68,7 @@ def evaluation_result(*, name, version, evaluation=None, verdict=None, modality=
         "modelName": name,
         "version": str(version),
         "modality": modality or (evaluation or {}).get("modality"),
-        "datasetRef": (evaluation or {}).get("dataset"),
+        "datasetRef": dataset_ref,
         "benchmarkName": (evaluation or {}).get("benchmark"),
         "benchmarkDigest": (evaluation or {}).get("benchmark_hash"),
         # Never coerced into a common metric (FR-399): the list carries whatever this modality

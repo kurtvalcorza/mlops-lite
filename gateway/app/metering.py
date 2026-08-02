@@ -206,6 +206,37 @@ def release(op_id: str) -> None:
         logger.warning("release for %s deferred to the outbox: %s", op_id, e)
 
 
+def reservation_ttl_s() -> float:
+    """How long an inference reservation may sit `reserved` before the sweep reclaims it.
+
+    Must stay comfortably above the longest plausible request plus the longest plausible
+    deferred-settlement delay: a genuine settle arriving after the sweep released its reservation
+    is dropped (by design — see `storeimpl.metering.settle`), so a too-short TTL trades a stuck
+    quota for lost charges. An hour is ~120× the default per-request estimate.
+    """
+    return float(os.getenv("BROKER_INFERENCE_RESERVATION_TTL_S", "3600"))
+
+
+def sweep_orphaned_reservations() -> dict:
+    """Release inference reservations stuck `reserved` past the TTL (startup + periodic).
+
+    The leak this reaps: a client that disconnects before Starlette ever pulls the response body
+    leaves the stream generator unstarted, so neither the generator's `finally` nor `_Meter` runs
+    a settle or release. Best-effort like every settlement-direction write — a failed sweep only
+    means the quota stays over-reserved until the next tick.
+    """
+    try:
+        swept = _store.sweep_stale_reservations(conn(), older_than_s=reservation_ttl_s())
+    except Exception as e:  # noqa: BLE001 — store blip: the next tick retries
+        invalidate_conn()
+        logger.warning("orphaned-reservation sweep failed, will retry: %s", e)
+        return {"swept": 0, "failed": True}
+    if swept:
+        logger.warning("released %d orphaned inference reservation(s) older than %.0fs: %s",
+                       len(swept), reservation_ttl_s(), ", ".join(swept[:10]))
+    return {"swept": len(swept), "failed": False}
+
+
 def replay_outbox() -> dict:
     """Replay every unsettled WAL entry (gateway startup, T629).
 

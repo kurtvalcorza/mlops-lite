@@ -170,6 +170,16 @@ def test_terminal_jobs_sort_below_work_still_in_flight():
     assert [row["id"] for row in rows] == ["live", "old"]
 
 
+def test_the_model_id_reads_the_key_the_job_record_actually_carries():
+    """`training/run_flow.py` writes the completed job's model under `model`, journaled verbatim
+    and spread back to the top level by `_job_row_to_record`. Nothing on that path ever emits
+    `model_name`, so reading it blanked every completed fine-tune's modelId — silently, because
+    null legitimately renders as unknown on this surface."""
+    row = jobs_mod.platform_job(agent_job={"job_id": "j", "kind": "finetune",
+                                           "state": "succeeded", "model": "distilbert-lora"})
+    assert row["modelId"] == "distilbert-lora"
+
+
 def test_the_job_type_is_derived_from_what_it_was_dispatched_as():
     assert jobs_mod.platform_job(agent_job={"job_id": "a", "kind": "finetune"})["type"] == "training"
     assert jobs_mod.platform_job(agent_job={"job_id": "b", "kind": "hpo"})["type"] == "hpo"

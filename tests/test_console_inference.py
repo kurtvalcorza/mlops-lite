@@ -78,6 +78,21 @@ def test_a_scored_version_with_no_gate_run_is_incomplete_not_not_evaluated():
     assert result["gate"]["outcome"] == "incomplete"
 
 
+def test_dataset_lineage_comes_from_the_version_tags_not_the_eval_record():
+    """`read_eval` never emits a dataset key; the per-version lineage lives in the
+    `dataset_name`/`dataset_version` tags written by `training/flows/lineage.py`. Reading anywhere
+    else produced a `datasetRef` that was always null — the field-contract bug class again."""
+    ref = evaluations_mod.dataset_ref_from_tags(
+        {"dataset_name": "squadette", "dataset_version": "3"})
+    assert ref == "squadette:3"
+    assert evaluations_mod.dataset_ref_from_tags({"dataset_name": "squadette"}) == "squadette"
+    assert evaluations_mod.dataset_ref_from_tags({}) is None
+    assert evaluations_mod.dataset_ref_from_tags(None) is None
+
+    result = evaluations_mod.evaluation_result(name="m", version="1", dataset_ref=ref)
+    assert result["datasetRef"] == "squadette:3"
+
+
 def test_a_gate_failure_carries_the_rule_the_observed_value_and_the_incumbent():
     """SC-191: all of it reachable without leaving the view. A verdict without its evidence sends
     the operator to the tracking UI to reconstruct why, which is the round trip this removes."""
@@ -347,8 +362,9 @@ def test_every_produced_status_is_in_the_declared_vocabulary():
 
 
 def test_the_queue_names_which_signals_this_deployment_can_actually_produce():
-    """The 001 baseline records no per-prediction confidence, sampling flag, drift attribution, or
-    manual flag, so five of FR-411's seven signals are unreachable here.
+    """The 001 baseline records no per-prediction confidence, sampling flag, drift attribution,
+    manual flag, or policy result — `policy_result` has no producer anywhere in the repository —
+    so six of FR-411's seven signals are unreachable here.
 
     Shipping seven branches that quietly never fire would present a ranking function as a working
     prioritizer while it only ever sorts by one thing — the same class of claim as a 'queue' view
@@ -357,7 +373,7 @@ def test_the_queue_names_which_signals_this_deployment_can_actually_produce():
     arrives.
     """
     assert set(predictions_mod.DERIVABLE_SIGNALS) <= set(predictions_mod.PRIORITY_SIGNALS)
-    assert set(predictions_mod.DERIVABLE_SIGNALS) == {"policy-flagged", "missing-label"}
+    assert set(predictions_mod.DERIVABLE_SIGNALS) == {"missing-label"}
 
 
 def test_only_the_derivable_signals_fire_from_a_real_capture_row():

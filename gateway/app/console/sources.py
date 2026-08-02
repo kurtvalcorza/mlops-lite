@@ -232,6 +232,19 @@ def evaluation_for(name: str, version: str):
     return evaluation.read_eval(registry._client(), name, str(version))
 
 
+def version_record(name: str, version: str):
+    """One registry version dict (the same shape `model_versions()` flattens), or `None`.
+
+    Exists so a single-version route can read the version's tags — dataset lineage lives there —
+    without paying for the every-model walk `model_versions()` does.
+    """
+    from .. import registry
+    for record in registry.list_versions(name):
+        if record.get("version") == str(version):
+            return record
+    return None
+
+
 def gate_verdict(name: str, version: str):
     """The gate's own verdict for a candidate against the current champion.
 

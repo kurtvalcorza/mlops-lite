@@ -519,7 +519,8 @@ async def console_evaluations(model: str = None, limit: int = Query(100, ge=1, l
             lambda v=version: sources.evaluation_for(v["name"], v["version"]))
         rows.append(evaluations.evaluation_result(
             name=version.get("name"), version=version.get("version"), evaluation=record,
-            modality=(version.get("tags") or {}).get("task")))
+            modality=(version.get("tags") or {}).get("task"),
+            dataset_ref=evaluations.dataset_ref_from_tags(version.get("tags"))))
     return projection.envelope(rows)
 
 
@@ -531,8 +532,10 @@ async def console_evaluation(name: str, version: str):
     projection = console.Projection()
     record = await projection.read("registry", lambda: sources.evaluation_for(name, version))
     verdict = await projection.read("registry", lambda: sources.gate_verdict(name, version))
+    vrecord = await projection.read("registry", lambda: sources.version_record(name, version))
     return projection.envelope(evaluations.evaluation_result(
-        name=name, version=version, evaluation=record, verdict=verdict))
+        name=name, version=version, evaluation=record, verdict=verdict,
+        dataset_ref=evaluations.dataset_ref_from_tags((vrecord or {}).get("tags"))))
 
 
 @router.get("/console/gates")

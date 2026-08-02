@@ -181,7 +181,10 @@ def platform_job(*, gateway_job=None, agent_job=None, tracking_run=None, observe
         "trackingRunState": tracking_state,
         "runId": source.get("run_id") or (tracking_run or {}).get("run_id"),
         "studyId": source.get("study_id"),
-        "modelId": source.get("model_name"),
+        # `model`, not `model_name`: the completed-job record's key is written by
+        # `training/run_flow.py` (`out["model"]`), journaled verbatim, and spread back to the top
+        # level by `_job_row_to_record`. Nothing on this path ever emits `model_name`.
+        "modelId": source.get("model"),
         "assignedHost": source.get("host") or ("local" if agent_job else None),
         "assignedDevice": source.get("device_index"),
         "admissionReason": source.get("reason") if state == "Rejected" else None,

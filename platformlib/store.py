@@ -111,6 +111,7 @@ from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
     release,
     reserve,
     settle,
+    sweep_stale_reservations,
 )
 
 # -- policy + pending + status repository (storeimpl/policies) --------------------------------------

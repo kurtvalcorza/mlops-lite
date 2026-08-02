@@ -88,15 +88,18 @@ PRIORITY_SIGNALS = ("policy-flagged", "low-confidence", "drift-contributor", "sa
 #: **What this deployment can actually produce today.** The `predictions` and `capture_index` tables
 #: (001 baseline) record `prediction_id, model_name, version, modality, served_at, streamed,
 #: payload_ref` and `input_ref, captured_at` — there is no per-prediction confidence, sampling flag,
-#: drift attribution, or manual flag anywhere in the schema.
+#: drift attribution, manual flag, or policy result anywhere in the schema (`policy_result` has no
+#: producer in the repository at all; `_signals_for` reads it so the signal lights up the day a
+#: column arrives, but advertising it as derivable today would be the exact dead-condition lie this
+#: block exists to prevent).
 #:
-#: So five of the seven signals above are **unreachable on this platform**, and that is stated here
+#: So six of the seven signals above are **unreachable on this platform**, and that is stated here
 #: rather than left as branches that quietly never fire. A ranking function full of dead conditions
 #: reads as a working prioritizer; the surface reports this set so it can say what it is actually
 #: ranking by, which is the same rule as the admission "queue" that never queues. `PRIORITY_SIGNALS`
 #: stays whole because it is the contract's vocabulary — when a column arrives, the signal lights up
 #: and this set is what changes.
-DERIVABLE_SIGNALS = ("policy-flagged", "missing-label")
+DERIVABLE_SIGNALS = ("missing-label",)
 
 _SIGNAL_WEIGHT = {signal: index for index, signal in enumerate(PRIORITY_SIGNALS)}
 

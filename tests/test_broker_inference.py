@@ -444,6 +444,87 @@ def test_killing_the_process_mid_settle_settles_exactly_once_on_restart(env, mon
         assert len([r for r in store.list_ledger(c) if r["ref_id"] == "op-crash"]) == 1
 
 
+# -- the orphaned-reservation sweep -----------------------------------------------------------------
+# A client that disconnects before Starlette ever pulls the response body leaves the stream
+# generator unstarted: no frame exists for `GeneratorExit` to reach, so no `finally` runs, and the
+# reservation sits `reserved` holding its estimate against the window forever. Nothing inside a
+# request can release it — the sweep is the only path back.
+
+def test_an_orphaned_inference_reservation_is_swept_and_its_quota_restored(conn):
+    tenant = store.create_tenant(conn, "orphaned")
+    store.set_quota(conn, tenant["id"], "daily", 100)
+    store.reserve(conn, "op-orphan", tenant["id"], 30.0)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                    "WHERE op_id = 'op-orphan'")
+
+    swept = store.sweep_stale_reservations(conn, older_than_s=3600)
+
+    assert "op-orphan" in swept
+    assert store.get_reservation(conn, "op-orphan")["state"] == "released"
+    assert store.consumption(conn, tenant["id"])["outstanding_gpu_seconds"] == 0.0, \
+        "the orphan's estimate must be refunded to the window"
+    assert not [r for r in store.list_ledger(conn) if r["ref_id"] == "op-orphan"], \
+        "work that never happened must not be charged"
+
+
+def test_the_sweep_spares_young_inference_and_long_running_job_reservations(conn):
+    """A job legitimately stays `reserved` for as long as it runs; sweeping it would refund quota
+    for GPU time still being spent, then void the real settle when it arrived."""
+    tenant = store.create_tenant(conn, "spared")
+    store.reserve(conn, "op-young", tenant["id"], 30.0)
+    store.reserve(conn, "op-job", tenant["id"], 600.0, kind="job")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                    "WHERE op_id = 'op-job'")
+
+    swept = store.sweep_stale_reservations(conn, older_than_s=3600)
+
+    assert swept == [], f"nothing eligible, yet swept: {swept}"
+    assert store.get_reservation(conn, "op-young")["state"] == "reserved"
+    assert store.get_reservation(conn, "op-job")["state"] == "reserved"
+
+
+def test_a_settle_arriving_after_the_sweep_is_dropped_not_a_phantom_charge(conn):
+    """The WAL replay can deliver a settle after the sweep released its reservation. Recording it
+    anyway would insert a ledger row against a reservation whose `settled_gpu_seconds` stays 0 —
+    breaking `reconciliation()`'s identity permanently, since the ledger is append-only."""
+    tenant = store.create_tenant(conn, "late")
+    store.reserve(conn, "op-late", tenant["id"], 30.0)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                    "WHERE op_id = 'op-late'")
+    assert store.sweep_stale_reservations(conn, older_than_s=3600) == ["op-late"]
+
+    settled = store.settle(conn, "op-late", 4.5)
+
+    assert settled["state"] == "released", "a late settle must not resurrect the reservation"
+    assert not [r for r in store.list_ledger(conn) if r["ref_id"] == "op-late"]
+    assert store.reconciliation(conn)["reconciled"] is True
+
+
+def test_the_gateway_sweep_respects_the_ttl(env, monkeypatch):
+    """The TTL is the safety margin: it must exceed any plausible deferred-settlement delay, so the
+    gateway leg only reaps what genuinely has nothing coming."""
+    from gateway.app import metering
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "sweeper")
+        store.reserve(c, "op-stuck", tenant["id"], 30.0)
+        with c.cursor() as cur:
+            cur.execute("UPDATE usage_reservation SET created_at = now() - interval '30 minutes' "
+                        "WHERE op_id = 'op-stuck'")
+
+    monkeypatch.setenv("BROKER_INFERENCE_RESERVATION_TTL_S", "3600")
+    assert metering.sweep_orphaned_reservations() == {"swept": 0, "failed": False}, \
+        "younger than the TTL — must be left alone"
+
+    monkeypatch.setenv("BROKER_INFERENCE_RESERVATION_TTL_S", "60")
+    assert metering.sweep_orphaned_reservations()["swept"] == 1
+    with env.connect() as c:
+        assert store.get_reservation(c, "op-stuck")["state"] == "released"
+
+
 def test_a_failed_request_still_charges_what_the_gpu_spent(client, conn, monkeypatch):
     """Refunding a failed-after-load request in full would let a tenant burn the GPU for free."""
     from gateway.app.routers import broker_openai

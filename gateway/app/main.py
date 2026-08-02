@@ -209,6 +209,57 @@ def _broker_startup():
         metering.replay_outbox()
     except Exception as e:  # noqa: BLE001
         _log.warning("broker: settlement outbox replay failed, will retry on next settle: %s", e)
+    try:
+        # AFTER the replay, so a deferred settle lands before the sweep judges its reservation
+        # abandoned. Reaps inference reservations orphaned by a client that disconnected before the
+        # stream generator ever started — nothing inside a request can release those, because no
+        # frame of the generator ever existed for a `finally` to run in.
+        metering.sweep_orphaned_reservations()
+    except Exception as e:  # noqa: BLE001
+        _log.warning("broker: orphaned-reservation sweep failed, will retry on the next tick: %s", e)
+
+
+# The periodic leg of the same sweep (the startup leg runs in `_broker_startup` above). Without it a
+# long-lived gateway reclaims orphans only at its next restart, while each one holds its full
+# estimate against the tenant's window indefinitely.
+_resv_sweep_stop = None
+_resv_sweep_task = None  # strong reference — a bare ensure_future task can be GC'd mid-flight
+
+
+@app.on_event("startup")
+async def _start_reservation_sweeper():
+    global _resv_sweep_stop, _resv_sweep_task
+    if os.getenv("BROKER_RESERVATION_SWEEP_ENABLED", "1").lower() in ("0", "false", "no"):
+        return
+    import asyncio
+
+    from fastapi.concurrency import run_in_threadpool
+
+    from . import metering
+
+    interval = float(os.getenv("BROKER_RESERVATION_SWEEP_INTERVAL_S", "300"))
+    _resv_sweep_stop = asyncio.Event()
+
+    async def loop():
+        # Wait first: the startup leg has just swept, so an immediate pass would be a no-op.
+        while not _resv_sweep_stop.is_set():
+            try:
+                await asyncio.wait_for(_resv_sweep_stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            if _resv_sweep_stop.is_set():
+                return
+            # `sweep_orphaned_reservations` contains its own failures; nothing here can raise past
+            # the tick.
+            await run_in_threadpool(metering.sweep_orphaned_reservations)
+
+    _resv_sweep_task = asyncio.ensure_future(loop())
+
+
+@app.on_event("shutdown")
+async def _stop_reservation_sweeper():
+    if _resv_sweep_stop is not None:
+        _resv_sweep_stop.set()
 
 
 # --- 023 US5 (T524, FR-309..311): activation reconciliation from gateway lifespan -------------------

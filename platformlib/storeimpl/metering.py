@@ -189,6 +189,13 @@ def settle(conn, op_id: str, actual_gpu_seconds: float) -> dict:
     reservation = get_reservation(conn, op_id)
     if reservation is None:
         raise StoreError(f"no reservation {op_id!r} to settle")
+    if reservation["state"] != "reserved":
+        # Already settled (idempotent replay) — or released, by an explicit refund or the stale
+        # sweep. Inserting the ledger row anyway would charge against a reservation whose
+        # `settled_gpu_seconds` is pinned at 0/its old value, breaking `reconciliation()`'s
+        # identity permanently with no correction path (the ledger is append-only and uniquely
+        # keyed). The kill-mid-settle replay is unaffected: that crash leaves the row `reserved`.
+        return reservation
 
     with conn.transaction():
         with conn.cursor() as cur:
@@ -214,6 +221,35 @@ def release(conn, op_id: str) -> dict:
         cur.execute("UPDATE usage_reservation SET state = 'released', settled_at = now(), "
                     "settled_gpu_seconds = 0 WHERE op_id = %s AND state = 'reserved'", (op_id,))
     return get_reservation(conn, op_id)
+
+
+def sweep_stale_reservations(conn, *, older_than_s: float, kind: str = "inference") -> list:
+    """Release reservations stuck in `reserved` past any plausible lifetime. Returns their op ids.
+
+    Closes the one leak the reserve→settle contract cannot close from inside a request: a client
+    that disconnects before the response body is ever pulled leaves the stream generator unstarted,
+    so no `finally` runs and nothing settles or releases (there is no suspended frame for
+    `GeneratorExit` to reach). The reservation then holds its estimate against the tenant's window
+    forever — quota permanently consumed by work that never happened.
+
+    Scoped to one `kind` because inference is the only kind with a bounded lifetime: a `job` or
+    `session` reservation legitimately stays `reserved` for as long as the work runs, and sweeping
+    those would refund quota for GPU time still being spent — then void the real settle when it
+    arrived.
+
+    Releases rather than settles: work that actually ran settles through the WAL replay well inside
+    any sane threshold, so what this reaps is work that never started. The threshold must therefore
+    stay comfortably above the longest plausible deferred-settlement delay — a settle arriving
+    *after* the sweep is a no-op (see `settle`), which loses that charge rather than corrupting the
+    reconciliation identity.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE usage_reservation SET state = 'released', settled_at = now(), "
+            "settled_gpu_seconds = 0 WHERE kind = %s AND state = 'reserved' "
+            "AND created_at < now() - make_interval(secs => %s) RETURNING op_id",
+            (kind, float(older_than_s)))
+        return [row[0] for row in cur.fetchall()]
 
 
 # -- reads ------------------------------------------------------------------------------------------
