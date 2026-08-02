@@ -11,6 +11,11 @@ all day, so an unbounded read is not an option (contract cross-cutting rule 3).
 """
 import time
 
+#: Process start, for the admin surface's uptime. Captured at import rather than read from
+#: `/proc`, so the number describes THIS gateway process — which is what an operator asking
+#: "how long has it been up" means, not how long the container has existed.
+_STARTED_AT = time.time()
+
 #: Default caps. Chosen to be a screenful of context rather than a full history: these feed summary
 #: surfaces, and the per-area views page properly against their own routes.
 JOB_LIMIT = 200
@@ -328,3 +333,124 @@ def serving_pointers() -> list:
                     "alias": "serving", "modality": (current.get("tags") or {}).get("task"),
                     "engine": (current.get("tags") or {}).get("serving_engine")})
     return out
+
+
+def dataset_detail(name: str, version: str):
+    from .. import datasets as datasets_mod
+    return datasets_mod.get_dataset(name, version)
+
+
+def alert_rules() -> list:
+    """The 023 US7 Prometheus rule files, parsed for rule NAMES and expressions.
+
+    Read from the shipped rule files rather than from a rules API: this deployment has Prometheus
+    but no Alertmanager, so there is no evaluation endpoint to ask for live state. Every rule
+    therefore comes back `unknown` — which is the honest answer and is exactly why `unknown` is a
+    first-class member of the state vocabulary rather than a fallback to `inactive`.
+    """
+    import glob
+    import os
+
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    rules = []
+    for path in sorted(glob.glob(os.path.join(repo, "monitoring", "**", "*rules*.y*ml"),
+                                 recursive=True)):
+        with open(path, encoding="utf-8") as fh:
+            current = None
+            for raw in fh:
+                line = raw.strip()
+                if line.startswith("- alert:"):
+                    current = {"name": line.split(":", 1)[1].strip(), "state": "unknown",
+                               "annotations": {}, "labels": {}}
+                    rules.append(current)
+                elif current is not None and line.startswith("expr:"):
+                    current["expr"] = line.split(":", 1)[1].strip()
+                elif current is not None and line.startswith("severity:"):
+                    current["labels"]["severity"] = line.split(":", 1)[1].strip()
+                elif current is not None and line.startswith("runbook_url:"):
+                    current["annotations"]["runbook_url"] = line.split(":", 1)[1].strip()
+    return rules
+
+
+def dashboards() -> list:
+    """The configured dashboards, with embeddability resolved here rather than in the browser."""
+    import os
+
+    from . import observability
+    from .console_helpers import frame_policy_allows
+
+    base = os.getenv("GRAFANA_URL", "http://localhost:3001").rstrip("/")
+    embeddable, reason = frame_policy_allows()
+
+    return [observability.dashboard_embed(
+        id="platform", title="Platform overview",
+        external_url=f"{base}/dashboards", embeddable=embeddable, reason=reason)]
+
+
+def bucket_summaries() -> list:
+    """Buckets with object counts and sizes. One listing per bucket, bounded by the pager."""
+    import os
+
+    from platformlib import store
+
+    client = store.s3_client()
+    names = [b for b in (os.getenv("GARAGE_BUCKETS", "datasets,models,results,inputs").split(","))
+             if b.strip()]
+    out = []
+    for bucket in names:
+        bucket = bucket.strip()
+        try:
+            keys = store.list_keys(client, bucket, "")
+            out.append({"bucket": bucket, "objectCount": len(keys), "sizeBytes": None,
+                        "reachable": True})
+        except Exception:  # noqa: BLE001 — one unreachable bucket is not the whole page
+            # `None` counts, not zero: an unreadable bucket has not been measured, and "0 objects"
+            # would read as an empty bucket.
+            out.append({"bucket": bucket, "objectCount": None, "sizeBytes": None,
+                        "reachable": False})
+    return out
+
+
+def migration_ledger() -> dict:
+    """The checksummed migration ledger (023 US4). **Read-only** — never triggers an apply."""
+    from platformlib import store
+
+    with _conn().cursor() as cur:
+        cur.execute("SELECT id, applied_at, checksum FROM schema_migrations ORDER BY id")
+        rows = cur.fetchall()
+    return {
+        "schemaVersion": str(store.SCHEMA_VERSION),
+        "migrations": [{"id": r[0], "appliedAt": r[1].isoformat() if r[1] else None,
+                        "checksumState": "ok" if r[2] else "unapplied"} for r in rows],
+        "reachable": True,
+    }
+
+
+def integrations(*, agent_reachable: bool) -> list:
+    import os
+
+    from ..settings import AGENT_URL
+    from . import observability
+
+    return [
+        observability.integration("host agent", endpoint=AGENT_URL, reachable=agent_reachable),
+        observability.integration("tracking", endpoint=os.getenv("MLFLOW_TRACKING_URI"),
+                                  reachable=None),
+        observability.integration("object store", endpoint=os.getenv("S3_ENDPOINT"),
+                                  reachable=None),
+        observability.integration("database", endpoint=os.getenv("GATEWAY_DB_URL"),
+                                  reachable=None),
+    ]
+
+
+def system_info() -> dict:
+    import os
+    import platform
+
+    return {
+        "platformVersion": os.getenv("PLATFORM_VERSION"),
+        "constitutionVersion": os.getenv("CONSTITUTION_VERSION", "1.6.1"),
+        "host": platform.node(),
+        "uptimeSeconds": int(time.time() - _STARTED_AT),
+    }
+

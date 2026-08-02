@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { PageTitle, Panel } from '@/components/Panel';
 import { gwGet, gwPost } from '@/lib/gw';
+import { CADENCE, formatAge, useLive } from '@/lib/use-live';
+import type { DatasetVersionView } from '@/lib/platform-types';
 
 type Version = { version: string; size_bytes: number; sha256: string; format: string; uri: string };
 type Dataset = { name: string; versions: Version[] };
@@ -70,6 +72,13 @@ export default function DataPage() {
       <PageTitle sub="Immutable, content-addressed versions — the loop's entry. Identical bytes dedupe.">
         data
       </PageTitle>
+
+      {/* 027 US8 (T754): the joined dataset view — digest, validation, and the runs and model
+          versions that reference each version. Over the EXISTING proxied download route: no
+          presigned URL is minted and no object-store credential reaches the browser. */}
+      <div className="mb-6">
+        <DatasetCatalog />
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1.3fr]">
         <UploadForm onDone={load} />
@@ -347,4 +356,76 @@ function toBase64(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+/**
+ * 027 US8 (T754) — the dataset catalog: digest, size, validation, and what references each version.
+ *
+ * **Bytes do not move through this view.** The `uri` a dataset carries is a *logical* reference;
+ * downloading still goes through the gateway's existing proxied route, which validates the path
+ * against permitted prefixes before any upstream call. 025 US3 removed presigned URLs precisely
+ * because they were signed against the internal store endpoint — unresolvable from a browser and a
+ * leaked object-store capability — and 027 does not reintroduce them by another name.
+ */
+function DatasetCatalog() {
+  const { data, ageMs, degraded } = useLive<{ datasets: DatasetVersionView[]; total: number }>(
+    'console/datasets',
+    CADENCE.catalog,
+  );
+
+  return (
+    <Panel title="Versions">
+      <p className="mb-2 text-caption-md text-ash">
+        {formatAge(ageMs)}
+        {degraded.length > 0 && ` · unreachable: ${degraded.join(', ')}`}
+      </p>
+      {data === null ? (
+        <p className="text-body-md text-mute">unknown — the object store did not answer</p>
+      ) : data.datasets.length === 0 ? (
+        <p className="text-body-md text-mute">no datasets registered</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full font-mono text-body-md">
+            <thead className="text-ash">
+              <tr>
+                <th className="pr-4 text-left">dataset</th>
+                <th className="pr-4 text-left">ver</th>
+                <th className="pr-4 text-left">digest</th>
+                <th className="pr-4 text-left">size</th>
+                <th className="pr-4 text-left">schema</th>
+                <th className="pr-4 text-left">validation</th>
+                <th className="text-left">referenced by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.datasets.map((version) => (
+                <tr key={`${version.name}@${version.version}`} className="text-mute">
+                  <td className="pr-4 text-ink">{version.name}</td>
+                  <td className="pr-4">{version.version}</td>
+                  <td className="pr-4">
+                    {/* The platform's own content-addressed identity, not an object-store ETag —
+                        an ETag changes with multipart chunking and would make identical bytes look
+                        like different data. */}
+                    {version.contentDigest ? version.contentDigest.slice(0, 12) : 'unknown'}
+                  </td>
+                  <td className="pr-4">
+                    {version.sizeBytes === null ? 'unknown' : `${version.sizeBytes} B`}
+                  </td>
+                  <td className="pr-4">{version.schemaStatus}</td>
+                  <td className="pr-4">{version.validation.status}</td>
+                  <td>
+                    {version.referencedBy.runIds.length + version.referencedBy.modelVersions.length}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 text-caption-md text-ash">
+            [i] downloads go through the gateway&apos;s proxied route, which checks the path against
+            permitted prefixes first. No signed URL and no store credential reaches this page.
+          </p>
+        </div>
+      )}
+    </Panel>
+  );
 }

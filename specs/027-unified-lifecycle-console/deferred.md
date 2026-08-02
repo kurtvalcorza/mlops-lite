@@ -27,6 +27,20 @@ submit labels, approve review items, manage capture and evaluation policies.
 2. **The write surface has a designed home.** MVP 2 lands its own contract; it does not extend
    `contracts/console-read-api.md`, whose cross-cutting rule 4 states that no route in it mutates.
 
+**Verification outcome (T768)** — asserted, not asserted-by-comment:
+
+| Assertion | Where |
+|---|---|
+| Every `@router` decorator in `gateway/app/routers/console.py` is a `GET`, except the payload reveal | `tests/test_console_admin.py::test_no_console_route_mutates_state` |
+| No module under `gateway/app/console/` contains an `INSERT`/`UPDATE`/`DELETE`/`DROP`/`ALTER` | `…::test_the_console_modules_contain_no_write_statements` |
+| The reveal path itself performs no write and no `put_object`/`delete_object` | `…::test_the_payload_reveal_only_reads` |
+| The published OpenAPI shows exactly one non-`GET` console operation | `tests/test_openapi_export.py::test_the_payload_reveal_is_the_only_non_get_console_operation` |
+| The BFF allowlist contains exactly one write-shaped console entry | `tests/test_console_allowlist.py::test_the_payload_reveal_is_the_only_write_shaped_console_entry` |
+
+The last two matter most for the deferral: a future write path added here would have to change the
+*published contract* and the *proxy surface*, both of which are reviewed artifacts. It cannot land
+quietly as one more route.
+
 **Constraints 028 inherits and must not relax**:
 
 - **FR-435** — alias assignment routes through the **gated promotion endpoint**. Writing the registry
@@ -56,6 +70,19 @@ cross-system reconciliation, controlled rollout and rollback, audit views.
    operators that the console lies, which is precisely the trust this increment is trying to build.
 2. **Nothing is auto-applied.** No suggestion is auto-accepted or auto-applied anywhere in the
    console (FR-437). Suggestions carry evidence and remain recommendations.
+
+**Verification outcome (T769)**:
+
+| Assertion | Where |
+|---|---|
+| `reconcile` is named, labelled "not available in this release", and is neither a `<button>` nor a link | `tests/test_console_admin.py::test_the_reconcile_affordance_is_inert_and_says_so` |
+| No `autoAccept` / `autoApply` / `autoReconcile` symbol exists in any console page or component | `…::test_no_suggestion_is_auto_applied_anywhere_in_the_console` |
+
+The banner names `reconcile` rather than hiding it because `StateConflict.suggestedAction` includes
+it in the data model, and an operator who sees a conflict should learn that reconciliation is the
+eventual answer. Naming it while stating it is unavailable is the honest middle: hiding it would
+imply no such remedy exists, and wiring it to nothing would teach that the console's controls are
+decorative.
 
 **Constraints 029 inherits**:
 

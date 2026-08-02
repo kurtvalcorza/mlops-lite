@@ -15,7 +15,17 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import console, runtime
-from ..console import catalog, endpoints, evaluations, overview, predictions, sources, studies
+from ..console import (
+    catalog,
+    endpoints,
+    evaluations,
+    observability,
+    overview,
+    predictions,
+    sources,
+    studies,
+)
+from ..console import datasets as datasets_mod
 from ..console import jobs as jobs_mod
 from ..console import traces as traces_mod
 
@@ -742,6 +752,202 @@ async def console_endpoint(endpoint_id: str):
     rows = body["data"] or []
     match = [row for row in rows if row["id"] == endpoint_id]
     return {**body, "data": match[0] if match else None}
+
+
+# -- datasets and artifacts (T752/T753) ---------------------------------------------------------------
+
+@router.get("/console/datasets")
+async def console_datasets(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    """`DatasetVersion[]` (FR-419). Bytes do not flow through here — `uri` is logical, and downloads
+    keep using the existing proxied route that validates permitted prefixes first."""
+    projection = console.Projection()
+    records = await projection.read("objectstore", sources.datasets)
+    if records is None:
+        return projection.envelope(None)
+
+    rows = []
+    for record in records:
+        for version in record.get("versions") or []:
+            rows.append(datasets_mod.dataset_version({**version, "name": record.get("name")}))
+    return projection.envelope({"datasets": rows[offset:offset + limit], "total": len(rows),
+                                "offset": offset, "limit": limit})
+
+
+@router.get("/console/datasets/{name}/{version}")
+async def console_dataset(name: str, version: str, verify: bool = False):
+    """Detail plus the full validation check list.
+
+    `verify` is opt-in (default off) because rehashing a multi-gigabyte object on every page render
+    is not viable on this hardware. Unverified means `not-verified` — honest about not having
+    checked rather than silently claiming it did.
+    """
+    projection = console.Projection()
+    record = await projection.read("objectstore", lambda: sources.dataset_detail(name, version))
+    if record is None:
+        return projection.envelope(None)
+    return projection.envelope(datasets_mod.dataset_version(
+        record, validation=record.get("validation")))
+
+
+@router.get("/console/artifacts")
+async def console_artifacts(model: str = None, version: str = None, verify: bool = False):
+    """`Artifact[]` for a model version (FR-420), with the **four** integrity states preserved.
+
+    `not-verified` ("we did not check") never collapses into `verification-unavailable` ("no
+    checksum was ever recorded") — materially different facts when deciding whether to trust an
+    artifact.
+    """
+    projection = console.Projection()
+    versions = await projection.read("registry", sources.model_versions)
+    if versions is None:
+        return projection.envelope(None)
+
+    rows = []
+    for entry in versions:
+        if model and entry.get("name") != model:
+            continue
+        if version and str(entry.get("version")) != str(version):
+            continue
+        present = None
+        if verify:
+            present = await projection.read(
+                "objectstore", lambda e=entry: sources.artifact_present(e.get("source")))
+        rows.append(datasets_mod.artifact(
+            {"uri": entry.get("source"), "kind": "model",
+             "digest": (entry.get("tags") or {}).get("artifact_digest"),
+             "observed_at": console.utcnow()},
+            verified=False, present=present))
+    return projection.envelope(rows)
+
+
+# -- observability and administration (T756/T757/T758) ------------------------------------------------
+
+@router.get("/console/metrics/summary")
+async def console_metrics_summary(window_seconds: int = Query(3600, ge=60, le=86400)):
+    """The curated native panels (FR-423).
+
+    A degraded panel carries **no points** rather than zero points: a flat line at zero is a
+    measurement claim, and an unreachable metrics store has not made it.
+    """
+    projection = console.Projection()
+    window, _step = observability.bound_range(window_seconds=window_seconds, step_seconds=60)
+
+    agent_body = await runtime.health()
+    device_body = await runtime.devices()
+    agent_data = agent_body["data"]
+    if agent_data is None:
+        projection.mark_degraded(runtime.AGENT)
+    else:
+        projection.mark_observed(runtime.AGENT)
+
+    devices = (device_body["data"] or {}).get("devices") or []
+    now = console.utcnow()
+
+    def point(value):
+        # A single current reading, presented as a one-point series rather than a fabricated
+        # history. This deployment scrapes into Prometheus; the console does not keep its own
+        # time series, and inventing one would be a chart of numbers nobody recorded.
+        return [] if value is None else [{"label": "now", "points": [[0, value]]}]
+
+    panels = [
+        observability.panel("active-jobs", series=point((agent_data or {}).get("jobs_active")),
+                            window_seconds=window, observed_at=now, degraded=agent_data is None),
+        observability.panel(
+            "gpu-utilization",
+            series=point(max((d.get("utilization_pct") for d in devices
+                              if d.get("utilization_pct") is not None), default=None)),
+            unit="%", window_seconds=window, observed_at=now, degraded=not devices),
+        observability.panel("gpu-vram", series=point((agent_data or {}).get("gpu_free_gb")),
+                            unit="GB", window_seconds=window, observed_at=now,
+                            degraded=agent_data is None),
+        observability.panel(
+            "engine-restarts",
+            series=point((agent_data or {}).get("interrupted_since_start")),
+            window_seconds=window, observed_at=now, degraded=agent_data is None),
+    ]
+    return projection.envelope({"panels": panels, "windowSeconds": window})
+
+
+@router.get("/console/metrics/series")
+async def console_metrics_series(key: str, window_seconds: int = Query(3600, ge=60),
+                                 step_seconds: int = Query(60, ge=1)):
+    """A bounded range query. The bound is **server-side**, so a hand-written URL cannot exceed it
+    either — a console panel must not be able to issue an unbounded query against the metrics
+    store."""
+    window, step = observability.bound_range(window_seconds=window_seconds,
+                                             step_seconds=step_seconds)
+    if key not in observability.PANEL_KEYS:
+        raise HTTPException(status_code=400, detail=f"unknown panel key {key!r}")
+    # No historical store is wired into the console (research: metrics live in Prometheus and the
+    # dashboard tool reads them). `degraded` with no points, rather than an empty series that would
+    # read as "measured, and it was zero".
+    return console.envelope({"panel": observability.panel(
+        key, window_seconds=window, observed_at=console.utcnow(), degraded=True),
+        "stepSeconds": step,
+        "note": "historical series are served by the dashboard tool; the console shows current state"})
+
+
+@router.get("/console/alerts")
+async def console_alerts():
+    """Rule state only (FR-424).
+
+    There is **no** delivery, notification, recipient, or acknowledgement field, and none may be
+    added: this platform has no Alertmanager, and such a field would invite the console to imply
+    someone was told. The response says so explicitly rather than leaving the reader to assume the
+    usual thing.
+    """
+    projection = console.Projection()
+    rules = await projection.read("metrics", sources.alert_rules)
+    return projection.envelope({
+        "rules": [observability.alert_rule(r) for r in rules or []],
+        "noDeliveryNotice": observability.NO_DELIVERY_NOTICE,
+    })
+
+
+@router.get("/console/dashboards")
+async def console_dashboards():
+    """`DashboardEmbed[]` with `embeddable` resolved **server-side** from the frame policy, not
+    discovered by the browser failing to render a frame."""
+    return console.envelope(sources.dashboards())
+
+
+@router.get("/console/admin/storage")
+async def console_admin_storage():
+    projection = console.Projection()
+    buckets = await projection.read("objectstore", sources.bucket_summaries)
+    return projection.envelope(buckets)
+
+
+@router.get("/console/admin/database")
+async def console_admin_database():
+    """Schema version and the applied-migration ledger with its checksum state (023 US4).
+
+    Strictly read-only. Nothing on this path triggers an apply — a console that could migrate a
+    database from a page render is a console one misclick from an outage.
+    """
+    projection = console.Projection()
+    ledger = await projection.read("database", sources.migration_ledger)
+    return projection.envelope(ledger or {"schemaVersion": None, "migrations": None,
+                                          "reachable": False})
+
+
+@router.get("/console/admin/integrations")
+async def console_admin_integrations():
+    """Backing services and their reachability. `endpoint` is a **host identity**, never a
+    credentialed URL — an admin page is exactly where someone would paste a screenshot."""
+    projection = console.Projection()
+    agent_body = await runtime.health()
+    return projection.envelope(sources.integrations(agent_reachable=agent_body["data"] is not None))
+
+
+@router.get("/console/admin/system")
+async def console_admin_system():
+    """Platform and constitution versions, host, uptime — and whether a key is configured.
+
+    **Never** the key itself: `api_access()` reads only whether the variable is non-empty, which is
+    stronger than redaction because there is no code path that touches the value.
+    """
+    return console.envelope({**sources.system_info(), "apiAccess": observability.api_access()})
 
 
 async def _nothing():

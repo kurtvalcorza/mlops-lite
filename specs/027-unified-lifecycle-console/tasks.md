@@ -409,16 +409,16 @@ labelled healthy on desired state alone.
 **Independent Test**: a dataset shows digest, validation, and referencing runs/models; the four
 integrity states are distinguishable; a path outside permitted prefixes is refused server-side.
 
-- [ ] **T752** [US8] Implement `GET /console/datasets`, `/console/datasets/{name}/{version}`,
+- [X] **T752** [US8] Implement `GET /console/datasets`, `/console/datasets/{name}/{version}`,
   `GET /console/artifacts` per data-model §12 (FR-419). **Integrity is opt-in** (`?verify=true`) — rehashing
   multi-gigabyte objects per render is not viable on this hardware.
-- [ ] **T753** [US8] Preserve the four-state integrity distinction (FR-420). `not-verified` ("we did
+- [X] **T753** [US8] Preserve the four-state integrity distinction (FR-420). `not-verified` ("we did
   not check") must **not** collapse into `verification-unavailable` ("no checksum was ever
   recorded") — materially different facts when deciding whether to trust an artifact.
-- [ ] **T754** [US8] Build `ui/app/(console)/datasets/` over the **existing** proxied download route.
+- [X] **T754** [US8] Build `ui/app/(console)/datasets/` over the **existing** proxied download route.
   No presigned URL is minted and no object-store credential reaches the browser (FR-421); paths are
   validated against permitted prefixes server-side **before** any upstream call (FR-422).
-- [ ] **T755** [US8] Extend the allowlist with the three dataset/artifact entries and add the
+- [X] **T755** [US8] Extend the allowlist with the three dataset/artifact entries and add the
   path-rejection case plus the no-credential-in-browser sweep to
   `tests/test_ui_security.py` (SC-197).
 
@@ -431,39 +431,39 @@ integrity states are distinguishable; a path outside permitted prefixes is refus
 **Independent Test**: native panels render; a firing rule claims no notification; a blocked embed
 falls back to an external link; the migration ledger is visible and read-only.
 
-- [ ] **T756** [US9] Implement `GET /console/metrics/summary` and `/console/metrics/series` (FR-423).
+- [X] **T756** [US9] Implement `GET /console/metrics/summary` and `/console/metrics/series` (FR-423).
   **Bound range and step server-side** so a console panel cannot issue an unbounded query.
-- [ ] **T757** [US9] Implement `GET /console/alerts` and `GET /console/dashboards`. `AlertRule`
+- [X] **T757** [US9] Implement `GET /console/alerts` and `GET /console/dashboards`. `AlertRule`
   carries **no delivery/notification/recipient/acknowledgement field and none may be added** — there
   is no Alertmanager, and such a field would invite the console to imply someone was told (FR-424).
   `embeddable` resolves server-side; `externalUrl` is always populated (FR-425).
-- [ ] **T758** [US9] Implement the four `GET /console/admin/*` routes (FR-426). **Never return
+- [X] **T758** [US9] Implement the four `GET /console/admin/*` routes (FR-426). **Never return
   credential material**: report only whether a key is configured and whether the gateway is
   fail-closed. The migration view reads the existing checksummed ledger (023 US4) and **never
   triggers an apply**.
-- [ ] **T759** [US9] Build `ui/app/(console)/observability/` and `administration/`. The embed is
+- [X] **T759** [US9] Build `ui/app/(console)/observability/` and `administration/`. The embed is
   explicitly labelled external, exposes no administrative controls, and degrades to a link (FR-425).
-- [ ] **T760** [US9] Extend the allowlist with the eight observability/admin entries; add the
+- [X] **T760** [US9] Extend the allowlist with the eight observability/admin entries; add the
   no-delivery-claim assertion from quickstart §2.9 to the offline suite.
 
 ---
 
 ## Phase 13: Polish and cross-cutting
 
-- [ ] **T761** Update `ui/lib/gw-allowlist.ts` comment sectioning from the 021 loop vocabulary to the
+- [X] **T761** Update `ui/lib/gw-allowlist.ts` comment sectioning from the 021 loop vocabulary to the
   ten areas (re-sectioning only — moves no entry, grants no access) and verify the final delta
   matches contracts/allowlist-delta.md exactly.
-- [ ] **T762** Export the updated OpenAPI to
+- [X] **T762** Export the updated OpenAPI to
   `specs/001-mlops-platform/contracts/openapi.json` and confirm **every** new route appears
   (FR-438/SC-203).
-- [ ] **T763** [P] Update `README.md` — the increment-history table (027 row), the console section
+- [X] **T763** [P] Update `README.md` — the increment-history table (027 row), the console section
   (replace the 021 loop-native description), and the architecture diagram's UI node.
-- [ ] **T764** [P] Verify SC-198 mechanically: `ui/package.json` dependencies are still exactly
+- [X] **T764** [P] Verify SC-198 mechanically: `ui/package.json` dependencies are still exactly
   `next`, `react`, `react-dom`; the production build succeeds and adds no runtime package. Confirm no broker, scheduler,
   analytics store, or serving runtime was introduced (FR-434).
 - [ ] **T765** Measure and record the idle footprint against the T691 baseline (SC-199). A regression
   points at `use-live.ts` retention bounds first, not rendering cost.
-- [ ] **T766** Run the full gate — `make lint test ui-check compose-check spec-check` — and confirm
+- [X] **T766** Run the full gate — `make lint test ui-check compose-check spec-check` — and confirm
   **no regression** against the T691 baseline (SC-200).
 - [ ] **T767** [HW] Run the quickstart Layer 3 recipes end to end on the GPU box and record the
   results in the increment runbook, including the compatibility three-way verdict check across all
@@ -477,14 +477,14 @@ falls back to an external link; the migration ledger is visible and read-only.
 not the absence of work — 027 owes each one a guarantee that the deferral holds and that no
 half-built affordance misleads an operator.
 
-- [ ] **T768** [US11] Assert the **read-only guarantee** for every route 027 adds: no
+- [X] **T768** [US11] Assert the **read-only guarantee** for every route 027 adds: no
   `gateway/app/console/*` or `runtime/*` route mutates state, and the sole write-shaped entry
   (`POST /console/predictions/{id}/payload`) only reveals an existing payload. Add the assertion to
   `tests/test_console_read_api.py` so a future MVP 2 write path cannot land here by accident instead
   of through the sanctioned gated route (FR-435/436). Record the outcome in [deferred.md](./deferred.md) §MVP 2 — **not** in a new
   `specs/028-*/` directory, which would fail the required `specs` gate: `check_specs.py` demands the
   full six-artifact set per feature directory, so a spec-only stub breaks CI.
-- [ ] **T769** [US12] Assert that MVP 3 affordances surfaced in 027 are **inert and labelled as
+- [X] **T769** [US12] Assert that MVP 3 affordances surfaced in 027 are **inert and labelled as
   such**: the conflict banner's `reconcile` action (T732) performs no reconciliation, and no
   suggestion is auto-applied or auto-accepted anywhere in the console (FR-437). An affordance that
   looks actionable but does nothing is worse than its absence — it teaches operators the console

@@ -564,6 +564,122 @@ export type PlatformEndpoint = {
   lastUpdated: string | null;
 };
 
+// -- datasets and artifacts -----------------------------------------------------------------------
+
+/**
+ * Four states, none of which may collapse into another. `not-verified` ("we did not check") and
+ * `verification-unavailable` ("no checksum was ever recorded") are materially different facts when
+ * an operator is deciding whether to trust an artifact: the first is a button away from an answer,
+ * the second means no answer exists.
+ */
+export type IntegrityState =
+  | 'verified'
+  | 'verification-failed'
+  | 'not-verified'
+  | 'verification-unavailable';
+
+export type DatasetVersionView = {
+  name: string;
+  version: string;
+  contentDigest: string | null;
+  sizeBytes: number | null;
+  objectCount: number | null;
+  format: string | null;
+  schemaStatus: 'known' | 'unknown' | 'mismatch';
+  validation: {
+    status: 'passed' | 'failed' | 'warning' | 'not-validated';
+    checks: { name: string; outcome: string; detail?: string }[] | null;
+    validatedAt: string | null;
+  };
+  createdAt: string | null;
+  referencedBy: { runIds: string[]; modelVersions: string[] };
+};
+
+export type ArtifactView = {
+  /** A LOGICAL reference. Never presigned, never credentialed — bytes move through the proxy. */
+  uri: string | null;
+  kind: 'model' | 'dataset' | 'eval-result' | 'capture' | 'other';
+  sizeBytes: number | null;
+  digest: string | null;
+  integrity: IntegrityState;
+  /** An actual existence check; `null` means unchecked, which is not missing. */
+  present: boolean | null;
+  observedAt: string | null;
+};
+
+// -- observability and administration ---------------------------------------------------------------
+
+export type MetricPanelView = {
+  key: string;
+  series: { label: string; points: [number, number][] }[];
+  unit: string | null;
+  windowSeconds: number;
+  observedAt: string | null;
+  /** A degraded panel carries NO points, never zero points — a flat line at zero is a claim. */
+  degraded: boolean;
+};
+
+export type MetricsSummary = { panels: MetricPanelView[]; windowSeconds: number };
+
+/**
+ * There is deliberately NO delivery, notification, recipient, or acknowledgement field, and none
+ * may be added. This platform has no Alertmanager; such a field would invite the console to imply
+ * someone was told, and an operator who believes a page went out will not send one.
+ */
+export type AlertRuleView = {
+  name: string;
+  severity: string | null;
+  expression: string | null;
+  state: 'inactive' | 'pending' | 'firing' | 'unknown';
+  activeSince: string | null;
+  runbookUrl: string | null;
+};
+
+export type AlertsView = { rules: AlertRuleView[]; noDeliveryNotice: string };
+
+export type DashboardEmbed = {
+  id: string;
+  title: string;
+  /** ALWAYS present — the fallback is structural, not an error path. */
+  externalUrl: string;
+  /** Resolved server-side from the frame policy, not by the browser failing to render a frame. */
+  embeddable: boolean;
+  reason: string | null;
+  /** Omitted entirely when embedding is unavailable, rather than present-and-empty. */
+  embedUrl?: string;
+};
+
+export type AdminStorage = {
+  bucket: string;
+  /** `null` on an unreachable bucket. `0` would read as an empty bucket. */
+  objectCount: number | null;
+  sizeBytes: number | null;
+  reachable: boolean;
+};
+
+export type AdminDatabase = {
+  schemaVersion: string | null;
+  migrations: { id: string; appliedAt: string | null; checksumState: string }[] | null;
+  reachable: boolean;
+};
+
+export type AdminIntegration = {
+  name: string;
+  /** A host identity, never a credentialed URL — credentials are stripped server-side. */
+  endpoint: string | null;
+  reachable: boolean | null;
+  version: string | null;
+};
+
+export type AdminSystem = {
+  platformVersion: string | null;
+  constitutionVersion: string | null;
+  host: string | null;
+  uptimeSeconds: number | null;
+  /** Whether a key is configured and whether the gateway is fail-closed. Never the key. */
+  apiAccess: { keyConfigured: boolean; failClosed: boolean };
+};
+
 // -- tracking -----------------------------------------------------------------------------------
 
 /** Tracking vocabulary preserved verbatim (FR-366): run, experiment, metric, param. */
