@@ -144,12 +144,21 @@ def reserve(conn, op_id: str, tenant_id: str, est_gpu_seconds: float, *, kind: s
 
     existing = get_reservation(conn, op_id)
     if existing is not None:
-        if existing["state"] == "reserved":
-            return existing  # idempotent: a retried request that hasn't completed yet
-        # The reservation is finished (settled or released). Returning it would let the caller
-        # run GPU work again — while `settle()`, idempotent by design, would record nothing the
-        # second time. A tenant replaying one request id therefore got unlimited free inference.
-        raise ReservationFinished(op_id, existing["state"])
+        # ANY pre-existing reservation — regardless of state — blocks a second execution.
+        #
+        # `reserved`: another request is currently executing GPU work under this op id (or the
+        # original request crashed and the orphan sweep has not reclaimed it yet). Either way, a
+        # second execution under the same op id would produce two GPU calls billed as one: the
+        # ledger is keyed by op_id, so only one settlement survives.
+        #
+        # `settled`/`released`: the op is finished; replaying it would run free GPU work because
+        # `settle()` is idempotent and records nothing the second time.
+        #
+        # The fail-closed direction: refuse. A client whose response was lost should generate a
+        # new X-Request-Id for the retry. The orphan sweep reclaims genuinely abandoned
+        # reservations after the TTL, restoring the tenant's quota.
+        state = "in_flight" if existing["state"] == "reserved" else existing["state"]
+        raise ReservationFinished(op_id, state)
 
     with conn.transaction():
         with conn.cursor() as cur:

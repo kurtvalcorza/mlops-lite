@@ -353,12 +353,20 @@ def test_concurrent_reserves_against_room_for_one_grant_exactly_one(env):
     assert len(refused) == 7
 
 
-def test_reserve_is_idempotent_for_the_same_op_id(conn):
+def test_reserve_refuses_a_second_call_for_a_still_reserved_op_id(conn):
+    """A pre-existing `reserved` op is in flight — admitting a second execution under it would run
+    two GPU calls billed as one (the ledger is keyed by op_id, so only one settlement survives).
+
+    Previously this test asserted idempotent return. That behavior was incompatible with
+    execution-idempotency: the route had no way to distinguish 'my own retry' from 'a concurrent
+    duplicate', so both got the same reservation and both reached the GPU.
+    """
     tenant = store.create_tenant(conn, "idem")
     store.set_quota(conn, tenant["id"], "daily", 100)
-    first = store.reserve(conn, "op-1", tenant["id"], 5.0)
-    second = store.reserve(conn, "op-1", tenant["id"], 5.0)
-    assert first["op_id"] == second["op_id"]
+    store.reserve(conn, "op-1", tenant["id"], 5.0)
+    with pytest.raises(store.ReservationFinished) as exc:
+        store.reserve(conn, "op-1", tenant["id"], 5.0)
+    assert exc.value.state == "in_flight"
     assert store.consumption(conn, tenant["id"])["outstanding_gpu_seconds"] == 5.0
 
 
@@ -1271,6 +1279,72 @@ def test_a_refusal_then_same_id_retry_is_billed_exactly_once(client, conn, upstr
     r3 = client.post("/v1/chat/completions", json=body, headers=headers)
     assert r3.status_code == 403, "a settled request id must not run again"
     assert len(upstream.calls) == 1, "the replay still must not reach the GPU"
+
+
+def test_staggered_duplicate_request_id_is_refused_while_first_is_executing(client, conn,
+                                                                            monkeypatch):
+    """Request A reserves and blocks inside the upstream. Request B with the same X-Request-Id must
+    be refused, and len(upstream.calls) must remain 1.
+
+    This is the staggered case: B arrives AFTER A has committed its reservation (state 'reserved')
+    but while A is still executing. Before the fix, `store.reserve()` returned the pre-existing
+    'reserved' row, authorizing B to also reach the GPU — two calls billed as one.
+    """
+    import asyncio
+
+    from gateway.app.routers import broker_openai
+
+    # A gate that request A will block on inside the fake upstream.
+    gate = threading.Event()
+    call_log = []
+
+    async def blocking_post(url, payload, timeout=300.0):
+        call_log.append(url)
+        # Block until the test releases us (simulating a slow GPU call).
+        await asyncio.get_event_loop().run_in_executor(None, gate.wait, 5.0)
+
+        class R:
+            status_code = 200
+            text = '{"completion": "hi", "serving_model": "q"}'
+
+            def json(_self):
+                return {"completion": "hi", "serving_model": "q"}
+        return R()
+
+    monkeypatch.setattr(broker_openai, "_post", blocking_post)
+    alice = _tenant(client, "alice", budget=10000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-staggered"}
+
+    # Fire request A in a background thread — it will block in blocking_post.
+    result_a = {}
+
+    def send_a():
+        r = client.post("/v1/chat/completions", json=body, headers=headers)
+        result_a["status"] = r.status_code
+
+    thread_a = threading.Thread(target=send_a, daemon=True)
+    thread_a.start()
+
+    # Wait until A has reached the upstream (its reservation is committed).
+    for _ in range(100):
+        if call_log:
+            break
+        time.sleep(0.05)
+    assert call_log, "request A never reached the upstream"
+
+    # Request B with the same id: must be refused because A is in flight.
+    r_b = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r_b.status_code == 403, \
+        f"expected 403 for a staggered duplicate, got {r_b.status_code}: " \
+        "a second execution was authorized under the same reservation"
+    assert len(call_log) == 1, \
+        f"expected exactly 1 upstream call, got {len(call_log)}: request B reached the GPU"
+
+    # Release A so the thread can finish cleanly.
+    gate.set()
+    thread_a.join(timeout=5.0)
+    assert result_a.get("status") == 200
 
 
 # -- P2 Regression: metric-vs-ledger drift (review 2026-08-03) -----------------------------------------
