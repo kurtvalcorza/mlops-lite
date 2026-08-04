@@ -29,8 +29,10 @@ import os
 import threading
 import time
 
+from prometheus_client import Counter
+
 from platformlib import store as _store
-from platformlib.storeimpl.metering import QuotaExhausted
+from platformlib.storeimpl.metering import QuotaExhausted, ReservationFinished
 
 from .broker import BrokerStoreError, conn, invalidate_conn, refuse
 
@@ -45,6 +47,14 @@ DEFAULT_WAL_PATH = os.getenv("BROKER_METERING_WAL", "/var/lib/mlops/broker-settl
 #: the difference on every request, while an over-estimate only makes the tenant's own quota briefly
 #: more conservative and is released the moment the request settles.
 DEFAULT_INFERENCE_ESTIMATE_S = float(os.getenv("BROKER_INFERENCE_ESTIMATE_S", "30"))
+
+#: Reservations reclaimed by the orphan sweep, and charges the store declined because their
+#: reservation was already gone. Both exist so a ledger/metric split is *correlatable* after the
+#: fact: a silent drop that leaves no trace is indistinguishable from a charge that never happened.
+RESERVATIONS_SWEPT = Counter("broker_reservations_swept_total",
+                             "Inference reservations released by the orphan sweep")
+SETTLEMENTS_DROPPED = Counter("broker_settlements_dropped_total",
+                              "Settlements the store declined (reservation no longer reserved)")
 
 _wal_lock = threading.Lock()
 
@@ -111,27 +121,15 @@ def _wal_compact(done_op_ids: set) -> None:
 
 # -- reserve --------------------------------------------------------------------------------------
 
-def _existing_settled(c, op_id: str) -> bool:
-    """Whether a reservation under this op id has already settled.
-
-    Best-effort: an unreadable store here must not fail the request, because the reserve below has
-    its own fail-closed handling and would refuse for a better-stated reason.
-    """
-    try:
-        existing = _store.get_reservation(c, op_id)
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(existing) and existing.get("state") == "settled"
-
-
 def reserve_or_refuse(op_id: str, tenant: dict, est_gpu_seconds: float = None, *,
                       kind: str = "inference", modality: str = "") -> dict:
     """Pre-authorize GPU-seconds, or raise the HTTP refusal that matches the reason.
 
-    `403 quota_exhausted` when the window budget cannot cover the estimate; `503
-    metering_unavailable` when the reservation cannot be recorded at all. The second is the FR-016
-    fail-safe: work whose consumption cannot be recorded must not run, because it would be GPU time
-    charged to nobody.
+    `403 forbidden` when the op id has already been used (settled, released, or currently in flight
+    by another request); `403 quota_exhausted` when the window budget cannot cover the estimate;
+    `503 metering_unavailable` when the reservation cannot be recorded at all. The last is the
+    FR-016 fail-safe: work whose consumption cannot be recorded must not run, because it would be
+    GPU time charged to nobody.
     """
     est = DEFAULT_INFERENCE_ESTIMATE_S if est_gpu_seconds is None else est_gpu_seconds
     try:
@@ -139,31 +137,22 @@ def reserve_or_refuse(op_id: str, tenant: dict, est_gpu_seconds: float = None, *
     except BrokerStoreError as e:
         raise refuse("metering_unavailable", f"usage cannot be recorded: {e}")
 
-    # Idempotency has to cover EXECUTION, not just accounting.
-    #
-    # `store.reserve()` returns an existing reservation for a repeated op id, which is right for a
-    # client retrying a request it is unsure landed. But a reservation that has already **settled**
-    # is finished, and returning it let the caller run GPU work again — while `settle()`, idempotent
-    # by design, recorded nothing the second time. A tenant replaying one `X-Request-Id` therefore
-    # got unlimited free inference, and the retry test could not see it: it asserted one ledger row,
-    # which is exactly what a free re-run produces.
-    #
-    # Refused rather than silently re-reserved: a client reusing a settled id has a bug, and minting
-    # a fresh charge under an id it believes is idempotent would surprise it in the other direction.
-    settled = _existing_settled(c, op_id)
-    if settled:
-        raise refuse("forbidden",
-                     f"request id {op_id.split(':', 1)[-1]!r} has already been settled — reusing it "
-                     "would run new GPU work under a finished reservation. Send a new X-Request-Id.")
-
     try:
         return _store.reserve(c, op_id, tenant["id"], est, kind=kind, modality=modality)
+    except ReservationFinished as e:
+        raise refuse("forbidden",
+                     f"request id {op_id.split(':', 1)[-1]!r} cannot authorize new GPU work: "
+                     f"reservation is {e.state!r}. Send a new X-Request-Id.")
     except QuotaExhausted as e:
         raise refuse("quota_exhausted", str(e))
     except Exception as e:  # noqa: BLE001 — one retry through a fresh connection, then refuse
         invalidate_conn(c)
         try:
             return _store.reserve(conn(), op_id, tenant["id"], est, kind=kind, modality=modality)
+        except ReservationFinished as e2:
+            raise refuse("forbidden",
+                         f"request id {op_id.split(':', 1)[-1]!r} cannot authorize new GPU work: "
+                         f"reservation is {e2.state!r}. Send a new X-Request-Id.")
         except QuotaExhausted as e2:
             raise refuse("quota_exhausted", str(e2))
         except Exception:  # noqa: BLE001
@@ -176,21 +165,39 @@ def settle(op_id: str, actual_gpu_seconds: float) -> dict:
     """Settle to actual, durably. Never raises to the caller — see the module docstring for why
     settlement fails forward while reservation fails closed.
 
-    Returns `{"settled": bool, "deferred": bool, "gpu_seconds": float}` so a route can decide what
-    to report (`X-GPU-Seconds` on a settled charge; nothing extra on a deferred one, which will
-    reconcile out of band).
+    Returns `{"settled": bool, "deferred": bool, "dropped": bool, "gpu_seconds": float}` so a route
+    can decide what to report (`X-GPU-Seconds` on a settled charge; nothing extra on a deferred one,
+    which will reconcile out of band).
+
+    **`dropped` distinguishes "the store declined this charge" from "the store took it".** The store
+    refuses to settle a reservation that is no longer `reserved` — the sweep released it, or it
+    already settled — and it does so by returning, not raising. Reporting that as settled would let
+    a caller increment a "settled GPU-seconds" counter for a charge the ledger never received: a
+    number that looks authoritative while silently disagreeing with what was persisted, which is
+    precisely the failure mode the rest of this surface is built to avoid.
     """
     entry = {"op_id": op_id, "gpu_seconds": float(actual_gpu_seconds), "at": time.time()}
     _wal_append(entry)
     try:
         c = conn()
-        _store.settle(c, op_id, actual_gpu_seconds)
+        reservation = _store.settle(c, op_id, actual_gpu_seconds)
         _wal_compact({op_id})
-        return {"settled": True, "deferred": False, "gpu_seconds": float(actual_gpu_seconds)}
+        state = (reservation or {}).get("state")
+        if state != "settled":
+            logger.warning(
+                "settlement for %s was declined by the store (reservation is %r, not 'reserved') — "
+                "%.3f GPU-seconds are not in the ledger; a sweep or an earlier settle got there "
+                "first", op_id, state, float(actual_gpu_seconds))
+            SETTLEMENTS_DROPPED.inc()
+            return {"settled": False, "deferred": False, "dropped": True,
+                    "gpu_seconds": float(actual_gpu_seconds)}
+        return {"settled": True, "deferred": False, "dropped": False,
+                "gpu_seconds": float(actual_gpu_seconds)}
     except Exception as e:  # noqa: BLE001 — the seconds are already spent; the record can wait
         invalidate_conn()
         logger.warning("settlement for %s deferred to the outbox: %s", op_id, e)
-        return {"settled": False, "deferred": True, "gpu_seconds": float(actual_gpu_seconds)}
+        return {"settled": False, "deferred": True, "dropped": False,
+                "gpu_seconds": float(actual_gpu_seconds)}
 
 
 def release(op_id: str) -> None:
@@ -232,6 +239,7 @@ def sweep_orphaned_reservations() -> dict:
         logger.warning("orphaned-reservation sweep failed, will retry: %s", e)
         return {"swept": 0, "failed": True}
     if swept:
+        RESERVATIONS_SWEPT.inc(len(swept))
         logger.warning("released %d orphaned inference reservation(s) older than %.0fs: %s",
                        len(swept), reservation_ttl_s(), ", ".join(swept[:10]))
     return {"swept": len(swept), "failed": False}

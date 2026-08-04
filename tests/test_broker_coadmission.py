@@ -20,7 +20,7 @@ import pytest  # noqa: E402
 from hostagent import admission as adm  # noqa: E402
 from hostagent import coordadmission  # noqa: E402
 from hostagent import coordinator as co  # noqa: E402
-from tests.test_agent_coordinator import make  # noqa: E402
+from tests.test_agent_coordinator import counting_clock, make  # noqa: E402
 
 GIB = 1024 ** 3
 
@@ -214,8 +214,15 @@ def test_holder_reports_the_exclusive_job_when_one_runs():
 
 def test_holder_reports_the_most_recently_used_resident_otherwise():
     """With co-residency there is no longer *a* holder; this is the answer that keeps the pre-broker
-    consumers truthful, and `snapshot()` is the honest full one."""
-    a, coord, gpu, life = _shim(sizes={"llm": 2 * GIB, "asr": 1 * GIB})
+    consumers truthful, and `snapshot()` is the honest full one.
+
+    Driven by a strictly-increasing clock, because this asserts a *recency* ordering: `time.time()`
+    resolves to 15.625ms on Windows, so both acquires below land in one tick, `last_used_at` ties,
+    and the LRU sort falls back to insertion order — green on Linux CI, red on a Windows dev box,
+    for reasons that have nothing to do with the behaviour under test.
+    """
+    a, coord, gpu, life = _shim(sizes={"llm": 2 * GIB, "asr": 1 * GIB},
+                                wallclock=counting_clock())
     a.acquire("llm", "serving", 2.0)
     a.acquire("asr", "serving", 1.0)
     assert a.holder()["tenant"] == "asr"

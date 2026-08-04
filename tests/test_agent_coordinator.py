@@ -8,6 +8,7 @@ claim, a drain that can only time out. None of those reproduce reliably on hardw
 
 Sizes are in whole GiB throughout so the arithmetic in the assertions is readable.
 """
+import itertools
 import os
 import sys
 import threading
@@ -87,7 +88,15 @@ class FakeLifecycle:
                     del self.gpu.loaded[p]
 
 
-def make(total=12 * GIB, sizes=None, fail=(), budget=None, **cfg):
+def make(total=12 * GIB, sizes=None, fail=(), budget=None, wallclock=None, **cfg):
+    """A coordinator over fakes.
+
+    `wallclock` overrides the source of `last_used_at`. Pass a strictly-increasing one for any test
+    that asserts a *recency* ordering: the default is `time.time()`, whose resolution is 15.625ms on
+    Windows and ~1ns on Linux, so two acquires in the same tick tie on Windows and the LRU sort falls
+    back to insertion order. That makes such a test pass on CI and fail on a Windows dev box — a
+    platform-dependent result, not a real disagreement about behaviour.
+    """
     gpu = FakeGpu(total=total, sizes=sizes)
     lifecycle = FakeLifecycle(gpu, fail=fail)
     config = gpuconfig.CoordinatorConfig(
@@ -99,8 +108,15 @@ def make(total=12 * GIB, sizes=None, fail=(), budget=None, **cfg):
         admission_backoff_base_s=cfg.pop("backoff_base", 0.001),
         admission_backoff_cap_s=cfg.pop("backoff_cap", 0.01),
         configured_budget_bytes=budget)
-    coord = co.Coordinator(config=config, gpu=gpu, lifecycle=lifecycle)
+    kwargs = {"wallclock": wallclock} if wallclock is not None else {}
+    coord = co.Coordinator(config=config, gpu=gpu, lifecycle=lifecycle, **kwargs)
     return coord, gpu, lifecycle
+
+
+def counting_clock(start=1_700_000_000.0):
+    """A strictly-increasing stand-in for `time.time()` — one tick per call, no ties ever."""
+    counter = itertools.count()
+    return lambda: start + next(counter)
 
 
 # -- T634/T635: the state machine and the lock discipline ---------------------------------------------

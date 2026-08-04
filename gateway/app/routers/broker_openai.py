@@ -151,14 +151,20 @@ class _Meter:
             return self.settled
         self.gpu_seconds = float(gpu_seconds)
         self.settled = settle(self.op_id, self.gpu_seconds)
-        BROKER_GPU_SECONDS.labels(modality=self.modality).inc(self.gpu_seconds)
+        # Only a charge the ledger actually took. A *deferred* settle still counts — the WAL will
+        # deliver it — but a **dropped** one never reaches the ledger, and counting it would make
+        # `broker_gpu_seconds_total` drift silently above the ledger it is supposed to summarize.
+        # That happens when a live request's settle loses the race with the orphan sweep.
+        if not self.settled.get("dropped"):
+            BROKER_GPU_SECONDS.labels(modality=self.modality).inc(self.gpu_seconds)
         return self.settled
 
     def abandon(self) -> None:
         """Release in full — the work never reached the GPU (an admission refusal)."""
         if self.settled is None:
             release(self.op_id)
-            self.settled = {"settled": True, "deferred": False, "gpu_seconds": 0.0}
+            self.settled = {"settled": True, "deferred": False, "dropped": False,
+                            "gpu_seconds": 0.0}
 
     def headers(self, *, streaming: bool = False) -> dict:
         """Response headers. `X-GPU-Seconds` is omitted on a streamed response — see T681 and the

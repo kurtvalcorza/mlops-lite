@@ -52,6 +52,8 @@ GATEWAY_REQUIRED = {
     "gateway_activation_outcomes_total": "activation.py",               # activation saga
     "gateway_activation_reconcile_ms": "activation.py",
     "gateway_quality_store_dropped_total": "quality.py",                # store write outcomes
+    "broker_reservations_swept_total": "metering.py",                   # metering: reclaimed/declined
+    "broker_settlements_dropped_total": "metering.py",
     "mlops_serving_up": "platform_metrics.py",                          # durable-store/agent reach
     "mlops_trainer_up": "platform_metrics.py",
 }

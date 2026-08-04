@@ -102,13 +102,30 @@ def consumption(conn, tenant_id: str, window: str = None, window_start=None) -> 
 
 # -- reserve ----------------------------------------------------------------------------------------
 
+class ReservationFinished(StoreError):
+    """The op id has already been settled or released — it cannot authorize new execution.
+
+    Distinct from `QuotaExhausted` because the caller's response differs: quota exhaustion is
+    retryable (with a different id or after the window rolls), while a finished reservation means
+    the client reused an id it should not have.
+    """
+
+    def __init__(self, op_id: str, state: str):
+        self.op_id = op_id
+        self.state = state
+        super().__init__(
+            f"reservation {op_id!r} is already {state!r} — reusing it would run new GPU work "
+            "under a finished reservation")
+
+
 def reserve(conn, op_id: str, tenant_id: str, est_gpu_seconds: float, *, kind: str = "inference",
             modality: str = "", default_budget_gpu_seconds: float = None) -> dict:
     """Atomically pre-authorize `est_gpu_seconds` against the tenant's current window.
 
     Returns the reservation dict. Raises `QuotaExhausted` when the window budget cannot cover it,
-    and `StoreError` when the reservation cannot be recorded at all — the caller refuses the GPU
-    work in both cases (FR-016 fail-safe: work that cannot be metered does not run).
+    `ReservationFinished` when the op id has already settled or been released, and `StoreError`
+    when the reservation cannot be recorded at all — the caller refuses the GPU work in all three
+    cases (FR-016 fail-safe: work that cannot be metered does not run).
 
     **Why the quota row is the lock.** Serialization has to happen somewhere, and the choices were a
     per-tenant advisory lock or the quota row itself. The row wins: it already exists exactly once
@@ -127,7 +144,12 @@ def reserve(conn, op_id: str, tenant_id: str, est_gpu_seconds: float, *, kind: s
 
     existing = get_reservation(conn, op_id)
     if existing is not None:
-        return existing  # idempotent: a retried request is not a second charge
+        if existing["state"] == "reserved":
+            return existing  # idempotent: a retried request that hasn't completed yet
+        # The reservation is finished (settled or released). Returning it would let the caller
+        # run GPU work again — while `settle()`, idempotent by design, would record nothing the
+        # second time. A tenant replaying one request id therefore got unlimited free inference.
+        raise ReservationFinished(op_id, existing["state"])
 
     with conn.transaction():
         with conn.cursor() as cur:
@@ -163,10 +185,24 @@ def reserve(conn, op_id: str, tenant_id: str, est_gpu_seconds: float, *, kind: s
                 "est_gpu_seconds, state) VALUES (%s, %s, %s, %s, %s, %s, 'reserved') "
                 "ON CONFLICT (op_id) DO NOTHING",
                 (op_id, tenant_id, kind, modality, window_start, est_gpu_seconds))
+            inserted = cur.rowcount == 1
 
     reservation = get_reservation(conn, op_id)
     if reservation is None:  # pragma: no cover — the insert committed or the transaction raised
         raise StoreError(f"reservation {op_id!r} could not be recorded")
+
+    if not inserted:
+        # Another concurrent request with the same op_id won the insert race. The quota-row lock
+        # serialized the transactions, so the winner committed first and this request's INSERT was
+        # a no-op. We now see the winner's row.
+        #
+        # If it's still `reserved`, the winner is currently executing GPU work — admitting a second
+        # execution under the same reservation would run two GPU calls billed as one.
+        # If it settled or was released in the meantime, the id is finished.
+        if reservation["state"] == "reserved":
+            raise ReservationFinished(op_id, "in_flight")
+        raise ReservationFinished(op_id, reservation["state"])
+
     return reservation
 
 

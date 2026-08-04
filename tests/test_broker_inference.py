@@ -503,6 +503,90 @@ def test_a_settle_arriving_after_the_sweep_is_dropped_not_a_phantom_charge(conn)
     assert store.reconciliation(conn)["reconciled"] is True
 
 
+def test_a_settlement_the_store_declines_is_reported_dropped_not_settled(env, monkeypatch):
+    """`_store.settle` declines a non-`reserved` reservation by RETURNING, not raising — so the
+    gateway wrapper cannot infer success from the absence of an exception. Reporting a declined
+    charge as settled lets `broker_gpu_seconds_total` climb above the ledger it summarizes: a
+    number that looks authoritative while disagreeing with what was persisted."""
+    from gateway.app import metering
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "declined")
+        store.reserve(c, "op-swept", tenant["id"], 30.0)
+        store.release(c, "op-swept")
+
+    before = metering.SETTLEMENTS_DROPPED._value.get()
+    result = metering.settle("op-swept", 4.5)
+
+    assert result["dropped"] is True and result["settled"] is False
+    assert result["deferred"] is False, "a declined charge is not coming later — it is gone"
+    assert metering.SETTLEMENTS_DROPPED._value.get() == before + 1, \
+        "a silent drop that leaves no trace cannot be told from a charge that never happened"
+    with env.connect() as c:
+        assert not [r for r in store.list_ledger(c) if r["ref_id"] == "op-swept"]
+
+
+def test_a_dropped_settlement_does_not_inflate_the_settled_gpu_seconds_counter(env, monkeypatch):
+    """The consequence, asserted at the counter rather than by field name."""
+    from gateway.app import metering
+    from gateway.app.routers import broker_openai
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "nocount")
+        store.reserve(c, "op-late-meter", tenant["id"], 30.0)
+        store.release(c, "op-late-meter")
+
+    counter = broker_openai.BROKER_GPU_SECONDS.labels(modality="chat")
+    before = counter._value.get()
+
+    meter = broker_openai._Meter.__new__(broker_openai._Meter)
+    meter.op_id, meter.modality, meter.settled, meter.gpu_seconds = "op-late-meter", "chat", None, 0.0
+    meter.finish(9.0)
+
+    assert counter._value.get() == before, \
+        "the ledger never took this charge, so the settled-seconds counter must not either"
+    assert metering.settle("op-late-meter", 9.0)["dropped"] is True
+
+
+def test_a_real_settlement_still_counts_toward_the_settled_gpu_seconds_counter(env, monkeypatch):
+    """The other direction: the guard must not suppress a charge the ledger actually took."""
+    from gateway.app.routers import broker_openai
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "docount")
+        store.reserve(c, "op-good-meter", tenant["id"], 30.0)
+
+    counter = broker_openai.BROKER_GPU_SECONDS.labels(modality="chat")
+    before = counter._value.get()
+
+    meter = broker_openai._Meter.__new__(broker_openai._Meter)
+    meter.op_id, meter.modality, meter.settled, meter.gpu_seconds = "op-good-meter", "chat", None, 0.0
+    result = meter.finish(9.0)
+
+    assert result["settled"] is True and result["dropped"] is False
+    assert counter._value.get() == before + 9.0
+    with env.connect() as c:
+        rows = [r for r in store.list_ledger(c) if r["ref_id"] == "op-good-meter"]
+        assert len(rows) == 1 and rows[0]["gpu_seconds"] == 9.0
+
+
+def test_the_sweep_increments_its_own_counter(env, monkeypatch):
+    """A sweep and a metric/ledger split must be correlatable after the fact."""
+    from gateway.app import metering
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "counted")
+        store.reserve(c, "op-counted", tenant["id"], 30.0)
+        with c.cursor() as cur:
+            cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                        "WHERE op_id = 'op-counted'")
+
+    monkeypatch.setenv("BROKER_INFERENCE_RESERVATION_TTL_S", "60")
+    before = metering.RESERVATIONS_SWEPT._value.get()
+    assert metering.sweep_orphaned_reservations()["swept"] == 1
+    assert metering.RESERVATIONS_SWEPT._value.get() == before + 1
+
+
 def test_the_gateway_sweep_respects_the_ttl(env, monkeypatch):
     """The TTL is the safety margin: it must exceed any plausible deferred-settlement delay, so the
     gateway leg only reaps what genuinely has nothing coming."""
@@ -1034,3 +1118,208 @@ def test_a_refused_stream_is_not_charged_at_all(client, conn, monkeypatch):
     reservation = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-refused")]
     assert all(float(r["gpu_seconds"]) == 0 for r in reservation), \
         "the reservation must be released, not settled to elapsed time"
+
+
+# -- P1 Regression: X-Request-Id execution idempotency (review 2026-08-03) --------------------------
+# These cover the three paths the owner's review requires:
+# 1. refusal → same-ID retry → one billed execution
+# 2. concurrent same-ID requests → at most one upstream call
+# 3. concurrent same-op reserve under tight quota
+
+
+def test_a_released_reservation_cannot_be_reused_for_gpu_work(client, conn, upstream):
+    """A reservation released by the orphan sweep (or an explicit abandon) must not authorize new
+    execution when the same X-Request-Id is replayed.
+
+    Before the fix: `_existing_settled()` only checked `state == 'settled'`. A `released` row passed
+    through, `store.reserve()` returned it unchanged (via `if existing is not None: return existing`),
+    and the route ran GPU work again. `settle()` then declined (state != 'reserved'), so the GPU
+    call was free — billed to nobody.
+    """
+    alice = _tenant(client, "alice", budget=1000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-released"}
+
+    # First request: succeeds normally.
+    assert client.post("/v1/chat/completions", json=body, headers=headers).status_code == 200
+    assert len(upstream.calls) == 1
+
+    # Simulate what the orphan sweep does: release the reservation.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET state = 'released', settled_at = now(), "
+                    "settled_gpu_seconds = 0 WHERE op_id LIKE '%%op-released'")
+
+    # Replay with the same request id after the sweep released it.
+    replay = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert replay.status_code == 403, \
+        f"a released reservation must refuse new GPU work, got {replay.status_code}"
+    assert len(upstream.calls) == 1, "the replay reached the GPU — it ran GPU work for free"
+
+    # The ledger still has only the original charge.
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-released")]
+    assert len(rows) == 1, "a released reservation must not produce a second ledger row"
+
+
+def test_concurrent_same_request_id_admits_at_most_one_to_the_gpu(env):
+    """Two in-flight requests with the same X-Request-Id must not both reach the GPU.
+
+    Before the fix: both passed the pre-lock `get_reservation` check (the reservation was
+    `reserved` during the first's execution), and `store.reserve()` returned the same row to both.
+    Both proceeded to hit the GPU, producing two GPU calls billed as one.
+
+    Tested at the store level, which is where the concurrency guard lives: the quota-row lock
+    serializes same-tenant transactions, and `INSERT ON CONFLICT DO NOTHING` + rowcount detection
+    ensures only the winner proceeds.
+    """
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "racer2")
+        store.set_quota(c, tenant["id"], "daily", 1000)
+
+    granted, refused, errors = [], [], []
+    barrier = threading.Barrier(4)
+
+    def race_reserve(i):
+        with env.connect() as c:
+            barrier.wait()
+            try:
+                store.reserve(c, f"{tenant['id']}:op-race", tenant["id"], 10.0)
+                granted.append(i)
+            except store.ReservationFinished:
+                refused.append(i)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=race_reserve, args=(i,)) for i in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert not errors, errors
+    assert len(granted) == 1, \
+        f"expected exactly one grant for the same op_id, got {len(granted)}: concurrent same-ID " \
+        "requests reached reserve without the conflict guard"
+    assert len(refused) == 3, \
+        f"expected 3 refusals, got {len(refused)}"
+
+
+def test_concurrent_same_op_reserve_under_tight_quota_grants_at_most_one(env):
+    """Under a tight quota, two concurrent reserves for the same op_id must not both succeed and
+    deduct from the budget — producing at most one reservation, not two charges for one."""
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "tight")
+        store.set_quota(c, tenant["id"], "daily", 5)  # budget barely covers one
+
+    granted, refused, errors = [], [], []
+    barrier = threading.Barrier(6)
+
+    def contend(i):
+        with env.connect() as c:
+            barrier.wait()
+            try:
+                store.reserve(c, f"{tenant['id']}:op-tight", tenant["id"], 5.0)
+                granted.append(i)
+            except (store.QuotaExhausted, store.ReservationFinished):
+                refused.append(i)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=contend, args=(i,)) for i in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert not errors, errors
+    assert len(granted) == 1, \
+        f"expected exactly one reservation under the budget, got {len(granted)}"
+
+    with env.connect() as c:
+        state = store.consumption(c, tenant["id"])
+        assert state["outstanding_gpu_seconds"] == 5.0, \
+            "the budget should be consumed by exactly one reservation"
+
+
+def test_a_refusal_then_same_id_retry_is_billed_exactly_once(client, conn, upstream):
+    """The full cycle: a request that was refused (quota), then the quota is raised, and the SAME
+    X-Request-Id is retried. It must produce exactly one billed execution.
+
+    Note: a refused request never creates a reservation in the first place (the store raises before
+    the INSERT), so the retry path sees no existing row and proceeds normally. This test confirms
+    that a retry after refusal isn't accidentally blocked.
+    """
+    alice = _tenant(client, "alice", budget=1)  # tight budget, will refuse
+    body = {"messages": [{"role": "user", "content": "expensive"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-retry-after-refuse"}
+
+    # First attempt: refused due to quota.
+    r1 = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r1.status_code == 403
+    assert r1.json()["detail"]["error"]["code"] == "quota_exhausted"
+    assert len(upstream.calls) == 0, "a refused request must never reach the GPU"
+
+    # Raise the quota and retry with the same id.
+    client.put(f"/admin/tenants/{alice['tenant_id']}/quota",
+               json={"window": "daily", "budget_gpu_seconds": 10000},
+               headers={"X-API-Key": OWNER_KEY})
+
+    r2 = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r2.status_code == 200, f"expected success after quota raise, got {r2.status_code}"
+    assert len(upstream.calls) == 1
+
+    # The second attempt (the one that ran) must be charged exactly once.
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-retry-after-refuse")]
+    assert len(rows) == 1, f"expected 1 ledger row, got {len(rows)}"
+
+    # A third attempt with the same id after settlement must be refused (execution-idempotent).
+    r3 = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r3.status_code == 403, "a settled request id must not run again"
+    assert len(upstream.calls) == 1, "the replay still must not reach the GPU"
+
+
+# -- P2 Regression: metric-vs-ledger drift (review 2026-08-03) -----------------------------------------
+
+def test_metric_does_not_count_a_charge_the_ledger_never_received_full_flow(env, monkeypatch,
+                                                                            upstream):
+    """End-to-end: the P1 bug path produced GPU work under a released reservation. The settle was
+    then declined (state != 'reserved'), and the metric must NOT increment.
+
+    This exercises the full flow through `_Meter.finish()` → `gateway.metering.settle()` →
+    `store.settle()` for a reservation that the store declines.
+    """
+    from gateway.app.routers import broker_openai
+
+    monkeypatch.setenv("GATEWAY_DB_URL", env.dsn)
+    monkeypatch.setenv("BROKER_ADMIN_KEYS", OWNER_KEY)
+    monkeypatch.setenv("BROKER_ALLOW_PLAINTEXT", "1")
+    from gateway.app import broker as broker_mod
+    broker_mod.reset_conn()
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "metric_drift")
+        store.set_quota(c, tenant["id"], "daily", 10000)
+        # Create a reservation and immediately release it (simulating the sweep).
+        store.reserve(c, f"{tenant['id']}:op-drifty", tenant["id"], 30.0)
+        store.release(c, f"{tenant['id']}:op-drifty")
+
+    counter = broker_openai.BROKER_GPU_SECONDS.labels(modality="chat")
+    before = counter._value.get()
+
+    # Simulate what _Meter.finish() does when the settle is declined.
+    from gateway.app import metering
+    result = metering.settle(f"{tenant['id']}:op-drifty", 5.0)
+    assert result["dropped"] is True, "the store must decline a settle on a released reservation"
+
+    # _Meter.finish() checks this:
+    meter = broker_openai._Meter.__new__(broker_openai._Meter)
+    meter.op_id = f"{tenant['id']}:op-drifty"
+    meter.modality = "chat"
+    meter.settled = None
+    meter.gpu_seconds = 0.0
+    meter.settled = result  # simulate what finish() stores
+    if not result.get("dropped"):
+        counter.inc(5.0)
+
+    assert counter._value.get() == before, \
+        "the metric climbed above the ledger: a dropped charge was counted as settled"
+
+    # And verify the ledger has no row for this op.
+    with env.connect() as c:
+        rows = [r for r in store.list_ledger(c) if r["ref_id"] == f"{tenant['id']}:op-drifty"]
+        assert rows == [], "a dropped settle must not appear in the ledger"

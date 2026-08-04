@@ -104,6 +104,7 @@ from platformlib.storeimpl.labels import attach_label  # noqa: F401 — re-expor
 # -- broker metering repository: reserve -> settle GPU-seconds (storeimpl/metering, 026 T628-T631) ---
 from platformlib.storeimpl.metering import (  # noqa: F401 — re-exported
     QuotaExhausted,
+    ReservationFinished,
     consumption,
     get_reservation,
     list_ledger,
