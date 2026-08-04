@@ -1,6 +1,8 @@
 import { redirect } from 'next/navigation';
 
-// 021 (FR-212): land on the loop's live heart — serving.
+// 027 (FR-363/364): the root lands on Overview, which answers health / what is running / what needs
+// attention / what next. 021 landed on `/serving` — the loop's live heart — which was right when
+// the IA *was* the loop and is wrong now that there are ten areas and no cycle to have a heart of.
 export default function Home() {
-  redirect('/serving');
+  redirect('/overview');
 }

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { JetBrains_Mono } from 'next/font/google';
 import './globals.css';
-import { LoopNav } from '@/components/LoopNav';
+import { AreaNav } from '@/components/AreaNav';
 
 // Self-hosted at build time by next/font (Principle V — OSS, no paid Berkeley Mono; Principle I —
 // no runtime external request). Exposed to Tailwind/CSS as --font-mono.
@@ -21,7 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={jetbrains.variable}>
       <body className="min-h-screen font-mono text-body-md">
-        <LoopNav />
+        <AreaNav />
         <main className="mx-auto w-full max-w-[1100px] px-6 py-8">{children}</main>
       </body>
     </html>

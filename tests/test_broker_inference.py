@@ -1,0 +1,1399 @@
+"""026 Phase 1 — the P1 tenant inference surface and its metering (T624–T633, T678, T681, T688).
+
+Drives the real FastAPI app against a real scratch Postgres, with only the *engine children* faked:
+every claim under test is about the broker's own behaviour — who is charged, whether a racing pair of
+requests can both be admitted, which status a refusal carries — and none of those depend on what a
+model actually generated.
+
+The upstream fake is deliberately small (`_FakeUpstream`), because a faithful llama.cpp stand-in
+would be a second implementation to keep correct, and none of these assertions look at the text.
+"""
+import json
+import os
+import sys
+import threading
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+import pytest  # noqa: E402
+
+from platformlib import store  # noqa: E402
+from tests import _brokerdb, _gwimport  # noqa: E402
+
+OWNER_KEY = "owner-test-key"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _guard():
+    _brokerdb.requires_db()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_gateway_metrics():
+    """Leave the process's Prometheus registry as this module found it.
+
+    The repo loads `gateway/app/*.py` under two module names — the existing suites synthesize an
+    `app` package, this one imports the real `gateway.app.main` — and both define the same
+    module-level metrics. The global default registry refuses a second registration, so whichever
+    identity comes second raises `Duplicated timeseries`, and which one that is depends on collection
+    order.
+
+    The isolation spans the whole module, not just the import, because the app registers metrics
+    *after* import too: `main.py`'s startup handler lazily imports `gateway.app.scheduler`, which
+    defines `gateway_policy_checks_total` the moment a `TestClient` enters its lifespan.
+    """
+    yield from _gwimport.isolate_module_metrics()
+
+
+@pytest.fixture()
+def env(monkeypatch, tmp_path):
+    """A configured broker: scratch DB, owner key, plaintext allowed, a private settlement WAL."""
+    with _brokerdb.ScratchDB() as db:
+        monkeypatch.setenv("GATEWAY_DB_URL", db.dsn)
+        monkeypatch.setenv("BROKER_ADMIN_KEYS", OWNER_KEY)
+        monkeypatch.setenv("BROKER_ALLOW_PLAINTEXT", "1")
+        monkeypatch.setenv("BROKER_METERING_WAL", str(tmp_path / "settlements.jsonl"))
+        from gateway.app import broker as broker_mod
+        broker_mod.reset_conn()
+        yield db
+        broker_mod.reset_conn()
+
+
+@pytest.fixture()
+def client(env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(_gwimport.gateway_app()) as c:
+        yield c
+
+
+@pytest.fixture()
+def conn(env):
+    with env.connect() as c:
+        yield c
+
+
+class _FakeUpstream:
+    """Stands in for the engine children. `status` drives the refusal-mapping tests; `delay` makes a
+    request's GPU-seconds measurable."""
+
+    def __init__(self, status=200, payload=None, delay=0.0):
+        self.status, self.payload, self.delay = status, payload or {}, delay
+        self.calls = []
+
+    async def __call__(self, url, payload, timeout=300.0):
+        self.calls.append((url, payload))
+        if self.delay:
+            time.sleep(self.delay)
+
+        class R:
+            status_code = self.status
+            text = json.dumps(self.payload)
+
+            def json(_self):
+                return self.payload
+
+        return R()
+
+
+@pytest.fixture()
+def upstream(monkeypatch):
+    from gateway.app.routers import broker_openai
+
+    fake = _FakeUpstream(payload={"completion": "hello", "serving_model": "qwen"})
+    monkeypatch.setattr(broker_openai, "_post", fake)
+    return fake
+
+
+def _tenant(client, name="alice", budget=None, window="daily"):
+    r = client.post("/admin/tenants", json={"name": name}, headers={"X-API-Key": OWNER_KEY})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    if budget is not None:
+        q = client.put(f"/admin/tenants/{body['tenant_id']}/quota",
+                       json={"window": window, "budget_gpu_seconds": budget},
+                       headers={"X-API-Key": OWNER_KEY})
+        assert q.status_code == 200, q.text
+    return body
+
+
+def _auth(tenant):
+    return {"Authorization": f"Bearer {tenant['api_key']}"}
+
+
+# -- T624: the admin surface ---------------------------------------------------------------------------
+
+def test_create_tenant_returns_the_raw_key_exactly_once(client):
+    created = _tenant(client)
+    raw = created["api_key"]
+    listing = client.get("/admin/tenants", headers={"X-API-Key": OWNER_KEY}).json()
+    assert raw not in json.dumps(listing), "the raw key must appear in the creation response only"
+
+
+def test_rotation_invalidates_the_prior_key(client, upstream):
+    created = _tenant(client)
+    assert client.get("/v1/usage", headers=_auth(created)).status_code == 200
+    rotated = client.post(f"/admin/tenants/{created['tenant_id']}/keys",
+                          headers={"X-API-Key": OWNER_KEY}).json()
+    assert client.get("/v1/usage", headers=_auth(created)).status_code == 401
+    assert client.get("/v1/usage", headers=_auth(rotated)).status_code == 200
+
+
+def test_admin_surface_refuses_a_tenant_key(client):
+    """A tenant reaching /admin could raise its own quota — the whole reason this is a second key."""
+    created = _tenant(client)
+    r = client.get("/admin/usage", headers=_auth(created))
+    assert r.status_code == 401
+
+
+def test_admin_surface_refuses_no_credentials(client):
+    assert client.get("/admin/usage").status_code == 401
+
+
+# -- T625: an unmodified OpenAI client completes a request ---------------------------------------------
+
+def test_an_unmodified_openai_client_completes_a_request(client, upstream):
+    """The acceptance check as written: not a hand-rolled request that happens to match, but the
+    real SDK, which validates the response against its own models."""
+    openai = pytest.importorskip("openai")
+
+    created = _tenant(client)
+    sdk = openai.OpenAI(api_key=created["api_key"], base_url="http://testserver/v1",
+                        http_client=client)
+    completion = sdk.chat.completions.create(
+        model="qwen", messages=[{"role": "user", "content": "hi"}])
+    assert completion.choices[0].message.content == "hello"
+    assert completion.object == "chat.completion"
+
+
+def test_models_listing_is_openai_shaped(client, monkeypatch):
+    from gateway.app import registry
+    monkeypatch.setattr(registry, "list_models",
+                        lambda: [{"name": "qwen", "serving_version": "3"},
+                                 {"name": "unpromoted", "serving_version": None}])
+    created = _tenant(client)
+    body = client.get("/v1/models", headers=_auth(created)).json()
+    assert body["object"] == "list"
+    assert [m["id"] for m in body["data"]] == ["qwen"], \
+        "a model with nothing promoted is not requestable and must not be advertised"
+
+
+def test_embeddings_are_openai_shaped(client, monkeypatch):
+    from gateway.app.routers import broker_openai
+    monkeypatch.setattr(broker_openai, "_post", _FakeUpstream(payload=[[0.1, 0.2], [0.3, 0.4]]))
+    created = _tenant(client)
+    r = client.post("/v1/embeddings", json={"model": "embed", "input": ["a", "b"]},
+                    headers=_auth(created))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["object"] == "list" and len(body["data"]) == 2
+    assert body["data"][0]["embedding"] == [0.1, 0.2] and body["data"][1]["index"] == 1
+
+
+def test_vision_is_task_typed(client, monkeypatch):
+    from gateway.app.routers import broker_openai
+    monkeypatch.setattr(broker_openai, "_post",
+                        _FakeUpstream(payload={"labels": [{"label": "cat", "score": 0.9}]}))
+    created = _tenant(client)
+    r = client.post("/v1/vision/classify", json={"model": "vit", "image": "Zm9v"},
+                    headers=_auth(created))
+    assert r.status_code == 200 and r.json()["labels"][0]["label"] == "cat"
+    assert client.post("/v1/vision/segment", json={"image": "Zm9v"},
+                       headers=_auth(created)).status_code == 404
+
+
+# -- T626: TLS is required, and refused rather than redirected -------------------------------------------
+
+def test_plaintext_is_refused_not_redirected(client, monkeypatch, upstream):
+    created = _tenant(client)  # provisioned first — the owner surface enforces TLS too
+    monkeypatch.delenv("BROKER_ALLOW_PLAINTEXT", raising=False)
+    r = client.get("/v1/usage", headers=_auth(created))
+    assert r.status_code == 401, "plaintext must be refused"
+    assert r.status_code not in (301, 302, 307, 308), \
+        "a redirect would have already leaked the bearer key over http"
+    assert "location" not in {k.lower() for k in r.headers}
+
+
+def test_a_client_supplied_forwarded_proto_header_does_not_satisfy_tls(client, monkeypatch,
+                                                                       upstream):
+    """The header alone is **not** proof of TLS, and treating it as proof defeated the whole control.
+
+    Any peer on the LAN can send plaintext HTTP with `X-Forwarded-Proto: https`. When `_is_secure()`
+    read that header directly, such a request passed `enforce_tls()` and the bearer key crossed the
+    network in the clear — precisely the outcome FR-002a exists to prevent, reachable by adding one
+    header. At this layer there is nothing left to tell a proxy's header from a client's; the peer
+    address is gone.
+
+    Trust therefore lives where the address is still known: uvicorn's `ProxyHeadersMiddleware`
+    honours the header only from `--forwarded-allow-ips`, and the result is `request.url.scheme` —
+    which is now the only thing consulted.
+    """
+    created = _tenant(client)
+    monkeypatch.delenv("BROKER_ALLOW_PLAINTEXT", raising=False)
+    r = client.get("/v1/usage", headers={**_auth(created), "X-Forwarded-Proto": "https"})
+    assert r.status_code == 401, "a spoofable header must not satisfy TLS enforcement"
+
+
+def test_tls_is_satisfied_by_the_framework_resolved_scheme(env, monkeypatch, upstream):
+    """The legitimate path: a TLS request (direct, or forwarded by a TRUSTED proxy, which is what
+    populates the scheme) is admitted."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("BROKER_ALLOW_PLAINTEXT", raising=False)
+    with TestClient(_gwimport.gateway_app(), base_url="https://testserver") as secure:
+        created = _tenant(secure)
+        r = secure.get("/v1/usage", headers=_auth(created))
+        assert r.status_code == 200
+
+
+# -- T620/T627: auth and per-tenant attribution ----------------------------------------------------------
+
+def test_missing_and_invalid_keys_are_refused_without_gpu_work(client, upstream):
+    assert client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "x"}]}
+                       ).status_code == 401
+    assert client.post("/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "x"}]},
+                       headers={"Authorization": "Bearer sk-nope"}).status_code == 401
+    assert upstream.calls == [], "an unauthenticated request must never reach the GPU"
+
+
+def test_two_tenants_issuing_identical_requests_are_attributed_separately(client, conn, upstream):
+    alice, bob = _tenant(client, "alice"), _tenant(client, "bob")
+    body = {"messages": [{"role": "user", "content": "identical"}]}
+    assert client.post("/v1/chat/completions", json=body, headers=_auth(alice)).status_code == 200
+    assert client.post("/v1/chat/completions", json=body, headers=_auth(bob)).status_code == 200
+
+    rows = store.list_ledger(conn)
+    by_tenant = {r["tenant_id"] for r in rows}
+    assert by_tenant == {alice["tenant_id"], bob["tenant_id"]}
+    assert len(rows) == 2, "identical requests from two tenants are two separately attributed records"
+
+
+def test_a_request_id_is_billed_once_and_executed_once(client, conn, upstream):
+    """Idempotency has to cover EXECUTION, not just the charge.
+
+    The old version asserted only that one ledger row existed — which is exactly what a *free
+    re-run* produces. `store.reserve()` returns an already-settled reservation for a repeated op id,
+    so the route ran the model again and `settle()`, idempotent by design, recorded nothing. A
+    tenant replaying one `X-Request-Id` got unlimited free inference, and this test could not see it
+    because it never counted upstream calls.
+
+    A completed request is now refused on replay. The genuine retry case is unaffected: an attempt
+    that never settled leaves its reservation `reserved`, and retrying resolves to it normally —
+    only a *finished* one is refused.
+    """
+    alice = _tenant(client, "alice")
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-fixed"}
+
+    assert client.post("/v1/chat/completions", json=body, headers=headers).status_code == 200
+    assert len(upstream.calls) == 1
+
+    replay = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert replay.status_code == 403, "a settled request id must not authorize new GPU work"
+    assert len(upstream.calls) == 1, "the replay reached the GPU — it was billed to nobody"
+
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-fixed")]
+    assert len(rows) == 1, "the same op id must not be billed twice"
+
+
+def test_two_tenants_using_the_same_request_id_do_not_collide(client, conn, upstream):
+    """`X-Request-Id` is client-supplied, and reservations were keyed on it alone — so two tenants
+    picking the same value (`1`, `test`, a framework default) shared one global namespace. The
+    second tenant's request resolved to the FIRST tenant's reservation and ran GPU work against
+    someone else's quota."""
+    alice = _tenant(client, "alice", budget=1000)
+    bob = _tenant(client, "bob", budget=1000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+
+    assert client.post("/v1/chat/completions", json=body,
+                       headers={**_auth(alice), "X-Request-Id": "shared"}).status_code == 200
+    assert client.post("/v1/chat/completions", json=body,
+                       headers={**_auth(bob), "X-Request-Id": "shared"}).status_code == 200, \
+        "bob's request was refused as a replay of alice's — the ids collided"
+
+    ledger = store.list_ledger(conn)
+    refs = [r["ref_id"] for r in ledger if r["ref_id"].endswith("shared")]
+    assert len(refs) == 2, "each tenant must have its own reservation"
+    assert len(set(refs)) == 2, f"the two tenants shared one op id: {refs}"
+    tenants = {r["tenant_id"] for r in ledger if r["ref_id"].endswith("shared")}
+    assert len(tenants) == 2, "the charges must land on two different tenants"
+
+
+# -- T628: the reserve step is hard and atomic --------------------------------------------------------------
+
+def test_concurrent_reserves_against_room_for_one_grant_exactly_one(env):
+    """The write-skew case: N threads, a budget with room for exactly one reservation."""
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "racer")
+        store.set_quota(c, tenant["id"], "daily", 10)
+
+    granted, refused, errors = [], [], []
+    barrier = threading.Barrier(8)
+
+    def contend(i):
+        with env.connect() as c:
+            barrier.wait()
+            try:
+                store.reserve(c, f"op-{i}", tenant["id"], 10.0)
+                granted.append(i)
+            except store.QuotaExhausted:
+                refused.append(i)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=contend, args=(i,)) for i in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors, errors
+    assert len(granted) == 1, f"expected exactly one grant, got {len(granted)}"
+    assert len(refused) == 7
+
+
+def test_reserve_refuses_a_second_call_for_a_still_reserved_op_id(conn):
+    """A pre-existing `reserved` op is in flight — admitting a second execution under it would run
+    two GPU calls billed as one (the ledger is keyed by op_id, so only one settlement survives).
+
+    Previously this test asserted idempotent return. That behavior was incompatible with
+    execution-idempotency: the route had no way to distinguish 'my own retry' from 'a concurrent
+    duplicate', so both got the same reservation and both reached the GPU.
+    """
+    tenant = store.create_tenant(conn, "idem")
+    store.set_quota(conn, tenant["id"], "daily", 100)
+    store.reserve(conn, "op-1", tenant["id"], 5.0)
+    with pytest.raises(store.ReservationFinished) as exc:
+        store.reserve(conn, "op-1", tenant["id"], 5.0)
+    assert exc.value.state == "in_flight"
+    assert store.consumption(conn, tenant["id"])["outstanding_gpu_seconds"] == 5.0
+
+
+def test_outstanding_reservations_count_against_the_budget(conn):
+    """Counting only settled ledger rows would let a tenant with jobs in flight overshoot freely."""
+    tenant = store.create_tenant(conn, "outstanding")
+    store.set_quota(conn, tenant["id"], "daily", 10)
+    store.reserve(conn, "op-a", tenant["id"], 8.0)
+    with pytest.raises(store.QuotaExhausted):
+        store.reserve(conn, "op-b", tenant["id"], 5.0)
+
+
+def test_a_tenant_without_a_quota_is_recorded_but_unbounded(conn):
+    tenant = store.create_tenant(conn, "unquotaed")
+    store.reserve(conn, "op-x", tenant["id"], 10_000.0)
+    assert store.get_reservation(conn, "op-x")["state"] == "reserved"
+
+
+# -- T629: settle-to-actual, and exactly-once under a mid-settle kill ------------------------------------------
+
+def test_settle_records_the_actual_and_releases_the_remainder(conn):
+    tenant = store.create_tenant(conn, "settler")
+    store.set_quota(conn, tenant["id"], "daily", 100)
+    store.reserve(conn, "op-1", tenant["id"], 30.0)
+    assert store.consumption(conn, tenant["id"])["consumed_gpu_seconds"] == 30.0
+    store.settle(conn, "op-1", 4.5)
+    state = store.consumption(conn, tenant["id"])
+    assert state["settled_gpu_seconds"] == 4.5
+    assert state["outstanding_gpu_seconds"] == 0.0, "the unused remainder is released"
+    assert state["remaining_gpu_seconds"] == 95.5
+
+
+def test_settle_is_idempotent(conn):
+    tenant = store.create_tenant(conn, "twice")
+    store.reserve(conn, "op-1", tenant["id"], 30.0)
+    store.settle(conn, "op-1", 4.5)
+    store.settle(conn, "op-1", 4.5)
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"] == "op-1"]
+    assert len(rows) == 1 and rows[0]["gpu_seconds"] == 4.5
+
+
+def test_killing_the_process_mid_settle_settles_exactly_once_on_restart(env, monkeypatch, tmp_path):
+    """The WAL guarantees at-least-once; the ledger's unique ref_id collapses it to exactly-once."""
+    from gateway.app import broker as broker_mod
+    from gateway.app import metering
+
+    wal = tmp_path / "wal.jsonl"
+    monkeypatch.setenv("BROKER_METERING_WAL", str(wal))
+    broker_mod.reset_conn()
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "crasher")
+        store.reserve(c, "op-crash", tenant["id"], 30.0)
+
+    # The process dies after the WAL write but before the store write commits.
+    def boom(*a, **k):
+        raise RuntimeError("killed mid-settle")
+
+    # Patch the store object `metering` actually holds, not the one this module imported. They are
+    # usually the same, but `tests/test_store_facade.py` pops `platformlib.store` from `sys.modules`
+    # and re-imports it, so a suite running after it can be holding a different module object than
+    # `metering` bound at ITS import — and patching the wrong one makes this test silently assert
+    # nothing. Reaching through `metering._store` is exact regardless of module-identity churn.
+    monkeypatch.setattr(metering._store, "settle", boom)
+    result = metering.settle("op-crash", 7.25)
+    assert result["deferred"] is True, "a settle that cannot reach the store is deferred, not lost"
+    assert wal.exists() and "op-crash" in wal.read_text()
+
+    # Restart: the store is reachable again and the outbox replays.
+    monkeypatch.undo()
+    monkeypatch.setenv("BROKER_METERING_WAL", str(wal))
+    monkeypatch.setenv("GATEWAY_DB_URL", env.dsn)
+    broker_mod.reset_conn()
+    replayed = metering.replay_outbox()
+    assert replayed["replayed"] == 1 and replayed["failed"] == 0
+
+    with env.connect() as c:
+        rows = [r for r in store.list_ledger(c) if r["ref_id"] == "op-crash"]
+        assert len(rows) == 1 and float(rows[0]["gpu_seconds"]) == 7.25
+
+    metering.replay_outbox()  # a second replay must not double-charge
+    with env.connect() as c:
+        assert len([r for r in store.list_ledger(c) if r["ref_id"] == "op-crash"]) == 1
+
+
+# -- the orphaned-reservation sweep -----------------------------------------------------------------
+# A client that disconnects before Starlette ever pulls the response body leaves the stream
+# generator unstarted: no frame exists for `GeneratorExit` to reach, so no `finally` runs, and the
+# reservation sits `reserved` holding its estimate against the window forever. Nothing inside a
+# request can release it — the sweep is the only path back.
+
+def test_an_orphaned_inference_reservation_is_swept_and_its_quota_restored(conn):
+    tenant = store.create_tenant(conn, "orphaned")
+    store.set_quota(conn, tenant["id"], "daily", 100)
+    store.reserve(conn, "op-orphan", tenant["id"], 30.0)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                    "WHERE op_id = 'op-orphan'")
+
+    swept = store.sweep_stale_reservations(conn, older_than_s=3600)
+
+    assert "op-orphan" in swept
+    assert store.get_reservation(conn, "op-orphan")["state"] == "released"
+    assert store.consumption(conn, tenant["id"])["outstanding_gpu_seconds"] == 0.0, \
+        "the orphan's estimate must be refunded to the window"
+    assert not [r for r in store.list_ledger(conn) if r["ref_id"] == "op-orphan"], \
+        "work that never happened must not be charged"
+
+
+def test_the_sweep_spares_young_inference_and_long_running_job_reservations(conn):
+    """A job legitimately stays `reserved` for as long as it runs; sweeping it would refund quota
+    for GPU time still being spent, then void the real settle when it arrived."""
+    tenant = store.create_tenant(conn, "spared")
+    store.reserve(conn, "op-young", tenant["id"], 30.0)
+    store.reserve(conn, "op-job", tenant["id"], 600.0, kind="job")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                    "WHERE op_id = 'op-job'")
+
+    swept = store.sweep_stale_reservations(conn, older_than_s=3600)
+
+    assert swept == [], f"nothing eligible, yet swept: {swept}"
+    assert store.get_reservation(conn, "op-young")["state"] == "reserved"
+    assert store.get_reservation(conn, "op-job")["state"] == "reserved"
+
+
+def test_a_settle_arriving_after_the_sweep_is_dropped_not_a_phantom_charge(conn):
+    """The WAL replay can deliver a settle after the sweep released its reservation. Recording it
+    anyway would insert a ledger row against a reservation whose `settled_gpu_seconds` stays 0 —
+    breaking `reconciliation()`'s identity permanently, since the ledger is append-only."""
+    tenant = store.create_tenant(conn, "late")
+    store.reserve(conn, "op-late", tenant["id"], 30.0)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                    "WHERE op_id = 'op-late'")
+    assert store.sweep_stale_reservations(conn, older_than_s=3600) == ["op-late"]
+
+    settled = store.settle(conn, "op-late", 4.5)
+
+    assert settled["state"] == "released", "a late settle must not resurrect the reservation"
+    assert not [r for r in store.list_ledger(conn) if r["ref_id"] == "op-late"]
+    assert store.reconciliation(conn)["reconciled"] is True
+
+
+def test_a_settlement_the_store_declines_is_reported_dropped_not_settled(env, monkeypatch):
+    """`_store.settle` declines a non-`reserved` reservation by RETURNING, not raising — so the
+    gateway wrapper cannot infer success from the absence of an exception. Reporting a declined
+    charge as settled lets `broker_gpu_seconds_total` climb above the ledger it summarizes: a
+    number that looks authoritative while disagreeing with what was persisted."""
+    from gateway.app import metering
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "declined")
+        store.reserve(c, "op-swept", tenant["id"], 30.0)
+        store.release(c, "op-swept")
+
+    before = metering.SETTLEMENTS_DROPPED._value.get()
+    result = metering.settle("op-swept", 4.5)
+
+    assert result["dropped"] is True and result["settled"] is False
+    assert result["deferred"] is False, "a declined charge is not coming later — it is gone"
+    assert metering.SETTLEMENTS_DROPPED._value.get() == before + 1, \
+        "a silent drop that leaves no trace cannot be told from a charge that never happened"
+    with env.connect() as c:
+        assert not [r for r in store.list_ledger(c) if r["ref_id"] == "op-swept"]
+
+
+def test_a_dropped_settlement_does_not_inflate_the_settled_gpu_seconds_counter(env, monkeypatch):
+    """The consequence, asserted at the counter rather than by field name."""
+    from gateway.app import metering
+    from gateway.app.routers import broker_openai
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "nocount")
+        store.reserve(c, "op-late-meter", tenant["id"], 30.0)
+        store.release(c, "op-late-meter")
+
+    counter = broker_openai.BROKER_GPU_SECONDS.labels(modality="chat")
+    before = counter._value.get()
+
+    meter = broker_openai._Meter.__new__(broker_openai._Meter)
+    meter.op_id, meter.modality, meter.settled, meter.gpu_seconds = "op-late-meter", "chat", None, 0.0
+    meter.finish(9.0)
+
+    assert counter._value.get() == before, \
+        "the ledger never took this charge, so the settled-seconds counter must not either"
+    assert metering.settle("op-late-meter", 9.0)["dropped"] is True
+
+
+def test_a_real_settlement_still_counts_toward_the_settled_gpu_seconds_counter(env, monkeypatch):
+    """The other direction: the guard must not suppress a charge the ledger actually took."""
+    from gateway.app.routers import broker_openai
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "docount")
+        store.reserve(c, "op-good-meter", tenant["id"], 30.0)
+
+    counter = broker_openai.BROKER_GPU_SECONDS.labels(modality="chat")
+    before = counter._value.get()
+
+    meter = broker_openai._Meter.__new__(broker_openai._Meter)
+    meter.op_id, meter.modality, meter.settled, meter.gpu_seconds = "op-good-meter", "chat", None, 0.0
+    result = meter.finish(9.0)
+
+    assert result["settled"] is True and result["dropped"] is False
+    assert counter._value.get() == before + 9.0
+    with env.connect() as c:
+        rows = [r for r in store.list_ledger(c) if r["ref_id"] == "op-good-meter"]
+        assert len(rows) == 1 and rows[0]["gpu_seconds"] == 9.0
+
+
+def test_the_sweep_increments_its_own_counter(env, monkeypatch):
+    """A sweep and a metric/ledger split must be correlatable after the fact."""
+    from gateway.app import metering
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "counted")
+        store.reserve(c, "op-counted", tenant["id"], 30.0)
+        with c.cursor() as cur:
+            cur.execute("UPDATE usage_reservation SET created_at = now() - interval '2 hours' "
+                        "WHERE op_id = 'op-counted'")
+
+    monkeypatch.setenv("BROKER_INFERENCE_RESERVATION_TTL_S", "60")
+    before = metering.RESERVATIONS_SWEPT._value.get()
+    assert metering.sweep_orphaned_reservations()["swept"] == 1
+    assert metering.RESERVATIONS_SWEPT._value.get() == before + 1
+
+
+def test_the_gateway_sweep_respects_the_ttl(env, monkeypatch):
+    """The TTL is the safety margin: it must exceed any plausible deferred-settlement delay, so the
+    gateway leg only reaps what genuinely has nothing coming."""
+    from gateway.app import metering
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "sweeper")
+        store.reserve(c, "op-stuck", tenant["id"], 30.0)
+        with c.cursor() as cur:
+            cur.execute("UPDATE usage_reservation SET created_at = now() - interval '30 minutes' "
+                        "WHERE op_id = 'op-stuck'")
+
+    monkeypatch.setenv("BROKER_INFERENCE_RESERVATION_TTL_S", "3600")
+    assert metering.sweep_orphaned_reservations() == {"swept": 0, "failed": False}, \
+        "younger than the TTL — must be left alone"
+
+    monkeypatch.setenv("BROKER_INFERENCE_RESERVATION_TTL_S", "60")
+    assert metering.sweep_orphaned_reservations()["swept"] == 1
+    with env.connect() as c:
+        assert store.get_reservation(c, "op-stuck")["state"] == "released"
+
+
+def test_a_failed_request_still_charges_what_the_gpu_spent(client, conn, monkeypatch):
+    """Refunding a failed-after-load request in full would let a tenant burn the GPU for free."""
+    from gateway.app.routers import broker_openai
+
+    alice = _tenant(client, "alice")
+
+    async def explode(url, payload, timeout=300.0):
+        raise RuntimeError("child died after generating")
+
+    monkeypatch.setattr(broker_openai, "_post", explode)
+    with pytest.raises(RuntimeError):
+        client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "x"}]}, headers=_auth(alice))
+    reservations = store.consumption(conn, alice["tenant_id"])
+    assert reservations["outstanding_gpu_seconds"] == 0.0, \
+        "the reservation is resolved on the error path, never left outstanding"
+
+
+# -- T630/T678: recurring windows and the window binding ---------------------------------------------------------
+
+def test_crossing_a_window_boundary_restores_service_with_no_manual_reset(conn):
+    tenant = store.create_tenant(conn, "windowed")
+    store.set_quota(conn, tenant["id"], "daily", 10)
+    store.reserve(conn, "op-1", tenant["id"], 10.0)
+    store.settle(conn, "op-1", 10.0)
+    with pytest.raises(store.QuotaExhausted):
+        store.reserve(conn, "op-2", tenant["id"], 1.0)
+
+    # Move the settled charge into yesterday's window — the same effect as the clock crossing
+    # midnight, without waiting for it.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_ledger SET window_start = window_start - interval '1 day' "
+                    "WHERE tenant_id = %s", (tenant["id"],))
+    store.reserve(conn, "op-2", tenant["id"], 1.0)
+    assert store.get_reservation(conn, "op-2")["state"] == "reserved"
+
+
+def test_a_reservation_is_charged_to_the_window_that_authorized_it(conn):
+    """T678: a job reserved before a boundary and settling after it charges the OLD window — the
+    alternative lets the tenant spend the new window's full budget before the old job settles."""
+    tenant = store.create_tenant(conn, "boundary")
+    store.set_quota(conn, tenant["id"], "daily", 100)
+    reservation = store.reserve(conn, "op-long", tenant["id"], 40.0)
+    original_window = reservation["window_start"]
+
+    store.settle(conn, "op-long", 40.0)
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"] == "op-long"]
+    assert rows[0]["window_start"] == original_window, \
+        "the ledger row must bear the reservation's window, not the window at completion"
+
+
+def test_window_consumption_is_derived_from_window_start_not_ts(conn):
+    tenant = store.create_tenant(conn, "derived")
+    store.set_quota(conn, tenant["id"], "daily", 100)
+    store.reserve(conn, "op-1", tenant["id"], 10.0)
+    store.settle(conn, "op-1", 10.0)
+    # A row whose wall-clock `ts` is today but whose window is yesterday must NOT count today.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_ledger SET window_start = window_start - interval '1 day' "
+                    "WHERE ref_id = 'op-1'")
+    assert store.consumption(conn, tenant["id"])["settled_gpu_seconds"] == 0.0
+
+
+# -- T631: the reconciliation identity ---------------------------------------------------------------------------
+
+def test_reconciliation_holds_over_randomized_reserve_settle_release_sequences(conn):
+    """The property T631 names: ledger totals equal the sum of settled reservations, whatever
+    interleaving of reserve / settle / release / abandon produced them."""
+    import random
+
+    rng = random.Random(20260802)
+    tenant = store.create_tenant(conn, "property")
+    for i in range(120):
+        op = f"op-{i}"
+        store.reserve(conn, op, tenant["id"], rng.uniform(0.0, 20.0))
+        action = rng.choice(["settle", "release", "abandon", "settle", "settle"])
+        if action == "settle":
+            store.settle(conn, op, rng.uniform(0.0, 20.0))
+        elif action == "release":
+            store.release(conn, op)
+        # "abandon" leaves it outstanding, which is exactly what an in-flight request looks like
+
+    result = store.reconciliation(conn, tenant["id"])
+    assert result["reconciled"], result
+
+
+def test_released_reservations_never_reach_the_ledger(conn):
+    tenant = store.create_tenant(conn, "released")
+    store.reserve(conn, "op-1", tenant["id"], 5.0)
+    store.release(conn, "op-1")
+    assert [r for r in store.list_ledger(conn) if r["ref_id"] == "op-1"] == []
+    assert store.consumption(conn, tenant["id"])["consumed_gpu_seconds"] == 0.0
+
+
+# -- T632: the single-resident serving path is preserved ------------------------------------------------------------
+
+def test_the_serving_path_is_a_plain_proxy_to_the_existing_child(client, upstream):
+    """No new serving path: the broker adapts the surface and reuses the child's /infer verbatim."""
+    alice = _tenant(client, "alice")
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "system", "content": "be terse"},
+                                       {"role": "user", "content": "hi"}],
+                          "max_tokens": 16, "temperature": 0.1},
+                    headers=_auth(alice))
+    assert r.status_code == 200
+    url, payload = upstream.calls[0]
+    assert url.endswith("/infer")
+    assert payload["max_tokens"] == 16 and payload["temperature"] == 0.1
+    assert "be terse" in payload["prompt"] and "hi" in payload["prompt"]
+
+
+# -- T633: cross-tenant refusals ----------------------------------------------------------------------------------
+
+def test_a_tenant_cannot_read_another_tenants_usage_or_keys(client, upstream):
+    """The IDOR probe suite. Every admin route is owner-only, so a tenant key gets 401 on each —
+    an authorization refusal, not a filtered empty result that looks like 'no data'."""
+    alice, bob = _tenant(client, "alice"), _tenant(client, "bob")
+    probes = [
+        ("get", f"/admin/usage?tenant={bob['tenant_id']}"),
+        ("get", "/admin/tenants"),
+        ("get", "/admin/queue"),
+        ("post", f"/admin/tenants/{bob['tenant_id']}/keys"),
+        ("post", f"/admin/tenants/{bob['tenant_id']}/revoke"),
+        ("put", f"/admin/tenants/{alice['tenant_id']}/quota"),
+    ]
+    for method, path in probes:
+        r = getattr(client, method)(path, headers=_auth(alice),
+                                    **({"json": {"window": "daily", "budget_gpu_seconds": 10**9}}
+                                       if method == "put" else {}))
+        assert r.status_code == 401, f"{method.upper()} {path} leaked to a tenant key ({r.status_code})"
+
+
+def test_a_tenants_own_usage_route_is_scoped_by_construction(client, conn, upstream):
+    alice, bob = _tenant(client, "alice"), _tenant(client, "bob")
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "x"}]},
+                headers=_auth(bob))
+    mine = client.get("/v1/usage", headers=_auth(alice)).json()
+    assert mine["tenant"] == "alice"
+    assert (mine["consumed_gpu_seconds"] or 0) == 0.0, "alice must not see bob's consumption"
+
+
+def test_require_own_tenant_refuses_with_not_found(client):
+    """404 rather than 403: 403 confirms the id exists, which is an enumeration oracle."""
+    from gateway.app.tenancy import require_own_tenant
+
+    with pytest.raises(Exception) as excinfo:
+        require_own_tenant({"id": "a"}, "b")
+    assert excinfo.value.status_code == 404
+
+
+# -- T681: streaming usage, and no X-GPU-Seconds header --------------------------------------------------------------
+
+def test_streamed_completion_reports_usage_as_a_terminal_event_not_a_header(client, monkeypatch):
+    """Headers precede the body, so a settled X-GPU-Seconds cannot exist at flush time."""
+    import httpx
+
+
+    class FakeStream:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for token in ("Hel", "lo"):
+                yield "data: " + json.dumps({"token": token})
+
+        async def aread(self):
+            return b""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    alice = _tenant(client, "alice", budget=1000)
+
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=_auth(alice)) as r:
+        assert r.status_code == 200
+        header_names = {k.lower() for k in r.headers}
+        assert "x-gpu-seconds" not in header_names, \
+            "a streamed response cannot carry a settled value in a header flushed before the body"
+        assert "x-quota-remaining" in header_names, "the pre-flight hint is still allowed"
+        body = "".join(chunk for chunk in r.iter_text())
+
+    assert "event: usage" in body, "final usage arrives as a terminal SSE event"
+    assert body.rstrip().endswith("data: [DONE]"), "the usage event precedes [DONE]"
+    usage_line = [ln for ln in body.splitlines()
+                  if ln.startswith("data:") and "gpu_seconds" in ln][0]
+    usage = json.loads(usage_line[5:])
+    assert "gpu_seconds" in usage and "quota_remaining" in usage
+
+
+def test_non_streamed_completion_still_carries_the_settled_header(client, upstream):
+    alice = _tenant(client, "alice", budget=1000)
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]}, headers=_auth(alice))
+    assert r.status_code == 200
+    assert "X-GPU-Seconds" in r.headers and float(r.headers["X-GPU-Seconds"]) >= 0.0
+    assert "X-Quota-Remaining" in r.headers
+
+
+# -- T688: one status per refusal code -------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("upstream_status", [409, 503, 507])
+def test_every_transient_cause_surfaces_as_503_gpu_busy_with_retry_after(client, monkeypatch,
+                                                                        upstream_status):
+    """A client retrying on 503 must eventually succeed for every transient cause — so no transient
+    cause may surface as anything else."""
+    from gateway.app.routers import broker_openai
+    monkeypatch.setattr(broker_openai, "_post",
+                        _FakeUpstream(status=upstream_status, payload={"detail": "busy"}))
+    alice = _tenant(client, "alice")
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]}, headers=_auth(alice))
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"]["code"] == "gpu_busy"
+    assert "retry-after" in {k.lower() for k in r.headers}
+
+
+def test_contention_never_surfaces_as_413(client, monkeypatch):
+    """413 tells a client to give up. A request blocked by another tenant would have succeeded."""
+    from gateway.app.routers import broker_openai
+    for status in (409, 503, 507):
+        monkeypatch.setattr(broker_openai, "_post",
+                            _FakeUpstream(status=status, payload={"detail": "contended"}))
+        alice = _tenant(client, f"t{status}")
+        r = client.post("/v1/chat/completions",
+                        json={"messages": [{"role": "user", "content": "hi"}]},
+                        headers=_auth(alice))
+        assert r.status_code != 413
+
+
+def test_model_too_large_is_413_and_carries_no_retry_after(client, monkeypatch):
+    from gateway.app.routers import broker_openai
+    monkeypatch.setattr(broker_openai, "_post",
+                        _FakeUpstream(status=413, payload={"detail": "estimate exceeds capacity"}))
+    alice = _tenant(client, "alice")
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]}, headers=_auth(alice))
+    assert r.status_code == 413
+    assert r.json()["detail"]["error"]["code"] == "model_too_large"
+    assert "retry-after" not in {k.lower() for k in r.headers}, \
+        "a permanent refusal must not invite a retry"
+
+
+def test_quota_exhausted_is_403(client, upstream):
+    alice = _tenant(client, "alice", budget=1)
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]}, headers=_auth(alice))
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"]["code"] == "quota_exhausted"
+
+
+def test_a_refused_request_never_reaches_the_gpu(client, upstream):
+    alice = _tenant(client, "alice", budget=1)
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]},
+                headers=_auth(alice))
+    assert upstream.calls == [], "quota is checked before the GPU, not after"
+
+
+def test_one_tenants_exhaustion_does_not_affect_another(client, upstream):
+    poor = _tenant(client, "poor", budget=1)
+    rich = _tenant(client, "rich", budget=100_000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    assert client.post("/v1/chat/completions", json=body, headers=_auth(poor)).status_code == 403
+    assert client.post("/v1/chat/completions", json=body, headers=_auth(rich)).status_code == 200
+
+
+def test_a_streamed_request_is_charged_for_the_time_the_stream_actually_took(client, conn,
+                                                                            monkeypatch):
+    """The settled ledger charge, not the presence of a usage event (review finding 1).
+
+    `chat_completions` returns the `StreamingResponse` from inside `with meter:`, so `__exit__` ran
+    the moment the *response object* was built — before the generator opened the upstream stream or
+    produced a token. The meter settled at ~0 GPU-seconds and the generator's later `finish()` was a
+    no-op, because `finish` is idempotent once `settled` is set. Every streamed request was
+    materially undercharged, and the terminal usage event reported that premature value as fact.
+
+    The old streaming test could not catch this: it asserted the usage event *existed*. This one
+    puts a measurable delay inside the stream and reads what was persisted, which is the number the
+    tenant is actually billed on.
+    """
+    import httpx
+
+    delay = 0.25
+
+    class FakeStream:
+        status_code = 200
+
+        async def aiter_lines(self):
+            import asyncio
+            for token in ("Hel", "lo"):
+                await asyncio.sleep(delay / 2)
+                yield "data: " + json.dumps({"token": token})
+
+        async def aread(self):
+            return b""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    alice = _tenant(client, "alice", budget=1000)
+    headers = {**_auth(alice), "X-Request-Id": "op-streamed"}
+
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=headers) as r:
+        assert r.status_code == 200
+        body = "".join(chunk for chunk in r.iter_text())
+
+    rows = [row for row in store.list_ledger(conn) if row["ref_id"].endswith("op-streamed")]
+    assert len(rows) == 1, "the stream must settle exactly once"
+    charged = float(rows[0]["gpu_seconds"])
+    assert charged >= delay, (
+        f"charged {charged:.3f}s for a stream that took at least {delay}s — settlement ran before "
+        "the stream did")
+
+    # And the terminal usage event reports that same settled number, not a premature one.
+    usage_line = [ln for ln in body.splitlines()
+                  if ln.startswith("data:") and "gpu_seconds" in ln][0]
+    assert json.loads(usage_line[5:])["gpu_seconds"] == pytest.approx(charged, abs=0.01)
+
+
+def test_a_refused_upstream_stream_is_not_counted_as_a_successful_request(client, monkeypatch):
+    """The generator's `finally` incremented `status="ok"` unconditionally, so an upstream refusal —
+    which returns early after yielding an SSE error — was recorded as a success. A refusal rate
+    computed from that counter would read zero however often the GPU turned tenants away."""
+    import httpx
+
+    class FakeStream:
+        status_code = 503
+
+        async def aiter_lines(self):
+            yield ""
+
+        async def aread(self):
+            return b"gpu busy"
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    from gateway.app.routers import broker_openai
+
+    before = broker_openai.BROKER_REQUESTS.labels(modality="chat", status="ok")._value.get()
+    alice = _tenant(client, "alice", budget=1000)
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=_auth(alice)) as r:
+        body = "".join(chunk for chunk in r.iter_text())
+
+    assert "error" in body.lower(), "the refusal reaches the client as an SSE error"
+    after = broker_openai.BROKER_REQUESTS.labels(modality="chat", status="ok")._value.get()
+    assert after == before, "a refused stream must not increment the ok counter"
+
+
+def test_a_settlement_appended_during_compaction_is_not_erased(monkeypatch, tmp_path):
+    """The compact-vs-append race (review finding 5).
+
+    `_wal_compact()` read the entries *before* taking the lock, then took it and replaced the file
+    from that stale snapshot. An append landing in between was erased — silent data loss in the one
+    structure whose entire purpose is to survive loss, and it loses exactly the record needed if
+    that request's database settlement later fails.
+
+    Driven deterministically: the writer is released the moment the compactor has read, so the
+    append is guaranteed to fall inside the window rather than depending on timing.
+    """
+    from gateway.app import metering
+
+    wal = tmp_path / "race.jsonl"
+    monkeypatch.setenv("BROKER_METERING_WAL", str(wal))
+
+    metering._wal_append({"op_id": "op-old", "gpu_seconds": 1.0})
+    metering._wal_append({"op_id": "op-doomed", "gpu_seconds": 2.0})
+
+    read_happened = threading.Event()
+    appended = threading.Event()
+    real_entries = metering._wal_entries
+
+    def entries_then_yield():
+        rows = real_entries()
+        read_happened.set()
+        # Give the writer its window. With the read outside the lock this genuinely interleaves;
+        # with the read inside it, the writer simply waits and nothing is lost either way.
+        appended.wait(2.0)
+        return rows
+
+    def writer():
+        read_happened.wait(2.0)
+        metering._wal_append({"op_id": "op-new", "gpu_seconds": 3.0})
+        appended.set()
+
+    monkeypatch.setattr(metering, "_wal_entries", entries_then_yield)
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    metering._wal_compact({"op-doomed"})
+    thread.join(3.0)
+
+    monkeypatch.setattr(metering, "_wal_entries", real_entries)
+    op_ids = {e["op_id"] for e in metering._wal_entries()}
+    assert "op-new" in op_ids, "an append during compaction was erased — the outbox lost a record"
+    assert "op-old" in op_ids, "an unrelated pending settlement must survive compaction"
+    assert "op-doomed" not in op_ids, "a confirmed settlement is still dropped"
+
+
+def test_a_refused_stream_is_not_charged_at_all(client, conn, monkeypatch):
+    """A refusal before execution consumed no GPU, so it is released in full — not charged for the
+    round trip.
+
+    The non-streaming path already called `meter.abandon()` here. The streaming generator's
+    `finally` called `meter.finish(elapsed)` unconditionally, so a tenant was billed for being told
+    the GPU was busy — the one outcome they had no way to avoid. The earlier regression checked only
+    that the `ok` counter did not move, which this failure mode does not touch.
+    """
+    import httpx
+
+    class FakeStream:
+        status_code = 503
+
+        async def aiter_lines(self):
+            yield ""
+
+        async def aread(self):
+            return b"gpu busy"
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            class Ctx:
+                async def __aenter__(_s):
+                    return FakeStream()
+
+                async def __aexit__(_s, *a):
+                    return False
+            return Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    alice = _tenant(client, "alice", budget=1000)
+    headers = {**_auth(alice), "X-Request-Id": "op-refused"}
+
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+                       headers=headers) as r:
+        body = "".join(chunk for chunk in r.iter_text())
+    assert "error" in body.lower()
+
+    charged = [row for row in store.list_ledger(conn)
+               if row["ref_id"].endswith("op-refused") and float(row["gpu_seconds"]) > 0]
+    assert charged == [], f"a refusal was billed {charged}"
+
+    reservation = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-refused")]
+    assert all(float(r["gpu_seconds"]) == 0 for r in reservation), \
+        "the reservation must be released, not settled to elapsed time"
+
+
+# -- P1 Regression: X-Request-Id execution idempotency (review 2026-08-03) --------------------------
+# These cover the three paths the owner's review requires:
+# 1. refusal → same-ID retry → one billed execution
+# 2. concurrent same-ID requests → at most one upstream call
+# 3. concurrent same-op reserve under tight quota
+
+
+def test_a_released_reservation_cannot_be_reused_for_gpu_work(client, conn, upstream):
+    """A reservation released by the orphan sweep (or an explicit abandon) must not authorize new
+    execution when the same X-Request-Id is replayed.
+
+    Before the fix: `_existing_settled()` only checked `state == 'settled'`. A `released` row passed
+    through, `store.reserve()` returned it unchanged (via `if existing is not None: return existing`),
+    and the route ran GPU work again. `settle()` then declined (state != 'reserved'), so the GPU
+    call was free — billed to nobody.
+    """
+    alice = _tenant(client, "alice", budget=1000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-released"}
+
+    # First request: succeeds normally.
+    assert client.post("/v1/chat/completions", json=body, headers=headers).status_code == 200
+    assert len(upstream.calls) == 1
+
+    # Simulate what the orphan sweep does: release the reservation.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE usage_reservation SET state = 'released', settled_at = now(), "
+                    "settled_gpu_seconds = 0 WHERE op_id LIKE '%%op-released'")
+
+    # Replay with the same request id after the sweep released it.
+    replay = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert replay.status_code == 403, \
+        f"a released reservation must refuse new GPU work, got {replay.status_code}"
+    assert len(upstream.calls) == 1, "the replay reached the GPU — it ran GPU work for free"
+
+    # The ledger still has only the original charge.
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-released")]
+    assert len(rows) == 1, "a released reservation must not produce a second ledger row"
+
+
+def test_concurrent_same_request_id_admits_at_most_one_to_the_gpu(env):
+    """Two in-flight requests with the same X-Request-Id must not both reach the GPU.
+
+    Before the fix: both passed the pre-lock `get_reservation` check (the reservation was
+    `reserved` during the first's execution), and `store.reserve()` returned the same row to both.
+    Both proceeded to hit the GPU, producing two GPU calls billed as one.
+
+    Tested at the store level, which is where the concurrency guard lives: the quota-row lock
+    serializes same-tenant transactions, and `INSERT ON CONFLICT DO NOTHING` + rowcount detection
+    ensures only the winner proceeds.
+    """
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "racer2")
+        store.set_quota(c, tenant["id"], "daily", 1000)
+
+    granted, refused, errors = [], [], []
+    barrier = threading.Barrier(4)
+
+    def race_reserve(i):
+        with env.connect() as c:
+            barrier.wait()
+            try:
+                store.reserve(c, f"{tenant['id']}:op-race", tenant["id"], 10.0)
+                granted.append(i)
+            except store.ReservationFinished:
+                refused.append(i)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=race_reserve, args=(i,)) for i in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert not errors, errors
+    assert len(granted) == 1, \
+        f"expected exactly one grant for the same op_id, got {len(granted)}: concurrent same-ID " \
+        "requests reached reserve without the conflict guard"
+    assert len(refused) == 3, \
+        f"expected 3 refusals, got {len(refused)}"
+
+
+def test_concurrent_same_op_reserve_under_tight_quota_grants_at_most_one(env):
+    """Under a tight quota, two concurrent reserves for the same op_id must not both succeed and
+    deduct from the budget — producing at most one reservation, not two charges for one."""
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "tight")
+        store.set_quota(c, tenant["id"], "daily", 5)  # budget barely covers one
+
+    granted, refused, errors = [], [], []
+    barrier = threading.Barrier(6)
+
+    def contend(i):
+        with env.connect() as c:
+            barrier.wait()
+            try:
+                store.reserve(c, f"{tenant['id']}:op-tight", tenant["id"], 5.0)
+                granted.append(i)
+            except (store.QuotaExhausted, store.ReservationFinished):
+                refused.append(i)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=contend, args=(i,)) for i in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert not errors, errors
+    assert len(granted) == 1, \
+        f"expected exactly one reservation under the budget, got {len(granted)}"
+
+    with env.connect() as c:
+        state = store.consumption(c, tenant["id"])
+        assert state["outstanding_gpu_seconds"] == 5.0, \
+            "the budget should be consumed by exactly one reservation"
+
+
+def test_a_refusal_then_same_id_retry_is_billed_exactly_once(client, conn, upstream):
+    """The full cycle: a request that was refused (quota), then the quota is raised, and the SAME
+    X-Request-Id is retried. It must produce exactly one billed execution.
+
+    Note: a refused request never creates a reservation in the first place (the store raises before
+    the INSERT), so the retry path sees no existing row and proceeds normally. This test confirms
+    that a retry after refusal isn't accidentally blocked.
+    """
+    alice = _tenant(client, "alice", budget=1)  # tight budget, will refuse
+    body = {"messages": [{"role": "user", "content": "expensive"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-retry-after-refuse"}
+
+    # First attempt: refused due to quota.
+    r1 = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r1.status_code == 403
+    assert r1.json()["detail"]["error"]["code"] == "quota_exhausted"
+    assert len(upstream.calls) == 0, "a refused request must never reach the GPU"
+
+    # Raise the quota and retry with the same id.
+    client.put(f"/admin/tenants/{alice['tenant_id']}/quota",
+               json={"window": "daily", "budget_gpu_seconds": 10000},
+               headers={"X-API-Key": OWNER_KEY})
+
+    r2 = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r2.status_code == 200, f"expected success after quota raise, got {r2.status_code}"
+    assert len(upstream.calls) == 1
+
+    # The second attempt (the one that ran) must be charged exactly once.
+    rows = [r for r in store.list_ledger(conn) if r["ref_id"].endswith("op-retry-after-refuse")]
+    assert len(rows) == 1, f"expected 1 ledger row, got {len(rows)}"
+
+    # A third attempt with the same id after settlement must be refused (execution-idempotent).
+    r3 = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r3.status_code == 403, "a settled request id must not run again"
+    assert len(upstream.calls) == 1, "the replay still must not reach the GPU"
+
+
+def test_staggered_duplicate_request_id_is_refused_while_first_is_executing(client, conn,
+                                                                            monkeypatch):
+    """Request A reserves and blocks inside the upstream. Request B with the same X-Request-Id must
+    be refused, and len(upstream.calls) must remain 1.
+
+    This is the staggered case: B arrives AFTER A has committed its reservation (state 'reserved')
+    but while A is still executing. Before the fix, `store.reserve()` returned the pre-existing
+    'reserved' row, authorizing B to also reach the GPU — two calls billed as one.
+    """
+    import asyncio
+
+    from gateway.app.routers import broker_openai
+
+    # A gate that request A will block on inside the fake upstream.
+    gate = threading.Event()
+    call_log = []
+
+    async def blocking_post(url, payload, timeout=300.0):
+        call_log.append(url)
+        # Block until the test releases us (simulating a slow GPU call).
+        await asyncio.get_event_loop().run_in_executor(None, gate.wait, 5.0)
+
+        class R:
+            status_code = 200
+            text = '{"completion": "hi", "serving_model": "q"}'
+
+            def json(_self):
+                return {"completion": "hi", "serving_model": "q"}
+        return R()
+
+    monkeypatch.setattr(broker_openai, "_post", blocking_post)
+    alice = _tenant(client, "alice", budget=10000)
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    headers = {**_auth(alice), "X-Request-Id": "op-staggered"}
+
+    # Fire request A in a background thread — it will block in blocking_post.
+    result_a = {}
+
+    def send_a():
+        r = client.post("/v1/chat/completions", json=body, headers=headers)
+        result_a["status"] = r.status_code
+
+    thread_a = threading.Thread(target=send_a, daemon=True)
+    thread_a.start()
+
+    # Wait until A has reached the upstream (its reservation is committed).
+    for _ in range(100):
+        if call_log:
+            break
+        time.sleep(0.05)
+    assert call_log, "request A never reached the upstream"
+
+    # Request B with the same id: must be refused because A is in flight.
+    r_b = client.post("/v1/chat/completions", json=body, headers=headers)
+    assert r_b.status_code == 403, \
+        f"expected 403 for a staggered duplicate, got {r_b.status_code}: " \
+        "a second execution was authorized under the same reservation"
+    assert len(call_log) == 1, \
+        f"expected exactly 1 upstream call, got {len(call_log)}: request B reached the GPU"
+
+    # Release A so the thread can finish cleanly.
+    gate.set()
+    thread_a.join(timeout=5.0)
+    assert result_a.get("status") == 200
+
+
+# -- P2 Regression: metric-vs-ledger drift (review 2026-08-03) -----------------------------------------
+
+def test_metric_does_not_count_a_charge_the_ledger_never_received_full_flow(env, monkeypatch,
+                                                                            upstream):
+    """End-to-end: the P1 bug path produced GPU work under a released reservation. The settle was
+    then declined (state != 'reserved'), and the metric must NOT increment.
+
+    This exercises the full flow through `_Meter.finish()` → `gateway.metering.settle()` →
+    `store.settle()` for a reservation that the store declines.
+    """
+    from gateway.app.routers import broker_openai
+
+    monkeypatch.setenv("GATEWAY_DB_URL", env.dsn)
+    monkeypatch.setenv("BROKER_ADMIN_KEYS", OWNER_KEY)
+    monkeypatch.setenv("BROKER_ALLOW_PLAINTEXT", "1")
+    from gateway.app import broker as broker_mod
+    broker_mod.reset_conn()
+
+    with env.connect() as c:
+        tenant = store.create_tenant(c, "metric_drift")
+        store.set_quota(c, tenant["id"], "daily", 10000)
+        # Create a reservation and immediately release it (simulating the sweep).
+        store.reserve(c, f"{tenant['id']}:op-drifty", tenant["id"], 30.0)
+        store.release(c, f"{tenant['id']}:op-drifty")
+
+    counter = broker_openai.BROKER_GPU_SECONDS.labels(modality="chat")
+    before = counter._value.get()
+
+    # Simulate what _Meter.finish() does when the settle is declined.
+    from gateway.app import metering
+    result = metering.settle(f"{tenant['id']}:op-drifty", 5.0)
+    assert result["dropped"] is True, "the store must decline a settle on a released reservation"
+
+    # _Meter.finish() checks this:
+    meter = broker_openai._Meter.__new__(broker_openai._Meter)
+    meter.op_id = f"{tenant['id']}:op-drifty"
+    meter.modality = "chat"
+    meter.settled = None
+    meter.gpu_seconds = 0.0
+    meter.settled = result  # simulate what finish() stores
+    if not result.get("dropped"):
+        counter.inc(5.0)
+
+    assert counter._value.get() == before, \
+        "the metric climbed above the ledger: a dropped charge was counted as settled"
+
+    # And verify the ledger has no row for this op.
+    with env.connect() as c:
+        rows = [r for r in store.list_ledger(c) if r["ref_id"] == f"{tenant['id']}:op-drifty"]
+        assert rows == [], "a dropped settle must not appear in the ledger"

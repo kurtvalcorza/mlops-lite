@@ -6,6 +6,8 @@ import { useSearchParams } from 'next/navigation';
 import { Badge } from '@/components/Badge';
 import { PageTitle, Panel } from '@/components/Panel';
 import { GwError, gwGet, gwPost } from '@/lib/gw';
+import { CADENCE, formatAge, useLive } from '@/lib/use-live';
+import type { Experiment, PlatformJob } from '@/lib/platform-types';
 
 type DsVersion = { version: string };
 type Dataset = { name: string; versions: DsVersion[] };
@@ -299,6 +301,11 @@ function TrainingView() {
         training
       </PageTitle>
 
+      {/* 027 T728 — the workspace: the launcher above, and the record of what has run below it.
+          Kept as links rather than folded into this page because the launcher is a form and the
+          workspace is a set of lists, and a page that is both is neither. */}
+      <WorkspaceNav />
+
       <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
         <Panel title="launch" hint="POST /runs">
           {/* FR-221: the lease state, read BEFORE launching — a refusal should never surprise */}
@@ -584,5 +591,73 @@ function NumberInput({
       onChange={(e) => onChange(Number(e.target.value))}
       className="hairline w-full rounded-sm bg-soft px-2 py-1 text-body-md text-ink"
     />
+  );
+}
+
+/**
+ * 027 T728 — the training workspace index: jobs, runs, experiments.
+ *
+ * Rendered inline rather than on its own route because "what has run here" is the question an
+ * operator arrives at `/training` already asking, and making them click once more to see it would
+ * be an extra step in the loop this increment exists to shorten.
+ */
+function WorkspaceNav() {
+  const jobs = useLive<PlatformJob[]>('console/jobs?limit=15', CADENCE.jobs);
+  const experiments = useLive<Experiment[]>('console/experiments', CADENCE.catalog);
+
+  return (
+    <div className="mb-6 grid gap-6 lg:grid-cols-2">
+      <Panel title="recent jobs" hint="GET /console/jobs">
+        <p className="mb-2 text-caption-md text-ash">
+          {formatAge(jobs.ageMs)}
+          {jobs.degraded.length > 0 && ` · unreachable: ${jobs.degraded.join(', ')}`}
+        </p>
+        {jobs.data === null ? (
+          // Not "no jobs". No source answered, so no claim is made.
+          <p className="text-body-md text-mute">unknown — no job source answered</p>
+        ) : jobs.data.length === 0 ? (
+          <p className="text-body-md text-mute">nothing recorded</p>
+        ) : (
+          <ul className="font-mono text-body-md">
+            {jobs.data.map((job) => (
+              <li key={job.id} className="text-mute">
+                <Link href={`/training/jobs/${job.id}`} className="underline text-ink">
+                  {job.id.slice(0, 12)}
+                </Link>{' '}
+                {job.normalizedState}
+                {job.studyId && (
+                  <>
+                    {' · '}
+                    <Link href={`/training/studies/${job.studyId}`} className="underline">
+                      study
+                    </Link>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      <Panel title="experiments" hint="GET /console/experiments">
+        <p className="mb-2 text-caption-md text-ash">
+          {formatAge(experiments.ageMs)}
+          {experiments.degraded.length > 0 &&
+            ` · unreachable: ${experiments.degraded.join(', ')}`}
+        </p>
+        {experiments.data === null ? (
+          <p className="text-body-md text-mute">unknown — the tracking server did not answer</p>
+        ) : experiments.data.length === 0 ? (
+          <p className="text-body-md text-mute">no experiments</p>
+        ) : (
+          <ul className="font-mono text-body-md text-mute">
+            {experiments.data.map((experiment) => (
+              // Tracking vocabulary verbatim (FR-366): an experiment is an experiment.
+              <li key={experiment.experiment_id}>{experiment.name}</li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+    </div>
   );
 }

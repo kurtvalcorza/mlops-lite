@@ -16,7 +16,8 @@ a heavier reference platform, sized to a laptop.
 > policy loop** (drift → retrain → gate → promote), and durable **relational monitoring/job state on
 > Postgres** (predictions·labels·capture·jobs·policies·suggestions as indexed table reads; landed at
 > 018 US4). **020** exited the archived object store to **Garage** and slimmed the serving children;
-> **021** added the loop-native operator console; **022** made the LLM **registry-driven** (promote
+> **021** added the loop-native operator console (**027** replaced it with ten areas of
+> concern and an honesty-under-degradation read layer); **022** made the LLM **registry-driven** (promote
 > = go-live, base + LoRA-adapter resolution, honest served identity). **023
 > platform-architecture-hardening** hardens the whole: repaired live-eval routing, a **fail-closed
 > internal agent credential** (`X-Agent-Key`), **required CI quality gates**
@@ -54,7 +55,7 @@ flowchart LR
   end
   subgraph WSL["Native WSL (supervised: agent + ui)"]
     AG["gpu-host-agent :8100<br/>in-process admission (one GPU tenant)<br/>engine children: llm · vision · asr · embed · tabular<br/>jobs: train · hpo · batch · shadow-replay<br/>durable journal · direct /metrics"]
-    UI["operator console (Next.js, 127.0.0.1)"]
+    UI["operator console (Next.js, 127.0.0.1) — ten areas, read-only projections"]
     SUP["supervisor :8099<br/>starts + restarts {agent, ui}"]
   end
   GW -->|"/engines/{id}/{verb} (+ /stream, ?preempt=true)"| AG
@@ -74,16 +75,33 @@ flowchart LR
   GR --> PR
 ```
 
-**One GPU tenant under a single race-free admission lock (Principle II, non-negotiable; constitution
-v1.5.0).** At most one tenant holds the GPU at any instant — **LLM**, **vision**, **ASR**, *or* a
-**training/HPO/batch/shadow job**. Since **018 (T364)** this is enforced **in-process**: the agent's
-`Admission` makes the free-VRAM read, the holder check, and the claim all under one re-entrant lock
-(`hostagent/admission.py`) — race-free by construction, no time-of-check/time-of-use window, and no
-cross-process lockfile to reclaim. **Live-VRAM admission** prefers NVML (`pynvml`, in-process) and
-falls back to a single `nvidia-smi` fork, with a static-budget fallback when the GPU is unreadable
-(never fail-open). The same lock makes the preemptive swap transactional. **CPU modalities (embeddings,
+**VRAM-budgeted co-residency under a single race-free admission authority (Principle II,
+non-negotiable; constitution v1.6.1).** Multiple *serving* models — **LLM**, **vision**, **ASR** — MAY
+be resident at once when they fit the VRAM budget; a **training/HPO/batch/shadow job** takes the whole
+GPU exclusively and is never preempted. Since **026** the enforcement point is
+`hostagent/coordinator.py`, a resident-set state machine holding **two distinct bounds**:
+
+1. `Σ resident accounted + Σ outstanding reservations ≤ usable_capacity` — a budget bound.
+2. each incoming load `≤ live_free − unmaterialized reservations − safety_headroom` — a physical
+   bound, which also holds when an *unaccounted external* GPU consumer is present.
+
+They are separate on purpose. The pre-1.6.1 wording ("combined VRAM ≤ live free VRAM") double-counted,
+because live free already excludes residents: 6 GiB resident on an 11 GiB usable device leaves 5 GiB
+free, and the old rule would have called that valid state invalid and evicted for nothing.
+
+The coordinator's lock guards **state only** and is never held across a load or unload — admission
+reserves under the lock, loads outside it, then commits or rolls back (the ABBA deadlock
+`hostagent/admission.py` records in its own comments). Eviction **drains before it unloads**, so it
+never interrupts an in-flight request, and a model's accounted size is reconciled to a **per-PID** NVML
+reading rather than a device-wide delta, which two concurrent loads make unattributable. **Live-VRAM
+reads** prefer NVML (`pynvml`, in-process) and fall back to a single `nvidia-smi` fork, with a
+static-budget fallback when the GPU is unreadable (never fail-open). **CPU modalities (embeddings,
 tabular) are exempt** — they hold no admission and are never idle-reaped, so RAG embed→LLM never
 thrashes.
+
+> The 018 single-slot `hostagent/admission.py` lease is still what the pre-broker paths use; co-residency
+> is enabled by `BROKER_COORDINATOR_ADMISSION=1`, which 026 ships phase-gated behind the on-hardware
+> drills in [specs/026-lan-gpu-broker/quickstart.md](specs/026-lan-gpu-broker/quickstart.md).
 
 > The pre-018 file-based lease (`serving/gpu_lease.py`, an atomic PID-stamped lockfile) and the four
 > per-daemon supervisors + trainer daemon it coordinated are **retired**. The constitution's Principle
@@ -217,22 +235,56 @@ only `AGENT_URL`.
 > Since 023 it probes the agent's **public minimal `/readyz`** — the rich `/health` is behind the
 > internal key.
 
-## Operator console (003 + 004, loop-native since 021)
+## Operator console (003 + 004, ten areas since 027)
 
 A Next.js operator console (native WSL, `127.0.0.1`, terminal/man-page aesthetic, JetBrains Mono) sits
-over a key-injecting BFF and is itself a supervised daemon. Since **021** the navigation IS the
-lifecycle loop — `data → training → models → serving → monitoring → retraining ⟲` — with live
-per-stage status glyphs, a persistent off-axis **GPU-lease pill** (holder + resident model), and
-`health` off-axis right. `/` lands on `serving`; the old tab paths (`/infer`, `/datasets`, `/runs`,
-`/monitor`) redirect to their loop-stage homes. The serving stage renders one panel per registry
-`task` (dynamic per-task renderers) plus the full lease view and batch; monitoring gained the
-read-side (drift + quality histories, labels by prediction id, one-shot retrain with
-cooldown-as-outcome); retraining hosts the standing policy editor (form+JSON), the per-model cycle
-board, and the suggestions inbox; models centers the preview→promote gate with lineage drill-back
-and override-with-reason. Live updates ride gateway SSE (`/infer/stream`, `/platform/events`,
-`/runs/{id}/events`). 004 hardened the BFF (route-allowlist, same-origin/CSRF guard, CSP/security
-headers, scoped Grafana embed) and added a `/readyz` probe; 021 extended the allow-list by 13
-already-existing endpoints (no backend change).
+over a key-injecting BFF and is itself a supervised daemon.
+
+**027 replaced the loop navigation with ten areas of concern** — `overview · models · training ·
+evaluations · deployments · inference · datasets · runtime · observability · administration`. The
+loop is not gone; it moved to `/console/activity` as a *visualization*, which is what it always was.
+021's nav encoded ORDER with directional connectors, and ten areas of concern have no order to
+encode — keeping the arrows would have made them mean nothing. `/` lands on `overview`, and every
+retired path (`/serving`, `/data`, `/monitoring`, `/monitor`, `/retraining`, `/infer`, `/runs`,
+`/health`) still resolves, because a rename that breaks bookmarks breaks them at exactly the moment
+someone is following a link under pressure.
+
+The increment's organizing property is **honesty under degradation**. Every console read returns an
+envelope — `{data, observed, degraded, conflict}` — and three rules run through all of it:
+
+- **`null` means unknown and is never rendered as `0` or `[]`.** An unreachable agent showing "0
+  devices" is not a degraded reading, it is a false one, and an operator acting on it would be acting
+  on a fabrication. `degraded` names which sources produced the nulls.
+- **A partially-degraded projection returns `200`** with the reachable parts populated. A console
+  that fails whole because one of five sources is down tells an operator nothing about the four that
+  are up, at exactly the moment they need it.
+- **Conflicts are disclosed, never resolved by precedence.** When the gateway and the agent disagree
+  about a job, both answers are shown with their observation times — unless the readings are too far
+  apart in time to compare, in which case the claim is *suppressed* rather than cried.
+
+`overall` (healthy / degraded / critical / unknown) and `mode` (offline / live / hardware) are shown
+side by side because they answer different questions: a fixture-backed console can be perfectly
+healthy, and an operator must know which kind of deployment they are reading before trusting a
+number on it. Agent loss is `degraded`, never `critical` — the CPU modalities keep serving.
+
+The runtime area makes the GPU inspectable (per-device state, engine processes, the admission
+decision history with its server-composed explanations, the journal) and renders **no control that
+would preempt a running job**: refusal is presented as designed behaviour, because it is. The model
+catalog answers "can this run here right now" with a three-way verdict — `incompatible` (structural),
+`not-currently-eligible` (transient), `unknown` (the agent is unreachable, which is not a
+compatibility fact) — and reports the constitution's **two** VRAM checks separately, since eviction
+fixes a budget failure and does nothing for a live-VRAM one.
+
+Payloads are hidden because they are never sent: revealing one is an explicit `POST` with the
+identifier in the body, so no payload reference lands in a URL where it would reach logs, history,
+and referrers. Charts are six hand-rolled SVG primitives — `ui/package.json` remains exactly `next`
++ `react` + `react-dom`, with no charting dependency.
+
+004 hardened the BFF (route-allowlist, same-origin/CSRF guard, CSP/security headers, scoped Grafana
+embed) and added a `/readyz` probe. 027's allow-list delta is itemized in
+[contracts/allowlist-delta.md](specs/027-unified-lifecycle-console/contracts/allowlist-delta.md); no
+agent path appears in it, and every entry is a `GET` except the payload reveal, which mutates
+nothing.
 
 ## Platform re-architecture — the GPU host agent (018)
 
@@ -587,3 +639,7 @@ and served live at `http://localhost:8080/docs`.
 | 021 | loop-native-console | Front-end-only IA rebuild: the nav IS the loop (`data → training → models → serving → monitoring → retraining ⟲`) with live stage badges + GPU-lease pill; monitoring read-side, retraining stage (policies/cycle board/suggestions), promote-gate centerpiece, LLM stream/trace split; 13 allow-list additions, zero backend change |
 | 022 | registry-driven-llm-serving | Promote = go-live for the LLM: ActiveServingLLM pointer, base + LoRA-adapter resolution from registry lineage, controlled reload under admission, honest agent-reported served identity (offline slice + two on-HW fixes; the switch drills are the [HW] tail) |
 | 023 | platform-architecture-hardening | **Built (offline slice)** — live-eval routing repair + retired-port guard, fail-closed internal agent credential, required CI gates (backend·ui·compose·specs) + Makefile parity, ordered checksummed SQL migrations (gateway-owned apply, legacy adoption), durable LLM activation saga + startup reconciliation + desired/resident read model, bounded stdlib agent transport (asgi deleted), fixed-cardinality metrics + local alert rules with runbooks, constitution v1.5.2 wording amendment; [HW] drills (T517/T528/T536/T555/T556) now pass on the RTX 5070 Ti |
+| 024 | storage-consolidation | `platformlib.store` reduced to re-exports over per-concern `storeimpl/*` repositories; the object-store client and paginated listings homed in `platformlib.s3io`; both drivers stay lazy so importing the facade needs neither |
+| 025 | dataset-byte-proxy | Dataset downloads proxied by the gateway against permitted prefixes; presigned URLs removed — they were signed against the internal store endpoint (unresolvable from a browser) and constituted a leaked object-store capability |
+| 026 | lan-gpu-broker | Multi-tenant LAN broker: tenants/keys/quotas, reserve→settle GPU-second metering with an fsynced WAL outbox (exactly-once via a unique `ref_id`), a persisted FIFO job lane, and a co-residency coordinator enforcing the constitution's TWO distinct VRAM bounds (accounted budget vs measured live-free) with drain-before-evict; one code, one status per refusal |
+| 027 | unified-lifecycle-console | Ten areas of concern replace the loop nav (which becomes a visualization); an envelope-based read layer where `null` is never `0`, a partially-degraded projection still returns 200, and conflicts are disclosed rather than resolved; runtime/GPU inspection, a five-system model catalog with a three-way compatibility verdict, the three-identifier job join, payload-hidden-by-default inference, synthesized endpoints; ~44 new read routes, zero new tables, zero new runtime dependencies |

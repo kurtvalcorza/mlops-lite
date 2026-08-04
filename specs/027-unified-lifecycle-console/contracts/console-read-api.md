@@ -116,6 +116,7 @@ the client stays free of tracking-vendor payload shapes.
 | `GET /console/endpoints/{id}` | Detail + traffic + `StateConflict`. |
 | `GET /console/health` | `PlatformHealth` incl. resolved `mode` (FR-369/429). |
 | `GET /console/capabilities` | Backend capability → feature flags (FR-433). |
+| `GET /console/summary` | The eight Overview cards (FR-371). Each card is `null` when its source did not answer. |
 | `GET /console/search?q=` | Composed resolver across models, runs, datasets, jobs, endpoints, predictions (FR-368). |
 | `GET /console/activity` | Normalized lifecycle timeline (FR-363). |
 | `GET /console/attention` | Severity-ranked issues (FR-373). |
@@ -126,6 +127,18 @@ controls. If the gateway does not implement traffic splitting, the capability is
 control is never rendered.
 
 `mode` is resolved from **reachability**, never from a configured string (research R14).
+
+`GET /console/summary` computes the cards server-side rather than letting the client add them up,
+because that is where the null-is-not-zero rule can be enforced once. A card that fell back to `0` in
+the browser would be indistinguishable from a genuine zero, and "0 running jobs" during an agent
+outage is exactly the falsehood SC-195 exists to catch.
+
+**One deviation from FR-371, deliberate**: the spec names a *pending admissions* card, and there is
+no such number. 026 established that admission is a synchronous decision, not a queue (research R1) —
+there is no pending state and the decision ring has no queue position. That card would read `0`
+forever, and a permanent zero is not a harmless placeholder: it teaches an operator that requests
+never wait, which is the opposite of what a refusal means. The slot reports the **recent admission
+decisions** the ring actually holds, split into admitted and refused.
 
 ---
 

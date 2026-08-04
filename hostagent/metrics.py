@@ -80,3 +80,35 @@ REGISTRY.describe("hostagent_reload_outcomes_total", "counter",
                   "unresolvable|refused)")
 REGISTRY.describe("hostagent_disk_free_gb", "gauge",
                   "Free disk on the volume backing the agent state dir (FR-322 low-disk signal)")
+
+# --- 026 T670: broker admission observability -------------------------------------------------------
+# A refused request must be attributable to a SPECIFIC bound, not merely to "the GPU was busy". The
+# `reason` label carries the deciding condition, so an operator reading a refusal spike can tell a
+# budget problem (raise the budget / evict) from a physical one (an unaccounted external consumer)
+# from contention (nothing is wrong; the broker is saturated).
+#
+# Labels are bounded vocabularies throughout — `reason` and `outcome` are closed sets, and there is
+# deliberately NO tenant or model label: both are identifiers, and a label per tenant or per model
+# would mint a permanent time series for every one the broker ever saw. Per-tenant consumption is a
+# ledger question; per-model residency is `GET /gpu/queue`.
+REGISTRY.describe("hostagent_admission_outcomes_total", "counter",
+                  "Coordinator admission outcomes by result "
+                  "(grant|share|await|refuse|evict|rollback)")
+REGISTRY.describe("hostagent_admission_refusals_total", "counter",
+                  "Admission refusals by deciding reason "
+                  "(budget_bound|live_free_bound|model_too_large|exclusive_job|job_barrier|"
+                  "attempts_exhausted|deadline|load_failed|drift|stale)")
+REGISTRY.describe("hostagent_residents", "gauge", "Models currently resident on the GPU")
+REGISTRY.describe("hostagent_vram_accounted_bytes", "gauge",
+                  "Sum of resident models' accounted VRAM (invariant 1, left side)")
+REGISTRY.describe("hostagent_vram_reserved_bytes", "gauge",
+                  "Sum of ALL outstanding reservations (invariant 1, left side)")
+REGISTRY.describe("hostagent_vram_unmaterialized_bytes", "gauge",
+                  "Reservations not yet reconciled to a real delta (invariant 2 deduction only)")
+REGISTRY.describe("hostagent_vram_usable_capacity_bytes", "gauge",
+                  "min(configured budget, device total - safety reserve) (invariant 1, right side)")
+REGISTRY.describe("hostagent_job_barrier", "gauge",
+                  "1 while a job drain is closing serving admission")
+REGISTRY.describe("hostagent_jobs_lane_depth", "gauge", "Jobs waiting in the FIFO lane")
+REGISTRY.describe("hostagent_job_drain_mode", "gauge",
+                  "1 while new inference is refused so a queued job can acquire the GPU")

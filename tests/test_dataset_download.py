@@ -195,7 +195,9 @@ def test_download_still_streams_the_exact_bytes_through_the_route(monkeypatch):
 
 
 def test_ui_download_extension_mirrors_the_gateway_whitelist():
-    src = open(os.path.join(REPO, "ui", "app", "data", "page.tsx")).read()
+    # 027 T699 renamed the area: `/data` -> `/datasets`. The page moved with its content; only the
+    # route changed, and `/data` is now a redirect stub.
+    src = open(os.path.join(REPO, "ui", "app", "datasets", "page.tsx")).read()
     assert "downloadExt(detail.format)" in src          # not a hardcoded .jsonl
     assert ".jsonl`}" not in src
     for fmt in ("csv", "parquet", "jsonl"):             # same formats the gateway maps
@@ -203,7 +205,7 @@ def test_ui_download_extension_mirrors_the_gateway_whitelist():
 
 
 def test_the_data_page_links_the_proxy_route_not_a_presigned_url():
-    src = open(os.path.join(REPO, "ui", "app", "data", "page.tsx")).read()
+    src = open(os.path.join(REPO, "ui", "app", "datasets", "page.tsx")).read()
     assert "/download`" in src and "/api/gw/datasets/" in src   # goes through the key-injecting BFF
     assert "detail.download_url" not in src                     # never renders a signed URL
     assert "download_url?" not in src                           # and the field is gone from the type

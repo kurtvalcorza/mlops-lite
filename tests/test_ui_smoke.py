@@ -23,7 +23,14 @@ GW = f"http://localhost:{os.getenv('GATEWAY_PORT', '8080')}"
 SUPERVISOR = f"http://localhost:{os.getenv('SUPERVISE_STATUS_PORT', '8099')}"
 KEY = os.getenv("GATEWAY_API_KEY")
 FLIP = os.getenv("FLIP_DAEMON", "training")
-PAGES = ["/infer", "/models", "/datasets", "/runs", "/monitor", "/health"]
+# 027 T706: the ten areas. The 021 paths below them are kept in `RETIRED` rather than dropped —
+# a smoke test that stopped exercising them would stop noticing the day a redirect breaks, which is
+# the day every bookmark and runbook link in the platform breaks with it.
+AREAS = ["/overview", "/models", "/training", "/evaluations", "/deployments", "/inference",
+         "/datasets", "/runtime", "/observability", "/administration"]
+RETIRED = ["/infer", "/runs", "/monitor", "/monitoring", "/serving", "/data", "/retraining",
+           "/health"]
+PAGES = AREAS + RETIRED
 
 
 def _get(url, timeout=10):
@@ -96,6 +103,33 @@ def main() -> int:
         print(f"[{'OK' if ok else 'FAIL'}] UI {p} -> {s} (expect 200)")
         failures += 0 if ok else 1
 
+    # 1b. 027 T706: Overview is the LANDING view. 021 landed on /serving — right when the IA *was*
+    #     the loop, wrong now that there are ten areas of concern and no ordering among them.
+    s, body = _get(UI + "/")
+    html = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body)
+    landed = s == 200 and "Overview" in html
+    print(f"[{'OK' if landed else 'FAIL'}] UI / lands on Overview -> {s} (027 FR-364)")
+    failures += 0 if landed else 1
+
+    # 1c. 027 T706: the summary cards and the active-work join populate through the BFF. Asserted
+    #     against the ROUTES rather than the rendered HTML — the panels render client-side, and a
+    #     test that scraped the SSR shell would pass while every card said "unknown".
+    for route in ("console/summary", "console/attention", "console/activity", "console/jobs"):
+        s, body = _get(f"{UI}/api/gw/{route}")
+        ok = s == 200
+        detail = ""
+        if ok:
+            try:
+                envelope = json.loads(body)
+                # The envelope is the contract. A 200 carrying the wrong shape would let every
+                # truthfulness property downstream fail silently.
+                ok = set(envelope) >= {"data", "observed", "degraded"}
+                detail = f" degraded={envelope.get('degraded')}"
+            except Exception:
+                ok = False
+        print(f"[{'OK' if ok else 'FAIL'}] BFF /api/gw/{route} -> {s} (envelope){detail}")
+        failures += 0 if ok else 1
+
     # 2. BFF proxies /platform/health (key injected server-side).
     s, _ = _get(f"{UI}/api/gw/platform/health")
     ok = s == 200
@@ -150,7 +184,8 @@ def main() -> int:
     if failures:
         print(f"\n{failures} smoke check(s) failed.")
         return 1
-    print("\nT071 PASS — six surfaces reachable; SSE state channel tracks supervision live")
+    print("\nT071/T706 PASS — ten areas + every retired path reachable; Overview is the landing "
+          "view; the console read envelopes proxy; SSE state channel tracks supervision live")
     return 0
 
 

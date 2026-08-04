@@ -1,158 +1,167 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
-import { Badge } from '@/components/Badge';
+// 027 US3 (T723) — the model catalog: one list across five systems (FR-383/384).
+//
+// 021's models page was the registry with the promote gate as its centerpiece. That surface is not
+// gone — it moved to `/models/[name]`, where it belongs, next to the versions it acts on. This page
+// is the question that had no home before: *what models does this platform have, and what is true
+// about each of them right now*, joined across the registry, the object store, the tracking server,
+// the serving pointer, and the evaluation record.
+//
+// The join's rule shows up directly in what is rendered: a row whose other side is missing is
+// **marked absent, never dropped**. A registry version with no artifact is exactly the row an
+// operator came here to find.
+
+import { Suspense, useState } from 'react';
+import Link from 'next/link';
 import { PageTitle, Panel } from '@/components/Panel';
-import { EvaluatePanel } from '@/components/models/EvaluatePanel';
-import { PromoteGate, type Version } from '@/components/models/PromoteGate';
-import { gwGet } from '@/lib/gw';
+import { CADENCE, formatAge, useLive } from '@/lib/use-live';
+import type { PlatformModel } from '@/lib/platform-types';
 
-type ModelRow = { name: string; serving_version: string | null };
-type ModelDetail = { name: string; serving: { version: string } | null; versions: Version[] };
+const MODALITIES = ['', 'text-generation', 'image-classification', 'embedding', 'asr', 'tabular',
+  'unknown'];
+const EVALUATION_STATES = ['', 'passed', 'failed', 'warning', 'not-evaluated', 'incomplete'];
 
-// 021 T445 (FR-224..229): the models stage — the registry with the promote GATE as its
-// centerpiece: champion marked, lineage drill-back per version (seeded/imported distinct),
-// evaluate on demand, preview→promote, override-with-reason. Accepts the
-// ?override=<name>@<version> deep-link from the retraining inbox (R7). The suggestions inbox
-// itself lives in /retraining (US4).
+type CatalogPage = { models: PlatformModel[]; total: number; offset: number; limit: number };
+
 export default function ModelsPage() {
   return (
     <Suspense fallback={<p className="text-caption-md text-ash">[~] loading…</p>}>
-      <ModelsView />
+      <CatalogView />
     </Suspense>
   );
 }
 
-function ModelsView() {
-  const params = useSearchParams();
-  const [models, setModels] = useState<ModelRow[]>([]);
-  const [err, setErr] = useState('');
-  const [loading, setLoading] = useState(true);
+function CatalogView() {
+  const [modality, setModality] = useState('');
+  const [evaluationState, setEvaluationState] = useState('');
+  const [verify, setVerify] = useState(false);
 
-  // retraining → models hand-off: a blocked candidate to review for override.
-  const [overrideTarget, setOverrideTarget] = useState<{ name: string; version: string } | null>(null);
-  useEffect(() => {
-    const raw = params.get('override');
-    if (raw && raw.includes('@')) {
-      const at = raw.lastIndexOf('@');
-      setOverrideTarget({ name: raw.slice(0, at), version: raw.slice(at + 1) });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const query = new URLSearchParams();
+  if (modality) query.set('modality', modality);
+  if (evaluationState) query.set('evaluation_state', evaluationState);
+  // Opt-in, and labelled as such: an existence check per row is a round trip per row, so the list
+  // view leaves `artifactPresent` unknown until asked rather than making the page cost grow with
+  // the registry.
+  if (verify) query.set('verify_artifacts', 'true');
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const d = await gwGet<{ models: ModelRow[] }>('models');
-      setModels(d.models || []);
-      setErr('');
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  const { data, ageMs, degraded } = useLive<CatalogPage>(
+    `console/catalog?${query.toString()}`,
+    CADENCE.catalog,
+  );
 
   return (
     <>
-      <PageTitle sub="The registry, centered on the gate: preview, promote, or override with a reason.">
+      <PageTitle sub="Every model this platform has, joined across the registry, the object store, tracking, deployment, and evaluation.">
         models
       </PageTitle>
-      {overrideTarget && (
-        <p className="mb-4 text-caption-md st-warning">
-          [!] override review: <span className="text-ink">{overrideTarget.name} v{overrideTarget.version}</span>{' '}
-          arrived gate-blocked from retraining — its row below is highlighted; overriding requires a
-          typed reason.
-        </p>
-      )}
-      {err && <p className="mb-4 text-caption-md st-danger">[x] {err}</p>}
-      {loading && <p className="text-caption-md text-mute">[~] loading…</p>}
-      <div className="space-y-3">
-        {models.map((m) => (
-          <ModelCard
-            key={m.name}
-            model={m}
-            overrideVersion={overrideTarget?.name === m.name ? overrideTarget.version : null}
-            onChanged={load}
-          />
-        ))}
-        {!loading && models.length === 0 && (
-          <p className="text-body-md text-mute">[ ] no registered models.</p>
-        )}
+
+      <p className="mb-3 text-caption-md text-ash">
+        {formatAge(ageMs)}
+        {degraded.length > 0 && ` · unreachable: ${degraded.join(', ')}`}
+      </p>
+
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-caption-md">
+        <label>
+          modality{' '}
+          <select
+            value={modality}
+            onChange={(e) => setModality(e.target.value)}
+            className="bg-card text-ink"
+          >
+            {MODALITIES.map((m) => (
+              <option key={m} value={m}>
+                {m || 'any'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          evaluation{' '}
+          <select
+            value={evaluationState}
+            onChange={(e) => setEvaluationState(e.target.value)}
+            className="bg-card text-ink"
+          >
+            {EVALUATION_STATES.map((s) => (
+              <option key={s} value={s}>
+                {s || 'any'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" checked={verify} onChange={(e) => setVerify(e.target.checked)} />{' '}
+          verify artifacts (one object-store check per row)
+        </label>
       </div>
+
+      <Panel>
+        {data === null ? (
+          <p className="text-body-md text-mute">unknown — the registry did not answer</p>
+        ) : data.models.length === 0 ? (
+          <p className="text-body-md text-mute">no models match, based on what is readable</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full font-mono text-body-md">
+              <thead className="text-ash">
+                <tr>
+                  <th className="pr-4 text-left">model</th>
+                  <th className="pr-4 text-left">ver</th>
+                  <th className="pr-4 text-left">modality</th>
+                  <th className="pr-4 text-left">alias</th>
+                  <th className="pr-4 text-left">evaluation</th>
+                  <th className="pr-4 text-left">artifact</th>
+                  <th className="pr-4 text-left">deployed</th>
+                  <th className="text-left">source run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.models.map((model) => (
+                  <tr key={model.id} className="text-mute">
+                    <td className="pr-4">
+                      <Link
+                        href={`/models/${encodeURIComponent(model.name)}/${model.version}`}
+                        className="text-ink underline"
+                      >
+                        {model.name}
+                      </Link>
+                    </td>
+                    <td className="pr-4">{model.version}</td>
+                    {/* An unrecognized modality reads `unknown` — it is not filtered out (FR-385). */}
+                    <td className="pr-4">{model.modality}</td>
+                    <td className="pr-4">{model.aliases.join(',') || '—'}</td>
+                    <td className="pr-4">{model.evaluationState}</td>
+                    <td className="pr-4">
+                      <ArtifactCell present={model.artifactPresent} />
+                    </td>
+                    <td className="pr-4">{model.deploymentIds.length}</td>
+                    <td>
+                      {model.sourceRunId ? (
+                        <Link href={`/training/runs/${model.sourceRunId}`} className="underline">
+                          {model.sourceRunId.slice(0, 8)}
+                        </Link>
+                      ) : (
+                        // Marked absent, never dropped: a version with no source run is a finding.
+                        <span className="text-ash">absent</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="mt-2 text-caption-md text-ash">
+              {data.models.length} of {data.total}
+            </p>
+          </div>
+        )}
+      </Panel>
     </>
   );
 }
 
-function ModelCard({
-  model,
-  overrideVersion,
-  onChanged,
-}: {
-  model: ModelRow;
-  overrideVersion: string | null;
-  onChanged: () => void;
-}) {
-  // A card carrying the override target opens itself — the hand-off should land ready to review.
-  const [open, setOpen] = useState(overrideVersion !== null);
-  const [detail, setDetail] = useState<ModelDetail | null>(null);
-  const [err, setErr] = useState('');
-
-  const loadDetail = useCallback(async () => {
-    try {
-      setDetail(await gwGet<ModelDetail>(`models/${encodeURIComponent(model.name)}`));
-    } catch (e) {
-      setErr(String(e));
-    }
-  }, [model.name]);
-
-  useEffect(() => {
-    if (open && !detail) loadDetail();
-  }, [open, detail, loadDetail]);
-
-  const toggle = () => setOpen(!open);
-
-  return (
-    <Panel>
-      <button onClick={toggle} className="flex w-full items-center justify-between text-left">
-        <span className="text-body-strong text-ink">
-          <span className="st-mute">[{open ? '−' : '+'}]</span> {model.name}
-        </span>
-        {model.serving_version ? (
-          <Badge tone="accent">champion @v{model.serving_version}</Badge>
-        ) : (
-          <span className="text-caption-md text-ash">[ ] none promoted</span>
-        )}
-      </button>
-
-      {err && <p className="mt-2 text-caption-md st-danger">[x] {err}</p>}
-
-      {open && detail && (
-        <>
-          <PromoteGate
-            name={model.name}
-            versions={detail.versions}
-            championVersion={detail.serving?.version ?? null}
-            overrideVersion={overrideVersion}
-            onChanged={() => {
-              loadDetail();
-              onChanged();
-            }}
-          />
-          <div className="mt-4">
-            <EvaluatePanel
-              name={model.name}
-              versions={detail.versions}
-              championVersion={detail.serving?.version ?? null}
-            />
-          </div>
-        </>
-      )}
-    </Panel>
-  );
+/** Three states, three words. `null` is "unchecked", which is not "missing". */
+function ArtifactCell({ present }: { present: boolean | null }) {
+  if (present === null) return <span className="text-ash">unchecked</span>;
+  return present ? <span>present</span> : <span className="text-ink">MISSING</span>;
 }

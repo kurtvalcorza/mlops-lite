@@ -65,13 +65,149 @@ _interrupted_at_start = 0
 def build_agent():
     """Wire the agent's components. Admission is the single in-process GPU authority (T364 retired
     the cross-process lockfile shim)."""
-    admission = adm.Admission(vram_budget_gb=VRAM_GB)
+    admission = _build_admission()
     journal = Journal()  # US4 T375-B: durable job state lives in the Postgres `jobs` table now
     from hostagent import adapters  # one runtime per registered engine adapter (T358+)
 
-    manager = lifecycle.EngineManager(admission, runtimes=adapters.build_runtimes(admission))
+    runtimes = adapters.build_runtimes(admission)
+    # Co-residency only: tell the coordinator which runtime owns each engine, so an eviction unloads
+    # the real child instead of calling a no-op. The runtimes take admission as a constructor
+    # argument, so this cannot happen any earlier than here.
+    for engine_id, runtime in runtimes.items():
+        _register_runtime(engine_id, runtime)
+
+    manager = lifecycle.EngineManager(admission, runtimes=runtimes)
     jobs = jobs_mod.JobManager(admission, journal)  # 018 T362: the trainer folded in
     return admission, journal, manager, jobs
+
+
+#: The coordinator the engine runtimes admit through when co-residency is enabled. Module-level so
+#: `build_agent()` and `build_broker()` share ONE — two coordinators would be two GPU authorities,
+#: which is the single thing this feature's design forbids.
+_COORDINATOR = None
+
+
+#: The lifecycle the coordinator drives in production. Shared with the admission shim so the engine
+#: runtimes can register themselves as the real owners of load and unload.
+_RUNTIME_LIFECYCLE = None
+
+
+def _coordinator():
+    """The one coordinator, wired to a lifecycle that reflects how loading actually happens here.
+
+    It used to be constructed bare, which left it on `NullLifecycle` — a stub that returns a fake
+    child with `pid=0` and unloads nothing. In production that meant stage 3 reconciled VRAM against
+    PID 0, the real spawned PID was never installed, and coordinator evictions left the real engine
+    running. The co-residency tests passed because they supply their own fake lifecycle, so the
+    tested system and the shipped one were not the same system.
+    """
+    global _COORDINATOR, _RUNTIME_LIFECYCLE
+    if _COORDINATOR is None:
+        from hostagent import coordadmission
+        from hostagent import coordinator as coordinator_mod
+        _RUNTIME_LIFECYCLE = coordadmission.RuntimeLifecycle()
+        _COORDINATOR = coordinator_mod.Coordinator(lifecycle=_RUNTIME_LIFECYCLE)
+    return _COORDINATOR
+
+
+def _register_runtime(engine_id: str, runtime) -> None:
+    """Tell the coordinator which runtime owns an engine, so eviction can actually unload it.
+
+    Called after the runtimes are built — they take admission as a constructor argument, so the
+    coordinator necessarily exists first and the registration cannot happen at construction time.
+    """
+    if _RUNTIME_LIFECYCLE is not None:
+        _RUNTIME_LIFECYCLE.register(engine_id, runtime)
+
+
+def _build_admission():
+    """The single-slot lease, or the coordinator-backed shim when co-residency is enabled (T653/T654).
+
+    Default OFF: 026 ships phase-gated, and co-residency changes what the GPU does under load, so it
+    becomes the default only after the on-hardware drills in quickstart.md pass. Off, the agent's
+    behaviour is byte-identical to 018's.
+    """
+    from hostagent import coordadmission
+
+    if coordadmission.enabled():
+        return coordadmission.CoordinatorAdmission(_coordinator())
+    return adm.Admission(vram_budget_gb=VRAM_GB)
+
+
+def build_broker():
+    """Wire the 026 coordinator + shape-lane scheduler, or `(None, None)` when the broker is off.
+
+    Separate from `build_agent` on purpose. The broker is additive: the pre-broker single-slot lease
+    still serves the 018 paths that use it (`hostagent.swap`, the engine runtimes), and every
+    signature in `build_agent` is byte-compatible for the tests that pin it. A deployment that has
+    not enabled the broker gets an agent that behaves exactly as before, and `/gpu/queue` answers
+    503 rather than inventing state.
+    """
+    if os.getenv("BROKER_ENABLED", "1").lower() in ("0", "false", "no"):
+        return None, None
+    from hostagent import scheduler as scheduler_mod
+    from platformlib import store as _store
+
+    coordinator = _coordinator()  # the SAME instance the engine runtimes admit through
+
+    # ONE cached connection, reopened after a failure — not a fresh connect per call.
+    #
+    # `Scheduler.snapshot()` backs `GET /admin/queue`, which the console polls every few seconds and
+    # which never closed what the factory handed it. A connect-per-call factory therefore opened a
+    # new Postgres connection on every poll and dropped it unclosed, walking the server's connection
+    # limit until nothing could connect at all. The self-healing cache mirrors
+    # `gateway/app/broker.py` and `gateway/app/policies.py`, which solved the same problem for the
+    # same reason.
+    lane_conn = {"conn": None}
+    lane_lock = threading.Lock()
+
+    def conn_factory():
+        with lane_lock:
+            existing = lane_conn["conn"]
+            if existing is not None and not getattr(existing, "closed", False):
+                return existing
+            try:
+                lane_conn["conn"] = _store.connect()
+            except StoreError:
+                # The scheduler degrades its lane view rather than failing the read, and the next
+                # call retries — a store that comes back does not need an agent restart.
+                lane_conn["conn"] = None
+            return lane_conn["conn"]
+
+    scheduler = scheduler_mod.Scheduler(coordinator, store=_store, conn_factory=conn_factory)
+    _recover_broker_lane(_store, conn_factory)
+    return coordinator, scheduler
+
+
+def _recover_broker_lane(store, conn_factory) -> None:
+    """T680: resolve the persisted lane after a restart, and settle what the restart interrupted.
+
+    Runs before the agent serves: a `running` job whose reservation is left `reserved` holds quota
+    against its tenant forever, and a queued lane the agent has not yet reconciled would be served
+    to an operator as if it were live.
+    """
+    conn = conn_factory()
+    if conn is None:
+        return
+    try:
+        recovery = store.recover_broker_lane(conn)
+        for entry in recovery["interrupted"]:
+            elapsed = max(0.0, time.time() - (entry["started_at"] or time.time()))
+            try:
+                store.settle(conn, entry["id"], elapsed)
+            except StoreError:
+                pass  # no reservation for this job — nothing to settle, and nothing is held
+            store.finish_broker_job(conn, entry["id"], "interrupted", gpu_seconds=elapsed)
+        if recovery["interrupted"] or recovery["queued"]:
+            print(f"[broker] recovered lane: {len(recovery['interrupted'])} interrupted, "
+                  f"{recovery['queued']} still queued", flush=True)
+    except Exception as e:  # noqa: BLE001 — a store outage must not stop the agent from serving
+        print(f"[broker] lane recovery deferred: {e}", flush=True)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _engine_error_status(exc: BaseException) -> int:
@@ -373,9 +509,74 @@ def _get_jobs(path, ctx):
     return 200, {"jobs": journal.jobs(kind=kind)}, "application/json"
 
 
+#: The device snapshotter, built once. Module-level because the whole point is the 1s-TTL cache: a
+#: per-request instance would have an empty cache every time and re-read NVML on every console poll,
+#: which is the 018 fork-per-poll regression in a new place.
+_DEVICES = None
+
+
+def _devices():
+    global _DEVICES
+    if _DEVICES is None:
+        from hostagent import devices as devices_mod
+        _DEVICES = devices_mod.DeviceSnapshotter()
+    return _DEVICES
+
+
+def _get_gpu_queue(path, ctx):
+    """026 T689: the broker's residency + lane view. Degrades to the coordinator's own state when
+    the store is unreachable — an operator asking "what is on the GPU" during a store outage needs
+    the answer the agent already holds, not a 503."""
+    from hostagent import gpuroutes
+
+    if getattr(ctx, "scheduler", None) is None:
+        return 503, {"error": "the broker coordinator is not enabled on this agent"}, \
+            "application/json"
+    return 200, gpuroutes.queue_payload(ctx.scheduler), "application/json"
+
+
+def _get_runtime_devices(path, ctx):
+    """027 T712/FR-375: per-device topology from the cached reader. Never forks per request.
+
+    An unreadable GPU returns 200 with `source: "static"` and nulls — a known operating state, not a
+    request failure, and null must never be read as zero.
+    """
+    return 200, _devices().snapshot(), "application/json"
+
+
+def _get_runtime_admission(path, ctx):
+    """027 T712/FR-377: current bounds plus the bounded decision ring. A HISTORY, not a queue."""
+    from hostagent import admissionlog
+
+    coordinator = getattr(ctx, "coordinator", None)
+    if coordinator is None:
+        return 503, {"error": "the broker coordinator is not enabled on this agent"}, \
+            "application/json"
+    limit = (parse_qs(ctx.query).get("limit") or [None])[0]
+    return 200, admissionlog.snapshot_from_coordinator(
+        coordinator, coordinator.admission_log,
+        int(limit) if limit and limit.isdigit() else None), "application/json"
+
+
+def _get_journal(path, ctx):
+    """027 T712/FR-380: paged, filtered journal. Paging is mandatory — there is no `all` mode."""
+    from hostagent import journalread
+
+    q = parse_qs(ctx.query)
+    first = lambda k: (q.get(k) or [None])[0]  # noqa: E731 — a local reader, not a public helper
+    return 200, journalread.read(
+        ctx.journal, cursor=first("cursor"), limit=first("limit") or journalread.DEFAULT_LIMIT,
+        job_id=first("job_id"), engine_id=first("engine_id"), event_type=first("event_type"),
+        since=first("since"), until=first("until")), "application/json"
+
+
 #: Ordered GET route table (T585): first matcher wins — the exact order of the prior if-ladder.
 _GET_ROUTES = (
     (lambda p: p == "/healthz", _get_healthz),
+    (lambda p: p == "/gpu/queue", _get_gpu_queue),  # 026 T689
+    (lambda p: p == "/runtime/devices", _get_runtime_devices),      # 027 T712
+    (lambda p: p == "/runtime/admission", _get_runtime_admission),  # 027 T712
+    (lambda p: p == "/journal", _get_journal),                      # 027 T712
     (lambda p: p == "/readyz", _get_readyz),
     (lambda p: p == "/health", _get_health),
     (lambda p: p == "/metrics", _get_metrics),
@@ -386,14 +587,16 @@ _GET_ROUTES = (
 )
 
 
-def handle_get(path: str, query: str, *, admission, journal, manager, jobs, policy=None):
+def handle_get(path: str, query: str, *, admission, journal, manager, jobs, policy=None,
+               scheduler=None):
     """(status, payload, content_type) for every GET route, dispatched through the ordered
     `_GET_ROUTES` table (024 US3, T586 — first match wins; unmatched falls to the legacy job aliases,
     then 404). Routed on the PARSED path (Codex round 4, 018): the raw request path carries the query
     string, so `/jobs?kind=train` failed the exact match and a stray `/jobsxyz` fell into the jobs
     listing instead of 404. Signature unchanged — callers/tests are byte-compatible (FR-340)."""
     ctx = SimpleNamespace(query=query, admission=admission, journal=journal, manager=manager,
-                          jobs=jobs, policy=policy)
+                          jobs=jobs, policy=policy, scheduler=scheduler,
+                          coordinator=getattr(scheduler, "coordinator", None))
     for matcher, handler in _GET_ROUTES:
         if matcher(path):
             return handler(path, ctx)
@@ -554,8 +757,32 @@ def _is_engine_verb(path):
     return len(segs) >= 3 and segs[0] == "engines"
 
 
+def _post_gpu_job_override(path, ctx):
+    """026 T649: owner pin/pause/resume/reorder/cancel over the QUEUED lane."""
+    from hostagent import gpuroutes
+    from platformlib import store as _store
+
+    job_id = path[len("/gpu/jobs/"):-len("/override")]
+    body = _parse_json(ctx.raw_body)
+    if isinstance(body, tuple):
+        return "json", body[0], body[1]
+    try:
+        conn = _store.connect()
+    except StoreError as e:
+        return "json", 503, {"error": f"broker store unreachable: {e}"}
+    try:
+        status, payload = gpuroutes.job_override(_store, conn, job_id,
+                                                 str(body.get("action") or ""),
+                                                 body.get("position"))
+    finally:
+        conn.close()
+    return "json", status, payload
+
+
 #: Ordered POST route table (T585): first matcher wins — the exact order of the prior if-ladder.
 _POST_ROUTES = (
+    (lambda p: p.startswith("/gpu/jobs/") and p.endswith("/override"),
+     _post_gpu_job_override),  # 026 T649
     (lambda p: p == "/control/unload", _post_control_unload),
     (lambda p: p == "/control/reload", _post_control_reload),
     (lambda p: p == "/jobs", _post_jobs),
@@ -665,7 +892,7 @@ class BoundedAgentServer(ThreadingHTTPServer):
                     pass
 
 
-def make_handler(admission, journal, manager, jobs, policy=None):
+def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None):
     """The stdlib transport — a thin shell over the shared routers (T413).
 
     `policy` (023 US2, FR-281/282): the internal-credential gate, checked BEFORE any body read or
@@ -707,7 +934,8 @@ def make_handler(admission, journal, manager, jobs, policy=None):
                 url = urlparse(self.path)
                 if self._deny(url):
                     return
-                code, payload, ctype = handle_get(url.path, url.query, admission=admission,
+                code, payload, ctype = handle_get(url.path, url.query, scheduler=scheduler,
+                                                  admission=admission,
                                                   journal=journal, manager=manager, jobs=jobs,
                                                   policy=policy)
                 self._send(code, payload, content_type=ctype)
@@ -829,6 +1057,7 @@ def main() -> None:
     except agent_auth.AgentAuthConfigError as e:
         raise SystemExit(f"hostagent refused to start: {e}")
     admission, journal, manager, jobs = build_agent()
+    coordinator, scheduler = build_broker()  # 026: additive; (None, None) when BROKER_ENABLED=0
     _ready_check = _make_store_ready_check()  # /readyz reports schema compatibility (FR-301)
     _interrupted_at_start = journal.mark_interrupted("agent restart")
     if _interrupted_at_start:
@@ -837,9 +1066,11 @@ def main() -> None:
               f"(FR-173)", flush=True)
     threading.Thread(target=manager.run_reaper, daemon=True).start()
     server = BoundedAgentServer((AGENT_BIND, AGENT_PORT),
-                                make_handler(admission, journal, manager, jobs, policy=policy))
+                                make_handler(admission, journal, manager, jobs, policy=policy,
+                                             scheduler=scheduler))
     print(f"hostagent :{AGENT_PORT} | state={STATE_DIR} "
           f"| engines={list(manager.runtimes)} | jobs=on | vram_budget={VRAM_GB:.0f}GB "
+          f"| broker={'on' if scheduler else 'off'} "
           f"| security={policy.security_mode} "
           f"| workers={AGENT_MAX_WORKERS}+{AGENT_QUEUE_SIZE} io_timeout={AGENT_IO_TIMEOUT_S:.0f}s",
           flush=True)

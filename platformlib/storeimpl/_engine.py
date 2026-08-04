@@ -19,6 +19,14 @@ SCHEMA_VERSION = 1
 TABLES = ("meta", "predictions", "labels", "capture_index", "jobs", "policies", "suggestions",
           "serving_llm")
 
+#: The 026 broker slice, added by `003_broker.sql`. Deliberately SEPARATE from `TABLES`, which names
+#: the 001 baseline's shape and is pinned equal to `migrations.BASELINE_SHAPE` — the runner's
+#: legacy-adoption check verifies a pre-ledger database against that exact shape, so a table added by
+#: a later migration must not appear in it or adoption would demand a table the baseline never
+#: created. New slices get their own constant; they do not grow the baseline's.
+BROKER_TABLES = ("tenants", "api_keys", "quotas", "usage_ledger", "usage_reservation",
+                 "broker_jobs", "broker_sessions")
+
 
 def dsn() -> str:
     """The Postgres DSN for the `gateway` DB. `GATEWAY_DB_URL` (full DSN) wins; else assembled from

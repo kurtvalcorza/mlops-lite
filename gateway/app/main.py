@@ -8,6 +8,7 @@ Phase 8: GPU/daemon metrics proxied into /metrics; OpenAPI exported for contract
 002 hardening (US1): the lifecycle routers below require an API key (FR-016); `/healthz`,
 `/metrics`, and `/` stay open for liveness and Prometheus.
 """
+import logging
 import os
 
 from fastapi import Depends, FastAPI
@@ -16,8 +17,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 from . import platform_health, platform_metrics, tracing
 from .auth import auth_mode, require_api_key
-from .routers import (
+from .routers import (  # 026: the LAN broker surface
     batch,
+    broker_admin,
+    broker_openai,
     datasets,
     embed,
     infer,
@@ -30,9 +33,12 @@ from .routers import (
     validation,
     vision,
 )
+from .routers import console as console_router  # 027: the console read surface
 from .routers import (
     policies as policies_router,
 )
+
+_log = logging.getLogger("gateway.main")
 
 app = FastAPI(title="MLOps-Lite Gateway", version="1.2.0")
 
@@ -51,6 +57,18 @@ app.include_router(tabular.router, tags=["tabular"], dependencies=_protected)  #
 app.include_router(validation.router, tags=["validation"], dependencies=_protected)  # 014 US2
 app.include_router(batch.router, tags=["batch"], dependencies=_protected)  # 014 US1 (offline batch)
 app.include_router(policies_router.router, tags=["policies"], dependencies=_protected)  # 018 US3
+
+# 026: the LAN broker surface. Deliberately NOT under `_protected` — these routers carry their own
+# auth (`require_tenant` / `require_owner`), because they authenticate a TENANT or the OWNER rather
+# than the operator's platform key. Stacking the operator key on top would mean every LAN tenant
+# needed it too, which would hand each of them the whole lifecycle surface (026 T620/T624/T633).
+app.include_router(broker_openai.router, tags=["broker-inference"])
+app.include_router(broker_admin.router, tags=["broker-admin"])
+
+# 027: the console read surface. Under `_protected` — these are OPERATOR reads reached through the
+# BFF, which injects the operator key; they are not a tenant surface and must not be reachable with
+# a tenant key (a tenant could otherwise read every other tenant's runtime and catalog state).
+app.include_router(console_router.router, tags=["console"], dependencies=_protected)
 
 REQUESTS = Counter("gateway_requests_total", "Total gateway requests", ["route"])
 
@@ -166,6 +184,82 @@ def _apply_migrations():
             last_err = f"database unreachable ({e.__class__.__name__})"
     _MIGRATION_STATUS.update(state="error", error=last_err)
     _MIG_OUTCOMES.labels(outcome="error").inc()
+
+
+# --- 026 (T621, T629): broker startup — the system tenant, then the settlement outbox ---------------
+# Both run AFTER migrations because both need the 003_broker tables. Both are best-effort: a broker
+# that cannot reach the store yet must not stop the gateway from serving the routes that do not need
+# it, and each retries naturally (the tenant on the next boot, the outbox on the next settle).
+
+@app.on_event("startup")
+def _broker_startup():
+    if _MIGRATION_STATUS["state"] == "error":
+        return
+    from platformlib import store as _store
+
+    from . import broker, metering
+
+    try:
+        _store.ensure_system_tenant(broker.conn())
+    except Exception as e:  # noqa: BLE001
+        _log.warning("broker: could not materialize the system tenant: %s", e)
+    try:
+        # Replays settlements a previous process wrote to the WAL but did not confirm. Idempotent —
+        # a re-settled operation is a no-op, which is what makes at-least-once delivery exactly-once.
+        metering.replay_outbox()
+    except Exception as e:  # noqa: BLE001
+        _log.warning("broker: settlement outbox replay failed, will retry on next settle: %s", e)
+    try:
+        # AFTER the replay, so a deferred settle lands before the sweep judges its reservation
+        # abandoned. Reaps inference reservations orphaned by a client that disconnected before the
+        # stream generator ever started — nothing inside a request can release those, because no
+        # frame of the generator ever existed for a `finally` to run in.
+        metering.sweep_orphaned_reservations()
+    except Exception as e:  # noqa: BLE001
+        _log.warning("broker: orphaned-reservation sweep failed, will retry on the next tick: %s", e)
+
+
+# The periodic leg of the same sweep (the startup leg runs in `_broker_startup` above). Without it a
+# long-lived gateway reclaims orphans only at its next restart, while each one holds its full
+# estimate against the tenant's window indefinitely.
+_resv_sweep_stop = None
+_resv_sweep_task = None  # strong reference — a bare ensure_future task can be GC'd mid-flight
+
+
+@app.on_event("startup")
+async def _start_reservation_sweeper():
+    global _resv_sweep_stop, _resv_sweep_task
+    if os.getenv("BROKER_RESERVATION_SWEEP_ENABLED", "1").lower() in ("0", "false", "no"):
+        return
+    import asyncio
+
+    from fastapi.concurrency import run_in_threadpool
+
+    from . import metering
+
+    interval = float(os.getenv("BROKER_RESERVATION_SWEEP_INTERVAL_S", "300"))
+    _resv_sweep_stop = asyncio.Event()
+
+    async def loop():
+        # Wait first: the startup leg has just swept, so an immediate pass would be a no-op.
+        while not _resv_sweep_stop.is_set():
+            try:
+                await asyncio.wait_for(_resv_sweep_stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            if _resv_sweep_stop.is_set():
+                return
+            # `sweep_orphaned_reservations` contains its own failures; nothing here can raise past
+            # the tick.
+            await run_in_threadpool(metering.sweep_orphaned_reservations)
+
+    _resv_sweep_task = asyncio.ensure_future(loop())
+
+
+@app.on_event("shutdown")
+async def _stop_reservation_sweeper():
+    if _resv_sweep_stop is not None:
+        _resv_sweep_stop.set()
 
 
 # --- 023 US5 (T524, FR-309..311): activation reconciliation from gateway lifespan -------------------

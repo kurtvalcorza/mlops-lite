@@ -6,7 +6,7 @@
 // candidate-awaiting-promotion, latest breach). Everything degrades to `null` (= unknown/at-rest)
 // when the platform is unreachable — the shell renders and navigates regardless.
 //
-// Mounted ONCE (in LoopNav); StageBadge/GpuPill consume the returned value as props so the console
+// Mounted ONCE (in AreaNav); GpuPill consumes the returned value as props so the console
 // holds a single EventSource + one set of polls, not one per badge.
 
 import { useEffect, useRef, useState } from 'react';
