@@ -153,14 +153,20 @@ class ResidentModel:
     carries the estimate during that window, and counting both would double-count it."""
 
     __slots__ = ("model_key", "state", "vram_accounted_bytes", "active_requests", "last_used_at",
-                 "child", "materialized")
+                 "recency_seq", "child", "materialized")
 
-    def __init__(self, model_key, state=LOADING, vram_accounted_bytes=0.0, clock=time.time):
+    def __init__(self, model_key, state=LOADING, vram_accounted_bytes=0.0, clock=time.time, seq=0):
         self.model_key = model_key
         self.state = state
         self.vram_accounted_bytes = vram_accounted_bytes
         self.active_requests = 0
         self.last_used_at = clock()
+        #: Tie-break for `last_used_at`, monotonic in touch order. A timestamp cannot order two
+        #: touches that land inside one clock tick, and `time.time()` resolves to 15.625 ms on
+        #: Windows against ~1 ns on Linux — so on a coarse clock two acquires tie and every
+        #: recency sort silently falls back to dict insertion order. This carries the order the
+        #: timestamp loses. The coordinator owns the counter; see `Coordinator._touch`.
+        self.recency_seq = seq
         self.child = None
         #: Whether these bytes are **physically allocated** and therefore already visible in
         #: live-free. True for a normal load, which measures a real process before committing.
@@ -176,7 +182,7 @@ class ResidentModel:
         return {"model": self.model_key, "state": self.state,
                 "vram_accounted_bytes": self.vram_accounted_bytes,
                 "active_requests": self.active_requests, "last_used_at": self.last_used_at,
-                "idle": self.active_requests == 0}
+                "recency_seq": self.recency_seq, "idle": self.active_requests == 0}
 
 
 class Reservation:
@@ -394,6 +400,11 @@ class Coordinator:
         self._claims = {}         # model_key -> set of claim ids
         self._claim_ids = itertools.count(1)
 
+        #: Recency ticket dispenser. Every write to a resident's `last_used_at` takes the next one,
+        #: so recency stays totally ordered even where the wallclock's resolution cannot separate
+        #: two touches. See `ResidentModel.recency_seq`.
+        self._recency_seq = itertools.count(1)
+
         #: 027 T709: the bounded admission decision ring. A DECISION HISTORY, not a queue — the
         #: coordinator decides immediately, so there is no pending state to report. The append is
         #: IO-free and happens outside every critical section, so observability can never refuse a
@@ -482,6 +493,16 @@ class Coordinator:
                 return res
         return None
 
+    def _touch(self, entry) -> None:
+        """Mark `entry` as just used. The **only** place recency is written.
+
+        Both fields move together, and every recency sort reads both: `last_used_at` is what
+        operators and the API see, `recency_seq` is what makes the order total when the clock's
+        resolution cannot separate two touches.
+        """
+        entry.last_used_at = self._wallclock()
+        entry.recency_seq = next(self._recency_seq)
+
     # -- claims -------------------------------------------------------------------------------------
 
     def _grant_claim(self, model_key, op_id) -> Claim:
@@ -489,7 +510,7 @@ class Coordinator:
         section that observed (or established) `resident` — never after it (T677)."""
         entry = self.residents[model_key]
         entry.active_requests += 1
-        entry.last_used_at = self._wallclock()
+        self._touch(entry)
         claim = Claim(self, model_key, op_id)
         claim_id = next(self._claim_ids)
         self._claims.setdefault(model_key, set()).add(claim_id)
@@ -501,7 +522,7 @@ class Coordinator:
             entry = self.residents.get(claim.model_key)
             if entry is not None:
                 entry.active_requests = max(0, entry.active_requests - 1)
-                entry.last_used_at = self._wallclock()
+                self._touch(entry)
             ids = self._claims.get(claim.model_key)
             if ids is not None:
                 ids.discard(getattr(claim, "_claim_id", None))
@@ -562,7 +583,7 @@ class Coordinator:
         """
         eligible = [r for k, r in self.residents.items()
                     if k != model_key and r.state == RESIDENT and r.materialized]
-        eligible.sort(key=lambda r: (r.active_requests > 0, r.last_used_at))
+        eligible.sort(key=lambda r: (r.active_requests > 0, r.last_used_at, r.recency_seq))
 
         capacity = self.usable_capacity()
         headroom = self.config.safety_headroom_bytes
@@ -750,7 +771,8 @@ class Coordinator:
                                           self._generation_of(model_key))
                 self.reservations[op_id] = reservation
                 self.residents[model_key] = ResidentModel(model_key, LOADING,
-                                                          clock=self._wallclock)
+                                                          clock=self._wallclock,
+                                                          seq=next(self._recency_seq))
                 return "load", reservation
 
             victims = self._select_victims(model_key, est_bytes)
@@ -928,7 +950,7 @@ class Coordinator:
                     entry.state = RESIDENT
                     entry.vram_accounted_bytes = real_bytes
                     entry.child = child
-                    entry.last_used_at = self._wallclock()
+                    self._touch(entry)
                     # A deferred commit's bytes are an ESTIMATE of memory nothing has allocated yet.
                     # Invariant 2 keeps deducting them from live-free until `set_child()` reports
                     # the real PID and re-measures; a normal load already measured a live process,

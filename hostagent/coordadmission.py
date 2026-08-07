@@ -270,7 +270,11 @@ class CoordinatorAdmission:
         if snap["active_job"]:
             return {"tenant": snap["active_job"]["job_id"], "kind": "job", "est_gb": None,
                     "child_pid": None, "acquired_at": snap["active_job"]["started_at"]}
-        residents = sorted(snap["resident"], key=lambda r: r["last_used_at"], reverse=True)
+        # `recency_seq` breaks ties `last_used_at` cannot: a coarse wallclock (15.625 ms on Windows)
+        # puts two acquires in one tick, and without it the "most recent" holder is whichever the
+        # resident dict happened to hold first. Defaulted for any snapshot predating the field.
+        residents = sorted(snap["resident"],
+                           key=lambda r: (r["last_used_at"], r.get("recency_seq", 0)), reverse=True)
         if not residents:
             return None
         top = residents[0]

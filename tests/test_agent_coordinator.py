@@ -298,6 +298,25 @@ def test_idle_residents_are_evicted_before_busy_ones():
     busy.claim.release()
 
 
+def test_the_lru_order_holds_on_a_clock_too_coarse_to_separate_two_touches():
+    """A frozen wallclock is the limiting case of a real one: `time.time()` resolves to 15.625ms on
+    Windows, so touches inside a single tick record identical `last_used_at`.
+
+    With only the timestamp to sort on, `sort` is stable and recency degrades to dict insertion
+    order — which here would evict `a`, the model just used, and spare `b`, the idle one. That is
+    the wrong model, on the platform where it is least likely to be noticed.
+    """
+    coord, gpu, life = make(sizes={"a": 2 * GIB, "b": 2 * GIB, "new": 8 * GIB},
+                            wallclock=lambda: 1_700_000_000.0)
+    coord.admit_serving("a", 2 * GIB).claim.release()
+    coord.admit_serving("b", 2 * GIB).claim.release()
+    coord.admit_serving("a", 2 * GIB).claim.release()  # `a` is now the most recently used
+
+    victims = coord._select_victims("new", 8 * GIB)
+
+    assert [v.model_key for v in victims] == ["b"], "least recently used first, insertion order last"
+
+
 # -- T639: bounded drain, and the barrier-aware revert -------------------------------------------------------
 
 def test_eviction_never_interrupts_an_in_flight_request():
