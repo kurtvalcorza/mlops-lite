@@ -151,6 +151,83 @@ def test_a_413_written_over_an_unread_body_defers_its_close(monkeypatch):
         server.shutdown()
 
 
+def test_a_production_sized_overlimit_body_is_drained_not_cut_off(monkeypatch):
+    """The case a byte-capped discard could not serve, at a scale that matters.
+
+    A body that genuinely trips the real JSON limit is over 1 MiB, and multipart is 32 MiB, so any
+    fixed byte ceiling low enough to be a meaningful bound sits *below* every request this defends
+    against — the reaper would discard its quota, close on a large unread remainder, and reset the
+    413 away exactly as before. The lingering close is therefore bounded by lifetime and count only.
+
+    256 KiB here rather than a literal megabyte: comfortably past the 64 KiB ceiling that used to
+    cut this off, without making the suite push a megabyte through loopback per run.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/jobs", body=b"x" * (256 * 1024),
+                     headers={"Content-Type": "application/json"})
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "the refused socket was handed to the lingering closer"
+
+        # The point of the test: the reaper keeps draining rather than closing once some byte quota
+        # is spent. Sample across a window far longer than draining 256 KiB takes.
+        for _ in range(20):
+            time.sleep(0.01)
+            with server._linger_lock:
+                still = list(server._lingering)
+            if not still:
+                break
+        assert all(s.fileno() != -1 for s in pending), \
+            "the socket was cut off mid-body instead of drained to the peer's FIN"
+
+        assert conn.getresponse().status == 413
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_an_unauthorized_request_with_a_sent_body_keeps_its_401(monkeypatch):
+    """The 401 half of #85, which the auth-ordering test cannot reach.
+
+    `test_auth_precedes_body_buffering` declares 1 MiB and **sends nothing**, so it proves the gate
+    runs before the read but leaves no bytes on the socket — the close is harmless and the deferral
+    has nothing to do. Here the body is actually transmitted, so the 401 is written over a request
+    the gate deliberately never read (FR-282/283) and needs the same handover the 413 does.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/jobs", body=b"x" * 12288,  # no X-Agent-Key: refused at the gate
+                     headers={"Content-Type": "application/json"})
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "the unauthorized socket was handed to the lingering closer"
+        assert all(s.fileno() != -1 for s in pending), "and it is still open"
+
+        assert conn.getresponse().status == 401  # the gate's verdict, not a reset
+        conn.close()
+    finally:
+        server.shutdown()
+
+
 def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
     monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 512, raising=True)
     server, host, port, _ = _server()

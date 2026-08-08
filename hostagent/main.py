@@ -53,13 +53,20 @@ AGENT_MAX_WORKERS = int(os.getenv("AGENT_MAX_WORKERS", "8"))          # concurre
 AGENT_QUEUE_SIZE = int(os.getenv("AGENT_QUEUE_SIZE", "8"))            # admitted-but-waiting bound
 AGENT_QUEUE_WAIT_S = float(os.getenv("AGENT_QUEUE_WAIT_S", "5"))      # max wait for a worker slot
 
-#: Bounds on the lingering close of a REFUSED connection — see `BoundedAgentServer._linger`. These
-#: exist so that keeping a 503 deliverable can never itself become the resource leak FR-316 forbids;
-#: past any of them the socket is closed at once and the reset is accepted.
+#: Bounds on the lingering close — see `BoundedAgentServer._linger`. These exist so that keeping a
+#: refusal's status deliverable can never itself become the resource leak FR-316 forbids; past
+#: either of them the socket is closed at once and the reset is accepted.
+#:
+#: **Time and count, deliberately not bytes.** An earlier revision also capped discarded bytes at
+#: 64 KiB, which quietly made the whole mechanism inapplicable to the requests it exists for: the
+#: JSON limit is 1 MiB and multipart is 32 MiB, so any body that genuinely trips a limit exceeds a
+#: 64 KiB ceiling by construction and was closed early anyway. The reaper reads 4 KiB at a time and
+#: retains nothing, so a byte cap was never what kept memory bounded — it is O(1) regardless. What
+#: bounds the cost is the lifetime below, the pending count, and there being exactly one reaper
+#: thread; the most a socket can cost is whatever arrives in `_LINGER_DEADLINE_S`.
 #:
 #: The pending cap also stays under the 512-descriptor ceiling `select` carries on Windows.
 _LINGER_DEADLINE_S = 1.0
-_LINGER_MAX_DISCARD = 64 * 1024
 _LINGER_MAX_PENDING = 256
 AGENT_IO_TIMEOUT_S = float(os.getenv("AGENT_IO_TIMEOUT_S", "30"))     # per-socket read/write
 AGENT_SHUTDOWN_TIMEOUT_S = float(os.getenv("AGENT_SHUTDOWN_TIMEOUT_S", "10"))  # drain budget
@@ -946,17 +953,22 @@ class BoundedAgentServer(ThreadingHTTPServer):
         single reaper perform the actual close once the peer has gone away or a short deadline
         expires.
 
-        Bounded on every axis, because this runs precisely when the agent is already saturated: ONE
-        reaper thread regardless of load (never a thread per refusal — that is the pile FR-316
-        exists to prevent), at most `_LINGER_MAX_PENDING` sockets held, at most
-        `_LINGER_MAX_DISCARD` bytes discarded per socket, and at most `_LINGER_DEADLINE_S` of life.
-        Over any of those bounds it degrades to the immediate close rather than accumulating.
+        Bounded where it counts, because this runs precisely when the agent is already saturated:
+        ONE reaper thread regardless of load (never a thread per refusal — that is the pile FR-316
+        exists to prevent), at most `_LINGER_MAX_PENDING` sockets held, and at most
+        `_LINGER_DEADLINE_S` of life each. Over either bound it degrades to the immediate close
+        rather than accumulating.
+
+        Bytes are deliberately NOT bounded — see the constants. A cap low enough to be meaningful
+        was necessarily lower than the body limits this defends, so it excluded every request that
+        actually trips one. The reaper reads 4 KiB at a time and retains nothing, so memory is O(1)
+        with or without it; what a socket can cost is whatever arrives inside its deadline.
 
         The discarded bytes are not a body being buffered: nothing is parsed, retained, or acted on,
         no worker or admission slot is held, and the refusal was decided and counted before this is
         reached. What FR-316 requires is that request concurrency and pending work stay bounded, and
         what SC-160 requires is a stable 413/503 without acquiring admission — reading after the
-        refusal, under fixed bounds, holding nothing, satisfies both.
+        refusal, under a fixed lifetime, holding nothing, satisfies both.
         """
         try:
             request.shutdown(socket.SHUT_WR)
@@ -969,7 +981,7 @@ class BoundedAgentServer(ThreadingHTTPServer):
                 self._linger_thread = threading.Thread(target=self._reap_lingering,
                                                        name="agent-linger-closer", daemon=True)
                 self._linger_thread.start()
-            self._lingering[request] = (time.monotonic() + _LINGER_DEADLINE_S, 0)
+            self._lingering[request] = time.monotonic() + _LINGER_DEADLINE_S
         return True
 
     def _reap_lingering(self) -> None:
@@ -1002,16 +1014,10 @@ class BoundedAgentServer(ThreadingHTTPServer):
                 if not chunk:
                     done.add(sock)  # peer sent FIN: it has read everything it is going to
                     continue
-                with self._linger_lock:
-                    entry = self._lingering.get(sock)
-                    if entry is not None:
-                        deadline, discarded = entry
-                        discarded += len(chunk)
-                        if discarded >= _LINGER_MAX_DISCARD:
-                            done.add(sock)
-                        else:
-                            self._lingering[sock] = (deadline, discarded)
-            for sock, (deadline, _) in pending:
+                # Anything else is body the handler refused to read. Discard it and keep waiting:
+                # the peer's FIN is the signal that it has the response, and the deadline is the
+                # backstop for a peer that never sends one.
+            for sock, deadline in pending:
                 if now >= deadline:
                     done.add(sock)
             for sock in done:
