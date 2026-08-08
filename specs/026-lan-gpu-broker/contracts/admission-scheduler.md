@@ -73,7 +73,12 @@ residents: model_key -> ResidentModel {
     state: loading | resident | draining | evicting | rolling_back
     vram_accounted_bytes            # reservation estimate, reconciled to real delta after load
     active_requests: int            # ref-count; eviction waits for 0
-    last_used_at
+    recency_seq                     # monotonic token from a coordinator-owned counter; THIS is what
+                                    #   LRU orders on. Taken on every touch, and on entry creation.
+    last_used_at                    # wall-clock stamp of the same touch — observability only, never
+                                    #   an ordering key: it ties on a coarse clock (15.625 ms on
+                                    #   Windows) and can run backward when the system clock is set
+                                    #   back, so it disagrees with touch order rather than tying.
 }
 exclusive_job: None | { job_id, started_at }     # at most one; whole GPU
 job_barrier: bool                                 # set during job drain; refuses NEW serving admits
@@ -332,7 +337,8 @@ evict(victim, deadline) :
   under lock: remove victim; bump generation   # ← resident entry + generation ONLY, never a reservation
   return Evicted
 ```
-Idle-first, then LRU. **Eviction never interrupts in-flight requests.** It also never drops another
+Idle-first, then LRU **by `recency_seq`, not by `last_used_at`** — see *Coordinator state* for why the
+wall-clock stamp is not an ordering key. **Eviction never interrupts in-flight requests.** It also never drops another
 operation's reservation — see *Reservation ownership* above; the generation bump is the whole of how a
 reclaimer signals a displaced owner, and that owner cleans up after itself.
 
