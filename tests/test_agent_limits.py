@@ -157,18 +157,15 @@ def test_auth_precedes_body_buffering(monkeypatch):
 # --- saturation (T531, FR-316/320) ---------------------------------------------------------------------
 
 def test_saturated_workers_and_queue_answer_503():
-    """The bound is asserted through the server's own rejection counter, not only through the
-    response, because the response is not guaranteed to survive the close.
+    """A stable, client-visible 503 (SC-160), plus the two witnesses that it was bounded.
 
-    `_reject` sends the 503 and shuts the connection down **without draining the request** — which
-    is FR-316's point, refuse before reading a byte. Closing a socket that still holds unread
-    inbound data sends an RST, and an RST can discard the already-queued response, so the client
-    sees `ConnectionAbortedError` (WinError 10053 on Windows) instead of the 503 it was sent. Linux
-    usually delivers the buffered bytes ahead of the reset, which is why CI never sees this.
+    The 503 is required unconditionally — it is the published contract, and the transport keeps it
+    deliverable through `BoundedAgentServer._linger` rather than letting the refusing close reset it
+    away. This test failing with a connection reset means that lingering close has regressed, which
+    is exactly what it should report rather than tolerate.
 
-    The refusal itself is counted in `process_request` before `_reject` runs, so it is observable
-    whatever happens to the socket. The response is still asserted whenever it arrives — a lost
-    response is tolerated, an unbounded thread pile is not.
+    The rejection counter and `_inflight` are asserted alongside it because the response alone does
+    not distinguish "refused at the bound" from "served normally and happened to answer 503".
     """
     hold = threading.Event()
     # `queue_wait_s` is long enough that the queued third request cannot time out mid-test. At the
@@ -183,30 +180,35 @@ def test_saturated_workers_and_queue_answer_503():
             c = http.client.HTTPConnection(host, port, timeout=15)
             c.request("GET", "/jobs")
             conns.append(c)
-        # Wait for the state the assertion depends on rather than sleeping a guessed interval.
+        # Wait for the precondition the probe depends on, rather than sleeping a guessed interval.
+        #
+        # `_inflight` alone is NOT that precondition: it counts handlers that acquired an *exec*
+        # slot, and says nothing about whether the third request has reached `process_request`,
+        # taken the last *connection* permit, and parked on the exec semaphore. Waiting only on it
+        # leaves the fourth probe racing the third request for that final permit. The bound under
+        # test is the connection bound, so wait until no connection permits remain.
         deadline = time.monotonic() + 10
-        while server._inflight < 2 and time.monotonic() < deadline:
+        while (server._inflight < 2 or server._conn_slots._value != 0) \
+                and time.monotonic() < deadline:
             time.sleep(0.01)
         assert server._inflight == 2, "both workers busy before the bound is probed"
+        assert server._conn_slots._value == 0, \
+            "all connection permits consumed before the bound is probed"
 
         before = REGISTRY.counter_value("hostagent_requests_rejected_total",
                                         {"reason": "saturated"})
         # the 4th connection is over conn bound → immediate minimal 503, no thread parked
         c4 = http.client.HTTPConnection(host, port, timeout=5)
         c4.request("GET", "/healthz")
-        try:
-            response = c4.getresponse()
-            status, body = response.status, response.read()
-        except (OSError, http.client.HTTPException) as exc:
-            status, body = None, exc  # the 503 was sent, then lost to the reset — see the docstring
+        response = c4.getresponse()
+        status, body = response.status, response.read()
         c4.close()
 
         after = REGISTRY.counter_value("hostagent_requests_rejected_total",
                                        {"reason": "saturated"})
-        assert after == before + 1, f"the 4th connection was not refused at the bound ({body!r})"
+        assert status == 503 and b"saturated" in body
+        assert after == before + 1, "the 4th connection was refused at the bound, not served"
         assert server._inflight == 2, "the refusal parked no additional worker"
-        if status is not None:
-            assert status == 503 and b"saturated" in body
     finally:
         hold.set()  # release the held handlers
         for c in conns:
