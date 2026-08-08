@@ -53,13 +53,20 @@ AGENT_MAX_WORKERS = int(os.getenv("AGENT_MAX_WORKERS", "8"))          # concurre
 AGENT_QUEUE_SIZE = int(os.getenv("AGENT_QUEUE_SIZE", "8"))            # admitted-but-waiting bound
 AGENT_QUEUE_WAIT_S = float(os.getenv("AGENT_QUEUE_WAIT_S", "5"))      # max wait for a worker slot
 
-#: Bounds on the lingering close of a REFUSED connection — see `BoundedAgentServer._linger`. These
-#: exist so that keeping a 503 deliverable can never itself become the resource leak FR-316 forbids;
-#: past any of them the socket is closed at once and the reset is accepted.
+#: Bounds on the lingering close — see `BoundedAgentServer._linger`. These exist so that keeping a
+#: refusal's status deliverable can never itself become the resource leak FR-316 forbids; past
+#: either of them the socket is closed at once and the reset is accepted.
+#:
+#: **Time and count, deliberately not bytes.** An earlier revision also capped discarded bytes at
+#: 64 KiB, which quietly made the whole mechanism inapplicable to the requests it exists for: the
+#: JSON limit is 1 MiB and multipart is 32 MiB, so any body that genuinely trips a limit exceeds a
+#: 64 KiB ceiling by construction and was closed early anyway. The reaper reads 4 KiB at a time and
+#: retains nothing, so a byte cap was never what kept memory bounded — it is O(1) regardless. What
+#: bounds the cost is the lifetime below, the pending count, and there being exactly one reaper
+#: thread; the most a socket can cost is whatever arrives in `_LINGER_DEADLINE_S`.
 #:
 #: The pending cap also stays under the 512-descriptor ceiling `select` carries on Windows.
 _LINGER_DEADLINE_S = 1.0
-_LINGER_MAX_DISCARD = 64 * 1024
 _LINGER_MAX_PENDING = 256
 AGENT_IO_TIMEOUT_S = float(os.getenv("AGENT_IO_TIMEOUT_S", "30"))     # per-socket read/write
 AGENT_SHUTDOWN_TIMEOUT_S = float(os.getenv("AGENT_SHUTDOWN_TIMEOUT_S", "10"))  # drain budget
@@ -840,8 +847,12 @@ class BoundedAgentServer(ThreadingHTTPServer):
         self._queue_wait_s = AGENT_QUEUE_WAIT_S if queue_wait_s is None else queue_wait_s
         self._inflight = 0
         self._inflight_lock = threading.Lock()
-        #: Refused sockets awaiting their close — socket -> (deadline, bytes discarded).
+        #: Refused sockets awaiting their close — socket -> deadline.
         self._lingering = {}
+        #: Sockets whose handler answered without consuming the request body, declared by the
+        #: handler itself via `mark_undrained`. Guarded by `_linger_lock`; entries are removed as
+        #: the connection closes, so this never outlives its sockets.
+        self._undrained = set()
         self._linger_lock = threading.Lock()
         self._linger_thread = None
 
@@ -877,8 +888,59 @@ class BoundedAgentServer(ThreadingHTTPServer):
             # The admission permit is returned immediately either way — a socket lingering for its
             # 503 holds no admission, so keeping the permit would shrink capacity for the duration.
             self._conn_slots.release()
-            if not lingering:
+            if not lingering and not self._linger_if_undrained(request):
                 self.shutdown_request(request)
+
+    def _linger_if_undrained(self, request) -> bool:
+        """Defer the close when the handler answered **without consuming the request**. True if the
+        closer took ownership.
+
+        `_reject`'s refusals are not the only responses written over an unread request. A body over
+        the route-class limit is refused with 413 before a byte of it is read (FR-317), and the auth
+        gate answers 401 before any read at all (FR-282/283) — both deliberate, and both leaving the
+        declared body sitting in the receive buffer. The close that follows then resets it away
+        exactly as it did for the 503, discarding the very status the client needed (issue #85).
+
+        Two witnesses, and the first is the authoritative one:
+
+        1. **The handler said so** — `mark_undrained`, called wherever a response is written over a
+           body that was deliberately not read. This is a statement about what the handler *did*, so
+           it holds no matter where those bytes are: still in flight, not yet sent, or already
+           buffered.
+        2. **The socket says so** — anything readable right now was not consumed either. This is the
+           safety net for a path that answers early without announcing it, and for a pipelined
+           follow-up request.
+
+        Readability alone is NOT sufficient, and was the bug in the first revision of this. Both
+        protected paths can answer from the headers alone — 413 on a declared `Content-Length` over
+        the limit, 401 at the gate — so a client that sends its headers first and its body a moment
+        later is answered while nothing is pending yet. A zero-time `select` then reports "drained",
+        the socket is closed at once, and the body lands on a closed socket: the same reset, arrived
+        at by the same close, on exactly the case the mechanism exists for.
+
+        Costs one set lookup, plus one non-blocking `select` when the handler did not mark. A
+        fully-consumed request closes immediately, exactly as before.
+        """
+        with self._linger_lock:
+            marked = request in self._undrained
+            self._undrained.discard(request)
+        if not marked:
+            try:
+                readable, _, _ = select.select([request], [], [], 0)
+            except (OSError, ValueError):
+                return False  # already closed, or not selectable — let the ordinary close handle it
+            if not readable:
+                return False
+        return self._linger(request)
+
+    def mark_undrained(self, request) -> None:
+        """Record that a response was written without consuming the request body.
+
+        Called by the handler, which is the only party that knows: the server cannot infer it from
+        the socket, because the body may not have arrived yet when the answer goes out.
+        """
+        with self._linger_lock:
+            self._undrained.add(request)
 
     def _reject(self, request) -> bool:
         """Answer a refusal with the minimal 503. **True if the closer took ownership** of the
@@ -918,17 +980,22 @@ class BoundedAgentServer(ThreadingHTTPServer):
         single reaper perform the actual close once the peer has gone away or a short deadline
         expires.
 
-        Bounded on every axis, because this runs precisely when the agent is already saturated: ONE
-        reaper thread regardless of load (never a thread per refusal — that is the pile FR-316
-        exists to prevent), at most `_LINGER_MAX_PENDING` sockets held, at most
-        `_LINGER_MAX_DISCARD` bytes discarded per socket, and at most `_LINGER_DEADLINE_S` of life.
-        Over any of those bounds it degrades to the immediate close rather than accumulating.
+        Bounded where it counts, because this runs precisely when the agent is already saturated:
+        ONE reaper thread regardless of load (never a thread per refusal — that is the pile FR-316
+        exists to prevent), at most `_LINGER_MAX_PENDING` sockets held, and at most
+        `_LINGER_DEADLINE_S` of life each. Over either bound it degrades to the immediate close
+        rather than accumulating.
+
+        Bytes are deliberately NOT bounded — see the constants. A cap low enough to be meaningful
+        was necessarily lower than the body limits this defends, so it excluded every request that
+        actually trips one. The reaper reads 4 KiB at a time and retains nothing, so memory is O(1)
+        with or without it; what a socket can cost is whatever arrives inside its deadline.
 
         The discarded bytes are not a body being buffered: nothing is parsed, retained, or acted on,
         no worker or admission slot is held, and the refusal was decided and counted before this is
         reached. What FR-316 requires is that request concurrency and pending work stay bounded, and
         what SC-160 requires is a stable 413/503 without acquiring admission — reading after the
-        refusal, under fixed bounds, holding nothing, satisfies both.
+        refusal, under a fixed lifetime, holding nothing, satisfies both.
         """
         try:
             request.shutdown(socket.SHUT_WR)
@@ -941,7 +1008,7 @@ class BoundedAgentServer(ThreadingHTTPServer):
                 self._linger_thread = threading.Thread(target=self._reap_lingering,
                                                        name="agent-linger-closer", daemon=True)
                 self._linger_thread.start()
-            self._lingering[request] = (time.monotonic() + _LINGER_DEADLINE_S, 0)
+            self._lingering[request] = time.monotonic() + _LINGER_DEADLINE_S
         return True
 
     def _reap_lingering(self) -> None:
@@ -974,16 +1041,10 @@ class BoundedAgentServer(ThreadingHTTPServer):
                 if not chunk:
                     done.add(sock)  # peer sent FIN: it has read everything it is going to
                     continue
-                with self._linger_lock:
-                    entry = self._lingering.get(sock)
-                    if entry is not None:
-                        deadline, discarded = entry
-                        discarded += len(chunk)
-                        if discarded >= _LINGER_MAX_DISCARD:
-                            done.add(sock)
-                        else:
-                            self._lingering[sock] = (deadline, discarded)
-            for sock, (deadline, _) in pending:
+                # Anything else is body the handler refused to read. Discard it and keep waiting:
+                # the peer's FIN is the signal that it has the response, and the deadline is the
+                # backstop for a peer that never sends one.
+            for sock, deadline in pending:
                 if now >= deadline:
                     done.add(sock)
             for sock in done:
@@ -1048,10 +1109,18 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
         def _deny(self, url) -> bool:
             """True when the request was refused (and answered) by the auth gate — evaluated on
             the PARSED path against the exact public allow-list (FR-283), before any body byte is
-            read (FR-282: an unauthorized request produces no admission/journal/store effect)."""
+            read (FR-282: an unauthorized request produces no admission/journal/store effect).
+
+            The unread-body marking lives HERE, at the shared boundary, rather than in each caller:
+            every method that gates on this leaves a declared body unread by construction, and a
+            per-caller marker is one `return` away from missing a route (issue #85 review — `do_GET`
+            gated here too, and a protected GET carrying a body raced exactly as POST did).
+            """
             deny = policy.authorize(self.command, url.path, self.headers.get("X-Agent-Key", ""))
             if deny is None:
                 return False
+            if self._declares_a_body():
+                self._answered_over_an_unread_body()
             self._send(*deny)
             return True
 
@@ -1148,12 +1217,42 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
                 REGISTRY.inc("hostagent_request_seconds_sum", by=time.monotonic() - t0)
                 REGISTRY.inc("hostagent_request_seconds_count")
 
+        def _declares_a_body(self) -> bool:
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                return True
+            try:
+                return int(self.headers.get("Content-Length", 0) or 0) > 0
+            except ValueError:
+                return False
+
+        def _answered_over_an_unread_body(self) -> None:
+            """Tell the server this response went out over a body we deliberately did not read, so
+            the close is deferred rather than resetting the status away (issue #85).
+
+            Announced rather than detected: both callers can answer from the headers alone, so the
+            body may still be in flight when this runs and no amount of looking at the socket would
+            see it.
+
+            Deferral is a `BoundedAgentServer` capability, but `make_handler` does not own its
+            server: `tests/_agentserver.py`, `test_agent_jobs_http.py` and `test_swap_orchestration`
+            all mount it on a plain `ThreadingHTTPServer`. So this asks rather than assumes. Without
+            the guard a refused body-bearing request raised `AttributeError` mid-handler there —
+            masked, because the status had already been flushed, so the client still saw its 401
+            while the thread died on the way out.
+            """
+            mark = getattr(self.server, "mark_undrained", None)
+            if mark is not None:
+                mark(self.connection)
+
         def _do_post(self):
             url = urlparse(self.path)
             if self._deny(url):  # auth BEFORE the body is buffered (FR-282/317: gate, then read)
-                return
+                return  # `_deny` marks the unread body itself — every gated method needs it
             raw = self._read_body()
             if raw is None:
+                # Over the limit: either refused on the declared length with nothing read, or the
+                # chunked reader stopped mid-stream. Both leave the remainder unread.
+                self._answered_over_an_unread_body()
                 REGISTRY.inc("hostagent_requests_rejected_total", labels={"reason": "too_large"})
                 return self._send(413, {"error": f"request body exceeds the "
                                                  f"{self._body_limit()}-byte limit for this "

@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+from http.server import ThreadingHTTPServer
 
 import pytest
 
@@ -90,6 +91,260 @@ def test_declared_oversize_json_is_413_before_any_read(monkeypatch):
         server.shutdown()
 
 
+def test_an_oversize_body_that_is_actually_sent_still_gets_its_413(monkeypatch):
+    """The sibling above declares an over-limit body and **sends nothing**, so the server's refusal
+    leaves an empty receive buffer and the close that follows is harmless. This one sends the body.
+
+    That is the case issue #85 was about: the 413 is written over a request the server deliberately
+    never read (FR-317), and closing a socket with unread data resets it away — taking the status
+    the client needed with it. `test_multipart_rides_the_larger_bound` hit exactly this as an
+    intermittent `ConnectionAbortedError` before the undrained close was deferred.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        oversize = b"x" * 8192  # declared AND transmitted, unlike the send-nothing case above
+        status, body = _post(host, port, "/jobs", oversize)
+        assert status == 413 and "limit" in body["error"]
+    finally:
+        server.shutdown()
+
+
+def test_a_413_written_over_an_unread_body_defers_its_close(monkeypatch):
+    """The mechanism behind the two tests above, asserted directly — because their outcome does not
+    discriminate.
+
+    Measured with the deferral disabled: the sent-body 413 passed 10/10, multipart passed 10/10, and
+    the chunked abort failed only 1/10. The reset is real but rare on this path, so a response-level
+    assertion is nearly green against the defect and would not hold the fix in place. What is
+    deterministic is the contract: a handler that answered without consuming the request must leave
+    the socket with the closer rather than closed.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        # Body large enough that the header read cannot have absorbed it into `rfile`'s buffer, so
+        # the refusal genuinely leaves bytes unread on the socket. A small body is pre-buffered and
+        # has no hazard to defer — the deferral correctly does nothing there.
+        conn.request("POST", "/jobs", body=b"x" * 12288,
+                     headers={"Content-Type": "application/json"})
+
+        # Check BEFORE reading. Reading is what ends the linger: the response is HTTP/1.0
+        # `Connection: close`, so finishing it makes the client close, the reaper sees the peer's
+        # FIN and releases the socket — measured under 100ms. Asserting after the read therefore
+        # finds an empty set whether or not the deferral happened, which is what made an earlier
+        # version of this test fail 12/12 against the *fixed* server.
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "the refused socket was handed to the lingering closer, not closed"
+        assert all(s.fileno() != -1 for s in pending), "and it is still open"
+
+        assert conn.getresponse().status == 413  # and the status still arrives
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_production_sized_overlimit_body_is_drained_not_cut_off(monkeypatch):
+    """The case a byte-capped discard could not serve, at a scale that matters.
+
+    A body that genuinely trips the real JSON limit is over 1 MiB, and multipart is 32 MiB, so any
+    fixed byte ceiling low enough to be a meaningful bound sits *below* every request this defends
+    against — the reaper would discard its quota, close on a large unread remainder, and reset the
+    413 away exactly as before. The lingering close is therefore bounded by lifetime and count only.
+
+    256 KiB here rather than a literal megabyte: comfortably past the 64 KiB ceiling that used to
+    cut this off, without making the suite push a megabyte through loopback per run.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/jobs", body=b"x" * (256 * 1024),
+                     headers={"Content-Type": "application/json"})
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "the refused socket was handed to the lingering closer"
+
+        # The point of the test: the reaper keeps draining rather than closing once some byte quota
+        # is spent. Sample across a window far longer than draining 256 KiB takes.
+        for _ in range(20):
+            time.sleep(0.01)
+            with server._linger_lock:
+                still = list(server._lingering)
+            if not still:
+                break
+        assert all(s.fileno() != -1 for s in pending), \
+            "the socket was cut off mid-body instead of drained to the peer's FIN"
+
+        assert conn.getresponse().status == 413
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_413_answered_before_the_body_arrives_still_defers_its_close(monkeypatch):
+    """Headers first, body later — the case instantaneous readability cannot see.
+
+    Both protected paths answer from the headers alone: a declared `Content-Length` over the limit
+    is refused without reading, and the auth gate denies before any read. So the response can go out
+    while the body is still in flight, and at that moment **nothing is pending on the socket**. A
+    zero-time `select` reports "drained", the close happens immediately, and the body then lands on
+    a closed socket — the same reset, reached by the same close, on exactly the case this mechanism
+    exists for.
+
+    The handover therefore has to rest on what the handler did, not on what the kernel happens to
+    hold. This test sends only headers, requires the socket to be with the closer *before* a single
+    body byte is written, and only then sends the body.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(8192))  # declared over the limit; not yet sent
+        conn.endheaders()
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "handed over on the refusal itself, before any body byte could be pending"
+
+        conn.send(b"x" * 8192)  # the body arrives only now, after the close would have happened
+        assert conn.getresponse().status == 413
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_an_unauthorized_request_with_a_sent_body_keeps_its_401(monkeypatch):
+    """The 401 half of #85, which the auth-ordering test cannot reach.
+
+    `test_auth_precedes_body_buffering` declares 1 MiB and **sends nothing**, so it proves the gate
+    runs before the read but leaves no bytes on the socket — the close is harmless and the deferral
+    has nothing to do. Here the body is actually transmitted, so the 401 is written over a request
+    the gate deliberately never read (FR-282/283) and needs the same handover the 413 does.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/jobs", body=b"x" * 12288,  # no X-Agent-Key: refused at the gate
+                     headers={"Content-Type": "application/json"})
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "the unauthorized socket was handed to the lingering closer"
+        assert all(s.fileno() != -1 for s in pending), "and it is still open"
+
+        assert conn.getresponse().status == 401  # the gate's verdict, not a reset
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_protected_get_carrying_a_body_defers_its_401_close():
+    """The auth gate is shared, so the handover has to be too.
+
+    `do_GET` gates on the same `_deny` as `do_POST` and every non-public GET (`/jobs`, `/health`,
+    `/engines` — only `/healthz`, `/readyz`, `/metrics` are public) is refused before any read. A
+    GET body has no useful semantics here, but nothing stops a client declaring one, and then the
+    401 goes out over bytes still in flight exactly as the POST case did. Marking in `_do_post`
+    alone left this route one `return` short of the fix.
+
+    Headers first, ownership asserted before a single body byte exists, body only afterwards —
+    the same shape as the 413 header-first test, on the GET half of the gate.
+    """
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("GET", "/jobs")  # not in PUBLIC_ROUTES; no X-Agent-Key
+        conn.putheader("Content-Length", str(8192))  # declared, deliberately not yet sent
+        conn.endheaders()
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "handed over on the refusal itself, before any body byte could be pending"
+
+        conn.send(b"x" * 8192)  # arrives only now — after the unmarked close would have happened
+        assert conn.getresponse().status == 401  # the gate's verdict, not a reset
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_the_handler_survives_a_refusal_on_a_server_without_the_deferral():
+    """`make_handler` is not owned by `BoundedAgentServer`, so it cannot assume the capability.
+
+    `tests/_agentserver.py` (the shared fixture behind the domain suites), `test_agent_jobs_http`
+    and `test_swap_orchestration` all mount it on a plain `ThreadingHTTPServer` — the reuse is
+    test-side today, but the factory is public and does not own its server, and the failure mode is
+    silent. Calling `mark_undrained` unconditionally raised `AttributeError` there on
+    every refused body-bearing request — and it went unnoticed because the status had already been
+    flushed, so the client still saw its 401 and only the request thread died. `handle_error` is
+    where that landed, so that is what this watches; asserting the response alone would reproduce
+    exactly the blind spot that let it ship.
+    """
+    seen = []
+
+    class WatchfulServer(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            seen.append(sys.exc_info()[1])
+
+    admission = adm.Admission(vram_budget_gb=12.0,
+                              gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
+    journal = Journal(store=FakeJobStore())
+    handler = agent_main.make_handler(admission, journal,
+                                      lifecycle.EngineManager(admission, runtimes={}),
+                                      jobs_mod.JobManager(admission, journal),
+                                      policy=auth.AgentAuthPolicy(KEY))
+    server = WatchfulServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/jobs", body=b"x" * 12288,  # declares a body; refused at the gate
+                     headers={"Content-Type": "application/json"})
+        assert conn.getresponse().status == 401
+        conn.close()
+        time.sleep(0.05)  # the handler thread finishes after the response is flushed
+        assert not seen, f"the handler raised on a server without the deferral: {seen}"
+    finally:
+        server.shutdown()
+
+
 def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
     monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 512, raising=True)
     server, host, port, _ = _server()
@@ -102,16 +357,16 @@ def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
         chunk = b"x" * 256
         for _ in range(2):  # 2 x 256 == the 512 limit exactly: still admissible
             conn.send(b"100\r\n" + chunk + b"\r\n")
-        # Announce a THIRD chunk (768 > 512) but send no data for it. `_read_chunked` counts the
-        # announced size and aborts on this size LINE, so the server stops reading here.
+        # A THIRD chunk, announced AND sent, then terminated. `_read_chunked` counts by announced
+        # size and aborts on the size line, so everything after it is data the server never reads.
         #
-        # Deliberately nothing is written after this point, and nothing announced is left unsent.
-        # Writing more (the chunk's data, or a `0\r\n\r\n` terminator) raced the abort this test
-        # exists to prove: the server has already stopped reading and closed, so the write hits an
-        # RST as BrokenPipeError — and that RST can also discard the 413 still sitting unread in the
-        # client's buffer. Both made this a flake that failed on a fast runner and passed on a slow
-        # one; counting is by announced size, so the size line alone exercises the same property.
-        conn.send(b"100\r\n")
+        # This used to stop at the size line deliberately: writing the rest raced the abort, because
+        # the server had already answered and closed, so the write hit an RST as BrokenPipeError and
+        # that same RST could discard the 413 still unread in the client's buffer. Both directions of
+        # that flake are what deferring the undrained close (issue #85) removes — so the write-
+        # nothing workaround is gone, and the full body now exercises the case it was avoiding.
+        conn.send(b"300\r\n" + b"x" * 768 + b"\r\n")
+        conn.send(b"0\r\n\r\n")
         r = conn.getresponse()
         assert r.status == 413
         conn.close()
