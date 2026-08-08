@@ -877,8 +877,36 @@ class BoundedAgentServer(ThreadingHTTPServer):
             # The admission permit is returned immediately either way — a socket lingering for its
             # 503 holds no admission, so keeping the permit would shrink capacity for the duration.
             self._conn_slots.release()
-            if not lingering:
+            if not lingering and not self._linger_if_undrained(request):
                 self.shutdown_request(request)
+
+    def _linger_if_undrained(self, request) -> bool:
+        """Defer the close when the handler answered **without consuming the request**. True if the
+        closer took ownership.
+
+        `_reject`'s refusals are not the only responses written over an unread request. A body over
+        the route-class limit is refused with 413 before a byte of it is read (FR-317), and the auth
+        gate answers 401 before any read at all (FR-282/283) — both deliberate, and both leaving the
+        declared body sitting in the receive buffer. The close that follows then resets it away
+        exactly as it did for the 503, discarding the very status the client needed (issue #85).
+
+        Rather than have each such handler remember to say so, ask the socket: anything still
+        readable at close time is a request the handler did not consume, so defer the close and let
+        it drain in the reaper instead. That covers 413, 401, and any path added later that answers
+        early, without per-handler bookkeeping to keep in sync.
+
+        Costs one non-blocking `select` per connection. A fully-consumed request has nothing pending
+        and closes immediately, exactly as before. A pipelined follow-up request would also read as
+        pending and linger briefly — harmless, and bounded by the same caps as every other lingering
+        socket.
+        """
+        try:
+            readable, _, _ = select.select([request], [], [], 0)
+        except (OSError, ValueError):
+            return False  # already closed, or not selectable — let the ordinary close handle it
+        if not readable:
+            return False
+        return self._linger(request)
 
     def _reject(self, request) -> bool:
         """Answer a refusal with the minimal 503. **True if the closer took ownership** of the

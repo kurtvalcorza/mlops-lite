@@ -90,6 +90,67 @@ def test_declared_oversize_json_is_413_before_any_read(monkeypatch):
         server.shutdown()
 
 
+def test_an_oversize_body_that_is_actually_sent_still_gets_its_413(monkeypatch):
+    """The sibling above declares an over-limit body and **sends nothing**, so the server's refusal
+    leaves an empty receive buffer and the close that follows is harmless. This one sends the body.
+
+    That is the case issue #85 was about: the 413 is written over a request the server deliberately
+    never read (FR-317), and closing a socket with unread data resets it away — taking the status
+    the client needed with it. `test_multipart_rides_the_larger_bound` hit exactly this as an
+    intermittent `ConnectionAbortedError` before the undrained close was deferred.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        oversize = b"x" * 8192  # declared AND transmitted, unlike the send-nothing case above
+        status, body = _post(host, port, "/jobs", oversize)
+        assert status == 413 and "limit" in body["error"]
+    finally:
+        server.shutdown()
+
+
+def test_a_413_written_over_an_unread_body_defers_its_close(monkeypatch):
+    """The mechanism behind the two tests above, asserted directly — because their outcome does not
+    discriminate.
+
+    Measured with the deferral disabled: the sent-body 413 passed 10/10, multipart passed 10/10, and
+    the chunked abort failed only 1/10. The reset is real but rare on this path, so a response-level
+    assertion is nearly green against the defect and would not hold the fix in place. What is
+    deterministic is the contract: a handler that answered without consuming the request must leave
+    the socket with the closer rather than closed.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        # Body large enough that the header read cannot have absorbed it into `rfile`'s buffer, so
+        # the refusal genuinely leaves bytes unread on the socket. A small body is pre-buffered and
+        # has no hazard to defer — the deferral correctly does nothing there.
+        conn.request("POST", "/jobs", body=b"x" * 12288,
+                     headers={"Content-Type": "application/json"})
+
+        # Check BEFORE reading. Reading is what ends the linger: the response is HTTP/1.0
+        # `Connection: close`, so finishing it makes the client close, the reaper sees the peer's
+        # FIN and releases the socket — measured under 100ms. Asserting after the read therefore
+        # finds an empty set whether or not the deferral happened, which is what made an earlier
+        # version of this test fail 12/12 against the *fixed* server.
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "the refused socket was handed to the lingering closer, not closed"
+        assert all(s.fileno() != -1 for s in pending), "and it is still open"
+
+        assert conn.getresponse().status == 413  # and the status still arrives
+        conn.close()
+    finally:
+        server.shutdown()
+
+
 def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
     monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 512, raising=True)
     server, host, port, _ = _server()
@@ -102,16 +163,16 @@ def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
         chunk = b"x" * 256
         for _ in range(2):  # 2 x 256 == the 512 limit exactly: still admissible
             conn.send(b"100\r\n" + chunk + b"\r\n")
-        # Announce a THIRD chunk (768 > 512) but send no data for it. `_read_chunked` counts the
-        # announced size and aborts on this size LINE, so the server stops reading here.
+        # A THIRD chunk, announced AND sent, then terminated. `_read_chunked` counts by announced
+        # size and aborts on the size line, so everything after it is data the server never reads.
         #
-        # Deliberately nothing is written after this point, and nothing announced is left unsent.
-        # Writing more (the chunk's data, or a `0\r\n\r\n` terminator) raced the abort this test
-        # exists to prove: the server has already stopped reading and closed, so the write hits an
-        # RST as BrokenPipeError — and that RST can also discard the 413 still sitting unread in the
-        # client's buffer. Both made this a flake that failed on a fast runner and passed on a slow
-        # one; counting is by announced size, so the size line alone exercises the same property.
-        conn.send(b"100\r\n")
+        # This used to stop at the size line deliberately: writing the rest raced the abort, because
+        # the server had already answered and closed, so the write hit an RST as BrokenPipeError and
+        # that same RST could discard the 413 still unread in the client's buffer. Both directions of
+        # that flake are what deferring the undrained close (issue #85) removes — so the write-
+        # nothing workaround is gone, and the full body now exercises the case it was avoiding.
+        conn.send(b"300\r\n" + b"x" * 768 + b"\r\n")
+        conn.send(b"0\r\n\r\n")
         r = conn.getresponse()
         assert r.status == 413
         conn.close()
