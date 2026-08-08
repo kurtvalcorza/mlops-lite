@@ -30,6 +30,7 @@ from hostagent import (  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from hostagent.metrics import REGISTRY  # noqa: E402
 
 KEY = "k-limits-0123456789abcdef"
 
@@ -156,8 +157,21 @@ def test_auth_precedes_body_buffering(monkeypatch):
 # --- saturation (T531, FR-316/320) ---------------------------------------------------------------------
 
 def test_saturated_workers_and_queue_answer_503():
+    """A stable, client-visible 503 (SC-160), plus the two witnesses that it was bounded.
+
+    The 503 is required unconditionally — it is the published contract, and the transport keeps it
+    deliverable through `BoundedAgentServer._linger` rather than letting the refusing close reset it
+    away. This test failing with a connection reset means that lingering close has regressed, which
+    is exactly what it should report rather than tolerate.
+
+    The rejection counter and `_inflight` are asserted alongside it because the response alone does
+    not distinguish "refused at the bound" from "served normally and happened to answer 503".
+    """
     hold = threading.Event()
-    server, host, port, _ = _server(max_workers=2, queue_size=1, queue_wait_s=0.2,
+    # `queue_wait_s` is long enough that the queued third request cannot time out mid-test. At the
+    # original 0.2s it raced the 0.15s sleep below: the queue slot could free before the fourth
+    # connection arrived, which would then be served normally rather than refused.
+    server, host, port, _ = _server(max_workers=2, queue_size=1, queue_wait_s=5.0,
                                     handler_hold=hold)
     conns = []
     try:
@@ -166,15 +180,117 @@ def test_saturated_workers_and_queue_answer_503():
             c = http.client.HTTPConnection(host, port, timeout=15)
             c.request("GET", "/jobs")
             conns.append(c)
-        time.sleep(0.15)  # let them be admitted
+        # Wait for the precondition the probe depends on, rather than sleeping a guessed interval.
+        #
+        # `_inflight` alone is NOT that precondition: it counts handlers that acquired an *exec*
+        # slot, and says nothing about whether the third request has reached `process_request`,
+        # taken the last *connection* permit, and parked on the exec semaphore. Waiting only on it
+        # leaves the fourth probe racing the third request for that final permit. The bound under
+        # test is the connection bound, so wait until no connection permits remain.
+        deadline = time.monotonic() + 10
+        while (server._inflight < 2 or server._conn_slots._value != 0) \
+                and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server._inflight == 2, "both workers busy before the bound is probed"
+        assert server._conn_slots._value == 0, \
+            "all connection permits consumed before the bound is probed"
+
+        before = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                        {"reason": "saturated"})
         # the 4th connection is over conn bound → immediate minimal 503, no thread parked
         c4 = http.client.HTTPConnection(host, port, timeout=5)
         c4.request("GET", "/healthz")
-        r = c4.getresponse()
-        assert r.status == 503 and b"saturated" in r.read()
+        response = c4.getresponse()
+        status, body = response.status, response.read()
         c4.close()
+
+        after = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                       {"reason": "saturated"})
+        assert status == 503 and b"saturated" in body
+        assert after == before + 1, "the 4th connection was refused at the bound, not served"
+        assert server._inflight == 2, "the refusal parked no additional worker"
     finally:
         hold.set()  # release the held handlers
+        for c in conns:
+            try:
+                c.getresponse().read()
+                c.close()
+            except Exception:
+                pass
+        server.shutdown()
+
+
+def test_a_queued_request_that_times_out_still_receives_its_503():
+    """The **other** refusal path, and the one that bypassed the lingering close.
+
+    A request refused by the connection cap never reaches a worker thread. This one does: it takes
+    an admission permit, parks on the exec semaphore, times out, and is refused from inside
+    `process_request_thread` — whose `finally` used to close the socket unconditionally, straight
+    back out from under the closer that `_reject` had just handed it to. Same reset, same lost 503,
+    on a path the connection-cap test cannot reach because it deliberately keeps the queue slot
+    occupied.
+
+    `queue_timeout` rather than `saturated` is asserted so this cannot silently start passing by
+    exercising the cap instead.
+    """
+    hold = threading.Event()
+    server, host, port, _ = _server(max_workers=1, queue_size=1, queue_wait_s=0.2,
+                                    handler_hold=hold)
+    conns = []
+    try:
+        c1 = http.client.HTTPConnection(host, port, timeout=15)
+        c1.request("GET", "/jobs")  # occupies the only worker, and holds it
+        conns.append(c1)
+        deadline = time.monotonic() + 10
+        while server._inflight < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server._inflight == 1, "the worker is occupied before the queue is probed"
+
+        before = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                        {"reason": "queue_timeout"})
+        # Admitted — a connection permit is free — then refused waiting for the busy worker.
+        c2 = http.client.HTTPConnection(host, port, timeout=10)
+        c2.request("GET", "/healthz")
+
+        # Assert the close-ownership contract DIRECTLY, not through the socket outcome.
+        #
+        # The response alone does not discriminate on this path: measured, the queue-timeout
+        # refusal delivered its 503 10/10 even with the handoff reverted. The connection-cap
+        # refusal resets because the server closes before the client's request bytes have even
+        # arrived; here the server has waited out `queue_wait_s`, so those bytes are long since
+        # delivered and the reset does not reliably follow. The defect is nonetheless real — the
+        # worker's `finally` closes a socket the reaper already owns — so this pins the mechanism
+        # rather than waiting for a symptom that only sometimes appears.
+        # Wait on the handover itself. Not on the counter: that is incremented before `_reject`
+        # runs, so sampling on it can land in the gap before the socket is registered and report a
+        # handover that simply has not happened yet.
+        deadline = time.monotonic() + 10
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.005)
+        assert pending, "the refused socket was handed to the lingering closer"
+
+        # And that it STAYS open. The closer releases a socket only on the peer's FIN or its own
+        # deadline; this client has not closed, and the deadline is far off. A close inside this
+        # window is the worker's `finally` reaching past the handover.
+        time.sleep(0.05)
+        assert all(s.fileno() != -1 for s in pending), \
+            "the worker's finally closed a socket the closer already owns"
+
+        response = c2.getresponse()
+        status, body = response.status, response.read()
+        c2.close()
+
+        after = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                       {"reason": "queue_timeout"})
+        assert status == 503 and b"saturated" in body
+        assert after == before + 1, "refused by the queue timeout, not by the connection cap"
+    finally:
+        hold.set()
         for c in conns:
             try:
                 c.getresponse().read()

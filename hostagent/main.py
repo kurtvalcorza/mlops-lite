@@ -17,6 +17,8 @@ stays pip-dep-free.
 """
 import json
 import os
+import select
+import socket
 import sys
 import threading
 import time
@@ -50,6 +52,15 @@ AGENT_BIND = os.getenv("AGENT_BIND", "0.0.0.0")
 AGENT_MAX_WORKERS = int(os.getenv("AGENT_MAX_WORKERS", "8"))          # concurrent handlers
 AGENT_QUEUE_SIZE = int(os.getenv("AGENT_QUEUE_SIZE", "8"))            # admitted-but-waiting bound
 AGENT_QUEUE_WAIT_S = float(os.getenv("AGENT_QUEUE_WAIT_S", "5"))      # max wait for a worker slot
+
+#: Bounds on the lingering close of a REFUSED connection — see `BoundedAgentServer._linger`. These
+#: exist so that keeping a 503 deliverable can never itself become the resource leak FR-316 forbids;
+#: past any of them the socket is closed at once and the reset is accepted.
+#:
+#: The pending cap also stays under the 512-descriptor ceiling `select` carries on Windows.
+_LINGER_DEADLINE_S = 1.0
+_LINGER_MAX_DISCARD = 64 * 1024
+_LINGER_MAX_PENDING = 256
 AGENT_IO_TIMEOUT_S = float(os.getenv("AGENT_IO_TIMEOUT_S", "30"))     # per-socket read/write
 AGENT_SHUTDOWN_TIMEOUT_S = float(os.getenv("AGENT_SHUTDOWN_TIMEOUT_S", "10"))  # drain budget
 AGENT_MAX_JSON_BYTES = int(os.getenv("AGENT_MAX_JSON_BYTES", str(1 << 20)))         # 1 MiB
@@ -829,6 +840,10 @@ class BoundedAgentServer(ThreadingHTTPServer):
         self._queue_wait_s = AGENT_QUEUE_WAIT_S if queue_wait_s is None else queue_wait_s
         self._inflight = 0
         self._inflight_lock = threading.Lock()
+        #: Refused sockets awaiting their close — socket -> (deadline, bytes discarded).
+        self._lingering = {}
+        self._linger_lock = threading.Lock()
+        self._linger_thread = None
 
     def process_request(self, request, client_address):
         if not self._conn_slots.acquire(blocking=False):
@@ -838,11 +853,15 @@ class BoundedAgentServer(ThreadingHTTPServer):
         super().process_request(request, client_address)  # spawns process_request_thread
 
     def process_request_thread(self, request, client_address):
+        #: True once `_reject` has handed the socket to the closer. The `finally` below must then
+        #: NOT close it: doing so is the immediate close `_linger` exists to defer, and it would
+        #: reset the 503 away on exactly the path that just sent one.
+        lingering = False
         try:
             if not self._exec_slots.acquire(timeout=self._queue_wait_s):
                 REGISTRY.inc("hostagent_requests_rejected_total",
                              labels={"reason": "queue_timeout"})
-                self._reject(request)
+                lingering = self._reject(request)
                 return
             with self._inflight_lock:
                 self._inflight += 1
@@ -855,20 +874,122 @@ class BoundedAgentServer(ThreadingHTTPServer):
         except Exception:  # noqa: BLE001 — parity with ThreadingMixIn's containment
             self.handle_error(request, client_address)
         finally:
+            # The admission permit is returned immediately either way — a socket lingering for its
+            # 503 holds no admission, so keeping the permit would shrink capacity for the duration.
             self._conn_slots.release()
-            self.shutdown_request(request)
+            if not lingering:
+                self.shutdown_request(request)
 
-    def _reject(self, request):
+    def _reject(self, request) -> bool:
+        """Answer a refusal with the minimal 503. **True if the closer took ownership** of the
+        socket, in which case the caller must not close it — see `_linger`.
+
+        Both refusal paths route through here and both must honour that: the connection-cap refusal
+        in `process_request`, and the queue-timeout refusal in `process_request_thread`, whose
+        `finally` would otherwise close the socket straight back out from under the closer.
+        """
         body = b'{"error":"agent saturated - bounded worker/queue capacity reached (FR-316)"}'
+        sent = False
         try:
             request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
                             b"Content-Type: application/json\r\n"
                             b"Content-Length: " + str(len(body)).encode() +
                             b"\r\nConnection: close\r\n\r\n" + body)
+            sent = True
         except OSError:
             pass
-        finally:
-            self.shutdown_request(request)
+        if sent and self._linger(request):
+            return True  # the closer owns the socket now
+        self.shutdown_request(request)
+        return False
+
+    def _linger(self, request) -> bool:
+        """Hand a refused connection to the closer so its 503 survives. True if it took ownership.
+
+        `shutdown_request` half-closes and then closes immediately. The half-close is harmless — its
+        FIN is delivered *after* the bytes already queued, so the 503 arrives. The immediate close
+        is not: the refusal deliberately leaves the request unread (FR-316), and closing a socket
+        with unread data in its receive buffer makes the OS send an RST, which discards whatever the
+        peer has not yet consumed — including the 503 just written. The client then sees a reset
+        (`WinError 10053` on Windows) rather than the stable 503 SC-160 requires. Linux more often
+        drains the buffer to the peer first, which is why this only ever showed up off-CI.
+
+        So: half-close here, on the accept thread, which costs nothing and reads no bytes, and let a
+        single reaper perform the actual close once the peer has gone away or a short deadline
+        expires.
+
+        Bounded on every axis, because this runs precisely when the agent is already saturated: ONE
+        reaper thread regardless of load (never a thread per refusal — that is the pile FR-316
+        exists to prevent), at most `_LINGER_MAX_PENDING` sockets held, at most
+        `_LINGER_MAX_DISCARD` bytes discarded per socket, and at most `_LINGER_DEADLINE_S` of life.
+        Over any of those bounds it degrades to the immediate close rather than accumulating.
+
+        The discarded bytes are not a body being buffered: nothing is parsed, retained, or acted on,
+        no worker or admission slot is held, and the refusal was decided and counted before this is
+        reached. What FR-316 requires is that request concurrency and pending work stay bounded, and
+        what SC-160 requires is a stable 413/503 without acquiring admission — reading after the
+        refusal, under fixed bounds, holding nothing, satisfies both.
+        """
+        try:
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            return False
+        with self._linger_lock:
+            if len(self._lingering) >= _LINGER_MAX_PENDING:
+                return False
+            if self._linger_thread is None:
+                self._linger_thread = threading.Thread(target=self._reap_lingering,
+                                                       name="agent-linger-closer", daemon=True)
+                self._linger_thread.start()
+            self._lingering[request] = (time.monotonic() + _LINGER_DEADLINE_S, 0)
+        return True
+
+    def _reap_lingering(self) -> None:
+        """Close lingering sockets once the peer is done with them, or the deadline passes."""
+        while True:
+            with self._linger_lock:
+                pending = list(self._lingering.items())
+                if not pending:
+                    # Retire rather than idle-spin. Both the exit and `_linger`'s start are under
+                    # this lock, so whichever wins it decides: a socket handed over first is seen
+                    # here and keeps the thread alive; otherwise `_linger` observes `None` and
+                    # starts a fresh one. Thread churn tracks refusal bursts, not uptime.
+                    self._linger_thread = None
+                    return
+            socks = [s for s, _ in pending]
+            try:
+                readable, _, errored = select.select(socks, [], socks, 0.05)
+            except (OSError, ValueError):
+                readable, errored = socks, []  # a closed fd in the set: settle them all
+            now = time.monotonic()
+            done = set(errored)
+            for sock in readable:
+                if sock in done:
+                    continue
+                try:
+                    chunk = sock.recv(4096)
+                except OSError:
+                    done.add(sock)
+                    continue
+                if not chunk:
+                    done.add(sock)  # peer sent FIN: it has read everything it is going to
+                    continue
+                with self._linger_lock:
+                    entry = self._lingering.get(sock)
+                    if entry is not None:
+                        deadline, discarded = entry
+                        discarded += len(chunk)
+                        if discarded >= _LINGER_MAX_DISCARD:
+                            done.add(sock)
+                        else:
+                            self._lingering[sock] = (deadline, discarded)
+            for sock, (deadline, _) in pending:
+                if now >= deadline:
+                    done.add(sock)
+            for sock in done:
+                with self._linger_lock:
+                    self._lingering.pop(sock, None)
+                self.shutdown_request(sock)
 
     def graceful_shutdown(self, manager=None, timeout_s=None, log=print):
         """Accept-stop → drain → child-cleanup (FR-318). Runs AFTER serve_forever returns."""
@@ -883,6 +1004,13 @@ class BoundedAgentServer(ThreadingHTTPServer):
         if leftover:
             log(f"hostagent shutdown: {leftover} request(s) still in flight after the drain "
                 f"budget — closing anyway", flush=True)
+        # Refused connections still lingering for their 503 are closed here rather than left to the
+        # daemon reaper, which the interpreter can kill mid-exit. They hold no worker and are
+        # already answered, so there is nothing to drain — only descriptors to return.
+        with self._linger_lock:
+            stragglers, self._lingering = list(self._lingering), {}
+        for sock in stragglers:
+            self.shutdown_request(sock)
         if manager is not None:
             for eid, rt in manager.runtimes.items():
                 try:
