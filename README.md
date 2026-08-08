@@ -5,7 +5,7 @@ register → serve → monitor → retrain — built around a single GPU that ho
 a time under a race-free, in-process admission lock**. A spec-driven (GitHub Spec Kit) reimagining of
 a heavier reference platform, sized to a laptop.
 
-> Status: **merged through increment 022; 023 built — its [HW] drills now pass on the RTX 5070 Ti.**
+> Status: **merged through increment 027.** 023's [HW] drills pass on the RTX 5070 Ti.
 > Five served modalities (LLM text-generation, vision image-classification, embeddings, ASR,
 > tabular), a multimodal trainer (LLM + vision + embeddings + ASR fine-tuning with
 > lineage/adapter-chaining), a **gated promotion** path (offline eval harness + champion-challenger),
@@ -24,8 +24,23 @@ a heavier reference platform, sized to a laptop.
 > (backend·ui·compose·specs), **ordered SQL schema migrations** with a checksummed ledger, a
 > **durable/recoverable LLM activation saga** with startup reconciliation, one **bounded stdlib
 > agent transport** (worker/queue/body/timeout/shutdown bounds; the dual-runtime switch deleted),
-> and **local Prometheus alert rules with runbooks**.
-> Constitution `v1.5.2`. Reference stack on MLflow `3.14.0`.
+> and **local Prometheus alert rules with runbooks**. **024** deepened module seams and **025** closed
+> lifecycle gaps; **026 lan-gpu-broker** added the multi-tenant LAN surface — an OpenAI-compatible
+> tenant API, per-tenant quotas and a GPU-seconds ledger, and a coordinator doing **bounded
+> co-residency** with two shape-based lanes.
+>
+> **What in 026 is not on by default, and what is not built.** Co-residency ships behind
+> `BROKER_COORDINATOR_ADMISSION=1`, **default off** — with it off the agent behaves byte-identically
+> to 018's single-tenant lock, which is why the one-tenant-at-a-time description above still holds for
+> a stock deployment. Phase 5 (exclusive tenant jobs) and Phase 6 (interactive sessions) are
+> **deliberately gated and unstarted**: the sandbox spike is complete and negative on WSL2, and the
+> session admission class is an undecided owner call. **T651 — routing policy-triggered retrains
+> through the jobs lane — is outstanding**, so `PolicyScheduler` still calls `/train` directly and
+> those retrains enter no lane. `model` on the OpenAI surface is accepted but **does not yet select a
+> model**. See [026 tasks](specs/026-lan-gpu-broker/tasks.md#implementation-status-as-of-this-branch)
+> for the per-task state.
+>
+> Constitution `v1.6.1`. Reference stack on MLflow `3.14.0`.
 > Architecture ground truth: [current-architecture checklist](docs/current-architecture.md) ·
 > [2026-07-11 review](docs/architecture-review-2026-07-11.md) (the
 > [2026-07 review](docs/architecture-review-2026-07.md) is historical — its findings are addressed

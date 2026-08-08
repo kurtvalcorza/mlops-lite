@@ -80,7 +80,10 @@ review. Read that contract before starting — the ordering constraints below ar
 - [X] **T648** Implement **job-drain mode** (bounded inference burst OR head-job wait bound) that stops admitting new inference until the head job acquires the GPU. Check: a continuous inference load does not starve a queued job — the wait bound is observed.
 - [X] **T649** `[US3]` Implement owner override (pin/pause/reorder queued jobs) that never preempts a running job. Check: reordering a queue with a running head leaves the running job untouched.
 - [X] **T650** Verify `gateway/app/scheduler.py` (018 `PolicyScheduler`) is **left functionally unchanged** — it is drift/retrain monitoring, not a GPU-ordering authority. Check: 018's monitoring→retrain feedback tests still pass.
-- [X] **T651** Route **policy-triggered retrains into `jobs_lane`** under the reserved system tenant (T621) instead of calling `/train` directly. Check: a policy-triggered retrain queues FIFO by arrival, never co-runs with a tenant job, and its GPU-seconds are metered to the system tenant.
+- [ ] **T651** Route **policy-triggered retrains into `jobs_lane`** under the reserved system tenant (T621) instead of calling `/train` directly. Check: a policy-triggered retrain queues FIFO by arrival, never co-runs with a tenant job, and its GPU-seconds are metered to the system tenant.
+  > **Reopened.** This was marked complete on the strength of `test_a_policy_retrain_enters_the_jobs_lane_under_the_system_tenant`, which enqueues through `store.enqueue_broker_job` directly and never involves `PolicyScheduler`. The lane semantics it pins are real; the **routing the task actually names is not implemented**. `gateway/app/scheduler.py::_default_launch` still `POST`s `/train`, and no production caller exists for `enqueue_broker_job`, `note_job_queued`, or `admit_head_job` — the persisted `queued → running → terminal` machine has no driver outside tests. The single-authority gap this task exists to close is therefore still open, and `hostagent/scheduler.py`'s own docstring still describes it in the present tense.
+  >
+  > **Not blocked by the Phase 5 gate.** That gate covers sandboxing *tenant* code (FR-026); a system-tenant retrain runs platform code and needs no sandbox. What it needs is a jobs-lane runner for system-tenant work — take the persisted head, `admit_head_job()`, transition to running, execute the existing `/train`, settle, `end_job()`, and hydrate head/wait state from the recovered queue on restart. That is a strict subset of T660–T664 with the isolation requirement removed, and it can be built on WSL2.
 - [X] **T652** Confirm `PolicyScheduler`'s existing `Busy`/park-and-retry path is unaffected — a full jobs lane returns the same `409` contract it already handles (FR-182 queue-of-one preserved). Check: 018's parked-retrain tests pass against the new lane.
 
 ---
@@ -175,21 +178,28 @@ without the other, since the barrier is only airtight when both the drain and th
 
 ## Implementation status (as of this branch)
 
-**59 of 73 tasks complete.** Every ungated task is done and verified: Phase 0 (foundational), Phase 1
-(P1 inference + metering), Phase 2 (the coordinator redesign), Phase 3 (scheduler and lanes),
-Phase 4 (modalities), Phase 7 (cross-cutting), and all of Phases 8–9's review corrections.
+**58 of 73 tasks complete.** Phase 0 (foundational), Phase 1 (P1 inference + metering), Phase 2 (the
+coordinator redesign), Phase 4 (modalities), Phase 7 (cross-cutting), and all of Phases 8–9's review
+corrections are done and verified. Phase 3 is complete **except T651**.
 
-**The 14 open tasks are exactly the gated ones**, left unstarted on purpose per the gate discipline
-at the top of this file:
+**15 open tasks — 14 gated, 1 not.** The gated ones are unstarted on purpose per the gate discipline
+at the top of this file; T651 is open because it was closed prematurely:
 
 | Open tasks | Phase | Gate |
 |---|---|---|
+| **T651** | 3 (single authority) | **none — this one is buildable now.** Reopened: its test exercised the lane, not the routing, and `PolicyScheduler` still calls `/train` directly. Needs a system-tenant jobs-lane runner. See the task for why the Phase 5 sandbox gate does not apply to it. |
 | T658–T664, T679 | 5 (P2 exclusive jobs) | native-Linux GPU host + a **passing** sandbox re-run + a new-runtime constitution amendment. The spike is complete and negative: WSL2's GPU is paravirtualized (`/dev/dxg`, no `/dev/nvidia*`), so gVisor `nvproxy` and Kata VFIO cannot function. |
 | T665–T669, T686 | 6 (P5 sessions) | the session admission class is undecided (T665) — exclusive lease vs sandboxed job vs a further amendment. |
 
-Neither gate can be cleared from a container: one needs different hardware, the other needs an owner
+Neither *gate* can be cleared from a container: one needs different hardware, the other needs an owner
 decision and a constitution amendment. Starting either would mean shipping the weaker posture FR-026
-exists to prevent, or building against an admission class nobody has chosen.
+exists to prevent, or building against an admission class nobody has chosen. T651 is subject to
+neither and is simply outstanding work.
+
+**A note on what "complete" has to mean here.** T651 passed review because a test with the task's name
+on it was green. It enqueued through the store by hand, so it could never have failed for the reason
+the task cared about. Where a task names a *production path*, the check has to run that path — a test
+that reproduces the mechanism beside it proves the mechanism, not the wiring.
 
 **Co-residency ships behind `BROKER_COORDINATOR_ADMISSION=1`, default off.** The coordinator, the
 lanes, and the whole broker surface are complete and tested; the flag is the phase gate made
