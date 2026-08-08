@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+from http.server import ThreadingHTTPServer
 
 import pytest
 
@@ -264,6 +265,80 @@ def test_an_unauthorized_request_with_a_sent_body_keeps_its_401(monkeypatch):
 
         assert conn.getresponse().status == 401  # the gate's verdict, not a reset
         conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_protected_get_carrying_a_body_defers_its_401_close():
+    """The auth gate is shared, so the handover has to be too.
+
+    `do_GET` gates on the same `_deny` as `do_POST` and every non-public GET (`/jobs`, `/health`,
+    `/engines` — only `/healthz`, `/readyz`, `/metrics` are public) is refused before any read. A
+    GET body has no useful semantics here, but nothing stops a client declaring one, and then the
+    401 goes out over bytes still in flight exactly as the POST case did. Marking in `_do_post`
+    alone left this route one `return` short of the fix.
+
+    Headers first, ownership asserted before a single body byte exists, body only afterwards —
+    the same shape as the 413 header-first test, on the GET half of the gate.
+    """
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("GET", "/jobs")  # not in PUBLIC_ROUTES; no X-Agent-Key
+        conn.putheader("Content-Length", str(8192))  # declared, deliberately not yet sent
+        conn.endheaders()
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "handed over on the refusal itself, before any body byte could be pending"
+
+        conn.send(b"x" * 8192)  # arrives only now — after the unmarked close would have happened
+        assert conn.getresponse().status == 401  # the gate's verdict, not a reset
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_the_handler_survives_a_refusal_on_a_server_without_the_deferral():
+    """`make_handler` is not owned by `BoundedAgentServer`, so it cannot assume the capability.
+
+    `tests/_agentserver.py` and `supervisor/` mount the same handler on a plain
+    `ThreadingHTTPServer`. Calling `mark_undrained` unconditionally raised `AttributeError` there on
+    every refused body-bearing request — and it went unnoticed because the status had already been
+    flushed, so the client still saw its 401 and only the request thread died. `handle_error` is
+    where that landed, so that is what this watches; asserting the response alone would reproduce
+    exactly the blind spot that let it ship.
+    """
+    seen = []
+
+    class WatchfulServer(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            seen.append(sys.exc_info()[1])
+
+    admission = adm.Admission(vram_budget_gb=12.0,
+                              gpu=adm.GpuReader(ttl_s=1000.0, read_fn=lambda: 10.0))
+    journal = Journal(store=FakeJobStore())
+    handler = agent_main.make_handler(admission, journal,
+                                      lifecycle.EngineManager(admission, runtimes={}),
+                                      jobs_mod.JobManager(admission, journal),
+                                      policy=auth.AgentAuthPolicy(KEY))
+    server = WatchfulServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/jobs", body=b"x" * 12288,  # declares a body; refused at the gate
+                     headers={"Content-Type": "application/json"})
+        assert conn.getresponse().status == 401
+        conn.close()
+        time.sleep(0.05)  # the handler thread finishes after the response is flushed
+        assert not seen, f"the handler raised on a server without the deferral: {seen}"
     finally:
         server.shutdown()
 

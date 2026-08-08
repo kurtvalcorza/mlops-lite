@@ -1109,10 +1109,18 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
         def _deny(self, url) -> bool:
             """True when the request was refused (and answered) by the auth gate — evaluated on
             the PARSED path against the exact public allow-list (FR-283), before any body byte is
-            read (FR-282: an unauthorized request produces no admission/journal/store effect)."""
+            read (FR-282: an unauthorized request produces no admission/journal/store effect).
+
+            The unread-body marking lives HERE, at the shared boundary, rather than in each caller:
+            every method that gates on this leaves a declared body unread by construction, and a
+            per-caller marker is one `return` away from missing a route (issue #85 review — `do_GET`
+            gated here too, and a protected GET carrying a body raced exactly as POST did).
+            """
             deny = policy.authorize(self.command, url.path, self.headers.get("X-Agent-Key", ""))
             if deny is None:
                 return False
+            if self._declares_a_body():
+                self._answered_over_an_unread_body()
             self._send(*deny)
             return True
 
@@ -1224,15 +1232,21 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             Announced rather than detected: both callers can answer from the headers alone, so the
             body may still be in flight when this runs and no amount of looking at the socket would
             see it.
+
+            Deferral is a `BoundedAgentServer` capability, but `make_handler` is mounted on a plain
+            `ThreadingHTTPServer` elsewhere (`tests/_agentserver.py`, `supervisor/`), so this asks
+            rather than assumes. Without the guard a refused body-bearing request raised
+            `AttributeError` mid-handler on those servers — masked, because the status had already
+            been flushed, so the client still saw its 401 while the thread died on the way out.
             """
-            self.server.mark_undrained(self.connection)
+            mark = getattr(self.server, "mark_undrained", None)
+            if mark is not None:
+                mark(self.connection)
 
         def _do_post(self):
             url = urlparse(self.path)
             if self._deny(url):  # auth BEFORE the body is buffered (FR-282/317: gate, then read)
-                if self._declares_a_body():
-                    self._answered_over_an_unread_body()
-                return
+                return  # `_deny` marks the unread body itself — every gated method needs it
             raw = self._read_body()
             if raw is None:
                 # Over the limit: either refused on the declared length with nothing read, or the
