@@ -196,6 +196,46 @@ def test_a_production_sized_overlimit_body_is_drained_not_cut_off(monkeypatch):
         server.shutdown()
 
 
+def test_a_413_answered_before_the_body_arrives_still_defers_its_close(monkeypatch):
+    """Headers first, body later — the case instantaneous readability cannot see.
+
+    Both protected paths answer from the headers alone: a declared `Content-Length` over the limit
+    is refused without reading, and the auth gate denies before any read. So the response can go out
+    while the body is still in flight, and at that moment **nothing is pending on the socket**. A
+    zero-time `select` reports "drained", the close happens immediately, and the body then lands on
+    a closed socket — the same reset, reached by the same close, on exactly the case this mechanism
+    exists for.
+
+    The handover therefore has to rest on what the handler did, not on what the kernel happens to
+    hold. This test sends only headers, requires the socket to be with the closer *before* a single
+    body byte is written, and only then sends the body.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(8192))  # declared over the limit; not yet sent
+        conn.endheaders()
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "handed over on the refusal itself, before any body byte could be pending"
+
+        conn.send(b"x" * 8192)  # the body arrives only now, after the close would have happened
+        assert conn.getresponse().status == 413
+        conn.close()
+    finally:
+        server.shutdown()
+
+
 def test_an_unauthorized_request_with_a_sent_body_keeps_its_401(monkeypatch):
     """The 401 half of #85, which the auth-ordering test cannot reach.
 

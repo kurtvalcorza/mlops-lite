@@ -847,8 +847,12 @@ class BoundedAgentServer(ThreadingHTTPServer):
         self._queue_wait_s = AGENT_QUEUE_WAIT_S if queue_wait_s is None else queue_wait_s
         self._inflight = 0
         self._inflight_lock = threading.Lock()
-        #: Refused sockets awaiting their close — socket -> (deadline, bytes discarded).
+        #: Refused sockets awaiting their close — socket -> deadline.
         self._lingering = {}
+        #: Sockets whose handler answered without consuming the request body, declared by the
+        #: handler itself via `mark_undrained`. Guarded by `_linger_lock`; entries are removed as
+        #: the connection closes, so this never outlives its sockets.
+        self._undrained = set()
         self._linger_lock = threading.Lock()
         self._linger_thread = None
 
@@ -897,23 +901,46 @@ class BoundedAgentServer(ThreadingHTTPServer):
         declared body sitting in the receive buffer. The close that follows then resets it away
         exactly as it did for the 503, discarding the very status the client needed (issue #85).
 
-        Rather than have each such handler remember to say so, ask the socket: anything still
-        readable at close time is a request the handler did not consume, so defer the close and let
-        it drain in the reaper instead. That covers 413, 401, and any path added later that answers
-        early, without per-handler bookkeeping to keep in sync.
+        Two witnesses, and the first is the authoritative one:
 
-        Costs one non-blocking `select` per connection. A fully-consumed request has nothing pending
-        and closes immediately, exactly as before. A pipelined follow-up request would also read as
-        pending and linger briefly — harmless, and bounded by the same caps as every other lingering
-        socket.
+        1. **The handler said so** — `mark_undrained`, called wherever a response is written over a
+           body that was deliberately not read. This is a statement about what the handler *did*, so
+           it holds no matter where those bytes are: still in flight, not yet sent, or already
+           buffered.
+        2. **The socket says so** — anything readable right now was not consumed either. This is the
+           safety net for a path that answers early without announcing it, and for a pipelined
+           follow-up request.
+
+        Readability alone is NOT sufficient, and was the bug in the first revision of this. Both
+        protected paths can answer from the headers alone — 413 on a declared `Content-Length` over
+        the limit, 401 at the gate — so a client that sends its headers first and its body a moment
+        later is answered while nothing is pending yet. A zero-time `select` then reports "drained",
+        the socket is closed at once, and the body lands on a closed socket: the same reset, arrived
+        at by the same close, on exactly the case the mechanism exists for.
+
+        Costs one set lookup, plus one non-blocking `select` when the handler did not mark. A
+        fully-consumed request closes immediately, exactly as before.
         """
-        try:
-            readable, _, _ = select.select([request], [], [], 0)
-        except (OSError, ValueError):
-            return False  # already closed, or not selectable — let the ordinary close handle it
-        if not readable:
-            return False
+        with self._linger_lock:
+            marked = request in self._undrained
+            self._undrained.discard(request)
+        if not marked:
+            try:
+                readable, _, _ = select.select([request], [], [], 0)
+            except (OSError, ValueError):
+                return False  # already closed, or not selectable — let the ordinary close handle it
+            if not readable:
+                return False
         return self._linger(request)
+
+    def mark_undrained(self, request) -> None:
+        """Record that a response was written without consuming the request body.
+
+        Called by the handler, which is the only party that knows: the server cannot infer it from
+        the socket, because the body may not have arrived yet when the answer goes out.
+        """
+        with self._linger_lock:
+            self._undrained.add(request)
 
     def _reject(self, request) -> bool:
         """Answer a refusal with the minimal 503. **True if the closer took ownership** of the
@@ -1182,12 +1209,35 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
                 REGISTRY.inc("hostagent_request_seconds_sum", by=time.monotonic() - t0)
                 REGISTRY.inc("hostagent_request_seconds_count")
 
+        def _declares_a_body(self) -> bool:
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                return True
+            try:
+                return int(self.headers.get("Content-Length", 0) or 0) > 0
+            except ValueError:
+                return False
+
+        def _answered_over_an_unread_body(self) -> None:
+            """Tell the server this response went out over a body we deliberately did not read, so
+            the close is deferred rather than resetting the status away (issue #85).
+
+            Announced rather than detected: both callers can answer from the headers alone, so the
+            body may still be in flight when this runs and no amount of looking at the socket would
+            see it.
+            """
+            self.server.mark_undrained(self.connection)
+
         def _do_post(self):
             url = urlparse(self.path)
             if self._deny(url):  # auth BEFORE the body is buffered (FR-282/317: gate, then read)
+                if self._declares_a_body():
+                    self._answered_over_an_unread_body()
                 return
             raw = self._read_body()
             if raw is None:
+                # Over the limit: either refused on the declared length with nothing read, or the
+                # chunked reader stopped mid-stream. Both leave the remainder unread.
+                self._answered_over_an_unread_body()
                 REGISTRY.inc("hostagent_requests_rejected_total", labels={"reason": "too_large"})
                 return self._send(413, {"error": f"request body exceeds the "
                                                  f"{self._body_limit()}-byte limit for this "
