@@ -72,6 +72,17 @@ AGENT_IO_TIMEOUT_S = float(os.getenv("AGENT_IO_TIMEOUT_S", "30"))     # per-sock
 AGENT_SHUTDOWN_TIMEOUT_S = float(os.getenv("AGENT_SHUTDOWN_TIMEOUT_S", "10"))  # drain budget
 AGENT_MAX_JSON_BYTES = int(os.getenv("AGENT_MAX_JSON_BYTES", str(1 << 20)))         # 1 MiB
 AGENT_MAX_MULTIPART_BYTES = int(os.getenv("AGENT_MAX_MULTIPART_BYTES", str(32 << 20)))  # 32 MiB
+
+#: `_read_body`'s third outcome, distinct from both a real body and `None` ("over the limit", 413).
+#:
+#: A declared length that is not a byte count can be neither honoured nor *bounded*, so it is a
+#: framing error the client must fix — 400, not a limit hit. Keeping it separate from `None` is the
+#: point: routing it to 413 would tell a client its body was too big when the body was never the
+#: problem, and routing it to a real body is what the bug below did.
+_MALFORMED_LENGTH = object()
+#: The only bytes a chunk-size line may contain. `int(token, 16)` is not a validation on its own —
+#: it accepts a sign, so `-1` parses cleanly and then means "read to EOF" (see `_declared_length`).
+_HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 # `SWAP_CONTROL_SECRET` is still accepted as a fallback (a deployment that set it pre-018 keeps
 # working) but the agent's state-changing routes standardize on the agent-control secret.
 CONTROL_SECRET = os.getenv("AGENT_CONTROL_SECRET") or os.getenv("SWAP_CONTROL_SECRET", "")
@@ -1183,10 +1194,15 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             total, buf = 0, bytearray()
             while True:
                 size_line = self.rfile.readline(64).strip()
-                try:
-                    size = int(size_line.split(b";")[0] or b"0", 16)
-                except ValueError:
-                    return None
+                token = size_line.split(b";")[0].strip()
+                # The same trap as `Content-Length`, one base up: `int(b"-1", 16)` is -1, which
+                # skips the `total > limit` test below and reaches `read(-1)` — read-to-EOF. A
+                # non-hex token is equally unframeable. Neither can be counted against the limit,
+                # so neither is a 413. An EMPTY token is left alone deliberately: it is what a
+                # truncated stream yields at EOF, and it already terminates the read below.
+                if token and not set(token) <= _HEX_DIGITS:
+                    return _MALFORMED_LENGTH
+                size = int(token or b"0", 16)
                 if size == 0:
                     self.rfile.readline(4)  # trailing CRLF
                     return bytes(buf)
@@ -1196,14 +1212,41 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
                 buf.extend(self.rfile.read(size))
                 self.rfile.readline(4)  # chunk-terminating CRLF
 
+        def _declared_length(self):
+            """The declared body length as a byte count, or `None` if it is not one.
+
+            **`int()` is not a validation.** It accepts a sign, so `Content-Length: -1` parsed to
+            -1, sailed under the `> limit` test, and reached `rfile.read(-1)` — which on a socket's
+            buffered reader means *read until EOF*. The route-class cap stopped applying there:
+            measured against this handler, 8 MiB went into one buffer under the 1 MiB JSON limit
+            and came back a 400 (invalid JSON) instead of a 413. The per-socket
+            `AGENT_IO_TIMEOUT_S` did not bound it either — that timeout fires on an **idle**
+            socket, and a client that keeps sending never goes idle, so the ceiling was the
+            attacker's bandwidth rather than FR-317's limit.
+
+            A non-numeric value failed more quietly: `int("abc")` raised straight out of the
+            handler, so the request thread died with nothing written and the client saw a bare
+            close where a status belonged.
+
+            The check is ASCII-explicit rather than `str.isdigit()`, which is True for characters
+            like `²` that `int()` then refuses — the same shape of gap one layer down.
+            """
+            raw = (self.headers.get("Content-Length") or "0").strip()
+            if not (raw.isascii() and raw.isdigit()):  # rejects "", "-1", "+1", "0x10", "1 2", "²"
+                return None
+            return int(raw)
+
         def _read_body(self):
-            """(raw_bytes | None-when-too-large). Declared Content-Length above the limit is
-            refused BEFORE any body byte is read; chunked/unknown length is counted as it
-            streams (FR-317)."""
+            """(raw_bytes | None-when-too-large | `_MALFORMED_LENGTH`). Declared Content-Length
+            above the limit is refused BEFORE any body byte is read; chunked/unknown length is
+            counted as it streams (FR-317); a length that is not a byte count is a framing error
+            rather than a limit hit."""
             limit = self._body_limit()
             if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
                 return self._read_chunked(limit)
-            length = int(self.headers.get("Content-Length", 0) or 0)
+            length = self._declared_length()
+            if length is None:
+                return _MALFORMED_LENGTH
             if length > limit:
                 return None
             return self.rfile.read(length)
@@ -1218,12 +1261,17 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
                 REGISTRY.inc("hostagent_request_seconds_count")
 
         def _declares_a_body(self) -> bool:
+            """Whether bytes may still be arriving — what `_deny` needs to know before it answers.
+
+            A malformed length counts as **yes**. We cannot tell how much is coming, and the safe
+            direction is to defer the close: an unnecessary deferral costs a bounded linger, while a
+            missing one costs the client the 401 it was owed (issue #85). The old version returned
+            False here, so a refused request with an unparseable length had its status reset away.
+            """
             if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
                 return True
-            try:
-                return int(self.headers.get("Content-Length", 0) or 0) > 0
-            except ValueError:
-                return False
+            length = self._declared_length()
+            return length is None or length > 0
 
         def _answered_over_an_unread_body(self) -> None:
             """Tell the server this response went out over a body we deliberately did not read, so
@@ -1249,6 +1297,15 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             if self._deny(url):  # auth BEFORE the body is buffered (FR-282/317: gate, then read)
                 return  # `_deny` marks the unread body itself — every gated method needs it
             raw = self._read_body()
+            if raw is _MALFORMED_LENGTH:
+                # Answered from the framing alone, with whatever the client is sending still
+                # unread — the same shape as the 413 below, so it needs the same deferral or the
+                # 400 is reset away (issue #85).
+                self._answered_over_an_unread_body()
+                REGISTRY.inc("hostagent_requests_rejected_total",
+                             labels={"reason": "malformed_length"})
+                return self._send(400, {"error": "Content-Length or chunk size is not a byte "
+                                                 "count (FR-317)"})
             if raw is None:
                 # Over the limit: either refused on the declared length with nothing read, or the
                 # chunked reader stopped mid-stream. Both leave the remainder unread.

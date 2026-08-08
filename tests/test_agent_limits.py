@@ -2,9 +2,11 @@
 
 Real `BoundedAgentServer` sockets on an ephemeral port over fake components. Pins: declared
 Content-Length over the route-class limit → immediate 413 with NO body read; counted chunked
-reads abort at the same limit; multipart rides the larger bound; authentication precedes body
-buffering (oversized + wrong key → the auth status, not 413); worker/queue saturation answers a
-minimal 503 (never an unbounded thread pile); graceful shutdown drains in-flight requests.
+reads abort at the same limit; a declared length that is not a byte count (negative, non-numeric,
+or a negative chunk size) is a 400 on the framing rather than a read to EOF that the limit cannot
+measure; multipart rides the larger bound; authentication precedes body buffering (oversized +
+wrong key → the auth status, not 413); worker/queue saturation answers a minimal 503 (never an
+unbounded thread pile); graceful shutdown drains in-flight requests.
 """
 import http.client
 import json
@@ -369,6 +371,105 @@ def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
         conn.send(b"0\r\n\r\n")
         r = conn.getresponse()
         assert r.status == 413
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+# --- malformed framing: lengths that are not byte counts (FR-317) --------------------------------
+
+def test_a_negative_content_length_is_refused_before_any_read(monkeypatch):
+    """Send NOTHING after the headers, exactly as `test_declared_oversize_json_is_413_before_any_read`
+    does: a server that refuses on the declaration answers at once, while one that reaches
+    `rfile.read(-1)` sits reading to EOF and answers nothing at all.
+
+    That is what this did before the fix — measured at 0 bytes back, and only after
+    `AGENT_IO_TIMEOUT_S` expired. The timeout is pulled down here so the FAILING direction costs a
+    second rather than thirty.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_IO_TIMEOUT_S", 1.0, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_non_numeric_content_length_answers_instead_of_killing_the_thread(monkeypatch):
+    """`int("abc")` raised straight out of `_read_body` and out of the handler, so the request
+    thread died with nothing on the wire and the client saw a bare close where a status belonged.
+
+    This one needs no timeout nudge: the old failure was immediate, not slow. What it pins is that
+    a status now exists at all.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_IO_TIMEOUT_S", 1.0, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "abc")
+        conn.endheaders()
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_negative_chunk_size_is_refused_before_any_read(monkeypatch):
+    """`int(b"-1", 16)` is -1, so the chunked reader had the identical hole one base up: the size
+    line passed the `total > limit` test and `read(-1)` ran to EOF."""
+    monkeypatch.setattr(agent_main, "AGENT_IO_TIMEOUT_S", 1.0, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Transfer-Encoding", "chunked")
+        conn.endheaders()
+        conn.send(b"-1\r\n")  # a size line that parses and then means "read to EOF"
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_negative_length_cannot_smuggle_a_body_past_the_cap(monkeypatch):
+    """The property the three above protect, and the reason this is a bug rather than an untidiness.
+
+    FR-317's ceiling is only a ceiling if the declared length is a byte count. It was not checked,
+    so a body under a negative declaration was read to EOF and the limit never ran: measured against
+    the real handler, **8 MiB landed in one buffer under the 1 MiB JSON limit** and came back a 400
+    from the JSON parser. The bound was the sender's bandwidth, not the route class.
+
+    Both directions answer 400, which is exactly why this asserts on WHICH 400 — a status-only
+    assertion is green against the defect and would not hold the fix in place.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        conn.send(b"x" * 8192)  # 8x the limit, and declared as nothing the limit can measure
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"], \
+            "refused on the framing — not parsed, which is how the 8 KiB used to get in"
         conn.close()
     finally:
         server.shutdown()
