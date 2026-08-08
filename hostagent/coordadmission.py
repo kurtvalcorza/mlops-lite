@@ -270,11 +270,12 @@ class CoordinatorAdmission:
         if snap["active_job"]:
             return {"tenant": snap["active_job"]["job_id"], "kind": "job", "est_gb": None,
                     "child_pid": None, "acquired_at": snap["active_job"]["started_at"]}
-        # `recency_seq` breaks ties `last_used_at` cannot: a coarse wallclock (15.625 ms on Windows)
-        # puts two acquires in one tick, and without it the "most recent" holder is whichever the
-        # resident dict happened to hold first. Defaulted for any snapshot predating the field.
-        residents = sorted(snap["resident"],
-                           key=lambda r: (r["last_used_at"], r.get("recency_seq", 0)), reverse=True)
+        # Ordered by `recency_seq`, never by `last_used_at`: the sequence is the coordinator's own
+        # record of touch order, while the timestamp is a wall clock that ties on a coarse platform
+        # and can run backward when the system clock is corrected. Indexed rather than `.get`, and
+        # deliberately — the snapshot is this coordinator's, taken one line above, so a missing key
+        # is a bug in `ResidentModel.snapshot` and should say so rather than silently sort as 0.
+        residents = sorted(snap["resident"], key=lambda r: r["recency_seq"], reverse=True)
         if not residents:
             return None
         top = residents[0]

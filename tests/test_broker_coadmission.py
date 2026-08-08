@@ -246,6 +246,27 @@ def test_holder_breaks_a_recency_tie_on_the_sequence_not_on_dict_order():
         assert a.holder()["tenant"] == second, f"{second} was acquired last"
 
 
+def test_holder_follows_touch_order_when_the_wall_clock_goes_backward():
+    """The read-side half of the same rule: `holder()` answers "who most recently had the GPU", and
+    a wall clock that has been set back answers a different question — who was stamped latest."""
+    now = {"t": 100.0}
+    a, coord, gpu, life = _shim(sizes={"llm": 2 * GIB, "asr": 1 * GIB},
+                                wallclock=lambda: now["t"])
+    a.acquire("asr", "serving", 1.0)
+    now["t"] = 101.0
+    a.acquire("llm", "serving", 2.0)
+
+    now["t"] = 99.0  # the system clock is corrected backward
+    # A request landing on the already-resident `asr`. Not `a.acquire` — that returns early for an
+    # engine already holding a claim and never reaches the coordinator, so it is the claim grant,
+    # not the shim call, that moves recency.
+    coord.admit_serving("asr", 1 * GIB).claim.release()
+
+    assert a.holder()["tenant"] == "asr", "the most recently used, not the latest-stamped"
+    assert coord.residents["asr"].last_used_at < coord.residents["llm"].last_used_at, \
+        "the timestamps really do invert here — the assertion above is not passing by accident"
+
+
 def test_holder_is_none_on_an_empty_gpu():
     a, coord, gpu, life = _shim()
     assert a.holder() is None

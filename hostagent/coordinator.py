@@ -161,11 +161,16 @@ class ResidentModel:
         self.vram_accounted_bytes = vram_accounted_bytes
         self.active_requests = 0
         self.last_used_at = clock()
-        #: Tie-break for `last_used_at`, monotonic in touch order. A timestamp cannot order two
-        #: touches that land inside one clock tick, and `time.time()` resolves to 15.625 ms on
-        #: Windows against ~1 ns on Linux — so on a coarse clock two acquires tie and every
-        #: recency sort silently falls back to dict insertion order. This carries the order the
-        #: timestamp loses. The coordinator owns the counter; see `Coordinator._touch`.
+        #: **The** recency order: monotonic in touch order, owned by the coordinator, and what
+        #: every recency decision sorts on.
+        #:
+        #: Recency deliberately does not key on `last_used_at`, because a wall clock orders touches
+        #: only by accident. Its resolution is 15.625 ms on Windows against ~1 ns on Linux, so two
+        #: touches inside one tick record the same instant and the sort falls back to dict
+        #: insertion order. Worse, `time.time()` is documented to run *backward* when the system
+        #: clock is set back — and a timestamp that disagrees with touch order cannot be repaired
+        #: by tie-breaking on anything, because the timestamps no longer tie. The counter is the
+        #: order; the timestamp is what operators read. See `Coordinator._touch`.
         self.recency_seq = seq
         self.child = None
         #: Whether these bytes are **physically allocated** and therefore already visible in
@@ -496,9 +501,10 @@ class Coordinator:
     def _touch(self, entry) -> None:
         """Mark `entry` as just used. The **only** place recency is written.
 
-        Both fields move together, and every recency sort reads both: `last_used_at` is what
-        operators and the API see, `recency_seq` is what makes the order total when the clock's
-        resolution cannot separate two touches.
+        The two fields move together but answer different questions: `recency_seq` is what every
+        recency sort orders on, `last_used_at` is what operators and the API read. Writing them in
+        one place is what keeps the timestamp an honest report of the order the coordinator acted
+        on, rather than a second opinion about it.
         """
         entry.last_used_at = self._wallclock()
         entry.recency_seq = next(self._recency_seq)
@@ -583,7 +589,7 @@ class Coordinator:
         """
         eligible = [r for k, r in self.residents.items()
                     if k != model_key and r.state == RESIDENT and r.materialized]
-        eligible.sort(key=lambda r: (r.active_requests > 0, r.last_used_at, r.recency_seq))
+        eligible.sort(key=lambda r: (r.active_requests > 0, r.recency_seq))
 
         capacity = self.usable_capacity()
         headroom = self.config.safety_headroom_bytes

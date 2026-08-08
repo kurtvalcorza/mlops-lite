@@ -317,6 +317,29 @@ def test_the_lru_order_holds_on_a_clock_too_coarse_to_separate_two_touches():
     assert [v.model_key for v in victims] == ["b"], "least recently used first, insertion order last"
 
 
+def test_the_lru_order_follows_touch_order_when_the_wall_clock_goes_backward():
+    """`time.time()` is documented to return a *lower* value after the system clock is set back, so
+    a timestamp can disagree with touch order outright rather than merely tie with it.
+
+    Here `a` is touched last but stamped earliest, which no tie-break can repair — the timestamps
+    do not tie, they invert. Only ordering on the coordinator's own sequence survives it.
+    """
+    now = {"t": 100.0}
+    coord, gpu, life = make(sizes={"a": 2 * GIB, "b": 2 * GIB, "new": 8 * GIB},
+                            wallclock=lambda: now["t"])
+    coord.admit_serving("a", 2 * GIB).claim.release()
+    now["t"] = 101.0
+    coord.admit_serving("b", 2 * GIB).claim.release()
+    now["t"] = 99.0  # the system clock is corrected backward
+    coord.admit_serving("a", 2 * GIB).claim.release()  # `a` is the most recently used, stamped oldest
+
+    victims = coord._select_victims("new", 8 * GIB)
+
+    assert [v.model_key for v in victims] == ["b"], "touch order decides, not the wall clock"
+    assert coord.residents["a"].last_used_at < coord.residents["b"].last_used_at, \
+        "the timestamps really do invert here — the assertion above is not passing by accident"
+
+
 # -- T639: bounded drain, and the barrier-aware revert -------------------------------------------------------
 
 def test_eviction_never_interrupts_an_in_flight_request():
