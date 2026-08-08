@@ -229,6 +229,44 @@ def test_holder_reports_the_most_recently_used_resident_otherwise():
     assert {r["model"] for r in a.snapshot()["resident"]} == {"llm", "asr"}
 
 
+def test_holder_breaks_a_recency_tie_on_the_sequence_not_on_dict_order():
+    """The same coarse-clock hazard as the LRU sort, on the read side.
+
+    Frozen clock, so every `last_used_at` is identical and `sorted(..., reverse=True)` — being
+    stable — reports whichever resident the dict happened to hold first. Both insertion orders are
+    run because either one alone is satisfied by accident: only an ordering that is genuinely total
+    gets both right.
+    """
+    est = {"llm": 2.0, "asr": 1.0}
+    for first, second in (("llm", "asr"), ("asr", "llm")):
+        a, coord, gpu, life = _shim(sizes={"llm": 2 * GIB, "asr": 1 * GIB},
+                                    wallclock=lambda: 1_700_000_000.0)
+        a.acquire(first, "serving", est[first])
+        a.acquire(second, "serving", est[second])
+        assert a.holder()["tenant"] == second, f"{second} was acquired last"
+
+
+def test_holder_follows_touch_order_when_the_wall_clock_goes_backward():
+    """The read-side half of the same rule: `holder()` answers "who most recently had the GPU", and
+    a wall clock that has been set back answers a different question — who was stamped latest."""
+    now = {"t": 100.0}
+    a, coord, gpu, life = _shim(sizes={"llm": 2 * GIB, "asr": 1 * GIB},
+                                wallclock=lambda: now["t"])
+    a.acquire("asr", "serving", 1.0)
+    now["t"] = 101.0
+    a.acquire("llm", "serving", 2.0)
+
+    now["t"] = 99.0  # the system clock is corrected backward
+    # A request landing on the already-resident `asr`. Not `a.acquire` — that returns early for an
+    # engine already holding a claim and never reaches the coordinator, so it is the claim grant,
+    # not the shim call, that moves recency.
+    coord.admit_serving("asr", 1 * GIB).claim.release()
+
+    assert a.holder()["tenant"] == "asr", "the most recently used, not the latest-stamped"
+    assert coord.residents["asr"].last_used_at < coord.residents["llm"].last_used_at, \
+        "the timestamps really do invert here — the assertion above is not passing by accident"
+
+
 def test_holder_is_none_on_an_empty_gpu():
     a, coord, gpu, life = _shim()
     assert a.holder() is None

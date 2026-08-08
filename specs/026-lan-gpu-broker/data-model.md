@@ -142,9 +142,17 @@ SC-007 exists to bound. Idle-cull keys on `last_gpu_activity_at` alone; see
 ## Runtime state (host agent, in-process — not persisted)
 
 ### GPU coordinator state  *(state machine — corrected per Codex review)*
-- `residents: model_key → { state: loading|resident|draining|evicting|rolling_back, vram_accounted_bytes, active_requests, last_used_at }`
+- `residents: model_key → { state: loading|resident|draining|evicting|rolling_back, vram_accounted_bytes, active_requests, recency_seq, last_used_at }`
   — `rolling_back` is the record-intent state of the split rollback; a model in any transient state
   (`draining`/`evicting`/`rolling_back`) is **not** eligible as a fresh-load target or an eviction victim.
+- **Recency is `recency_seq`, not `last_used_at`.** Both are written on every touch and only ever
+  together, but only the sequence orders anything: eviction's LRU choice and the "most recently used
+  resident" that `holder()` reports both sort on it. `last_used_at` is the wall-clock stamp operators
+  and the API read. It is not an ordering key because a wall clock is not one — its resolution is
+  15.625 ms on Windows against ~1 ns on Linux, so touches inside a tick are indistinguishable, and
+  `time.time()` may return a *lower* value after the system clock is set back, which inverts the
+  order rather than merely flattening it. Both artifacts are authoritative in
+  [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Coordinator state.
 - `reservations: op_id → { model_key, est_bytes, generation, materialized, waiters }`
 - `active_requests` is a **claim** count with a mandatory balanced release — see
   [contracts/admission-scheduler.md](./contracts/admission-scheduler.md) §Request claims.
@@ -169,7 +177,8 @@ SC-007 exists to bound. Idle-cull keys on `last_gpu_activity_at` alone; see
 - Identity = model instance (shared across tenants), not tenant.
 
 ### Lease / claim
-- `serving` claim: co-resident, two-bound-checked, evictable (idle/LRU) via **drain → wait active==0 → unload**.
+- `serving` claim: co-resident, two-bound-checked, evictable (idle first, then LRU by `recency_seq`) via
+  **drain → wait active==0 → unload**.
 - `exclusive` claim (job): requires empty serving set; whole GPU; never preempted.
 
 ### Queue (scheduler — persisted)
