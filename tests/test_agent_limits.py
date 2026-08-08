@@ -30,6 +30,7 @@ from hostagent import (  # noqa: E402
 from hostagent import jobs as jobs_mod  # noqa: E402
 from hostagent import main as agent_main  # noqa: E402
 from hostagent.journal import Journal  # noqa: E402
+from hostagent.metrics import REGISTRY  # noqa: E402
 
 KEY = "k-limits-0123456789abcdef"
 
@@ -156,8 +157,24 @@ def test_auth_precedes_body_buffering(monkeypatch):
 # --- saturation (T531, FR-316/320) ---------------------------------------------------------------------
 
 def test_saturated_workers_and_queue_answer_503():
+    """The bound is asserted through the server's own rejection counter, not only through the
+    response, because the response is not guaranteed to survive the close.
+
+    `_reject` sends the 503 and shuts the connection down **without draining the request** — which
+    is FR-316's point, refuse before reading a byte. Closing a socket that still holds unread
+    inbound data sends an RST, and an RST can discard the already-queued response, so the client
+    sees `ConnectionAbortedError` (WinError 10053 on Windows) instead of the 503 it was sent. Linux
+    usually delivers the buffered bytes ahead of the reset, which is why CI never sees this.
+
+    The refusal itself is counted in `process_request` before `_reject` runs, so it is observable
+    whatever happens to the socket. The response is still asserted whenever it arrives — a lost
+    response is tolerated, an unbounded thread pile is not.
+    """
     hold = threading.Event()
-    server, host, port, _ = _server(max_workers=2, queue_size=1, queue_wait_s=0.2,
+    # `queue_wait_s` is long enough that the queued third request cannot time out mid-test. At the
+    # original 0.2s it raced the 0.15s sleep below: the queue slot could free before the fourth
+    # connection arrived, which would then be served normally rather than refused.
+    server, host, port, _ = _server(max_workers=2, queue_size=1, queue_wait_s=5.0,
                                     handler_hold=hold)
     conns = []
     try:
@@ -166,13 +183,30 @@ def test_saturated_workers_and_queue_answer_503():
             c = http.client.HTTPConnection(host, port, timeout=15)
             c.request("GET", "/jobs")
             conns.append(c)
-        time.sleep(0.15)  # let them be admitted
+        # Wait for the state the assertion depends on rather than sleeping a guessed interval.
+        deadline = time.monotonic() + 10
+        while server._inflight < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server._inflight == 2, "both workers busy before the bound is probed"
+
+        before = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                        {"reason": "saturated"})
         # the 4th connection is over conn bound → immediate minimal 503, no thread parked
         c4 = http.client.HTTPConnection(host, port, timeout=5)
         c4.request("GET", "/healthz")
-        r = c4.getresponse()
-        assert r.status == 503 and b"saturated" in r.read()
+        try:
+            response = c4.getresponse()
+            status, body = response.status, response.read()
+        except (OSError, http.client.HTTPException) as exc:
+            status, body = None, exc  # the 503 was sent, then lost to the reset — see the docstring
         c4.close()
+
+        after = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                       {"reason": "saturated"})
+        assert after == before + 1, f"the 4th connection was not refused at the bound ({body!r})"
+        assert server._inflight == 2, "the refusal parked no additional worker"
+        if status is not None:
+            assert status == 503 and b"saturated" in body
     finally:
         hold.set()  # release the held handlers
         for c in conns:
