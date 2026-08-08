@@ -1233,11 +1233,12 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             body may still be in flight when this runs and no amount of looking at the socket would
             see it.
 
-            Deferral is a `BoundedAgentServer` capability, but `make_handler` is mounted on a plain
-            `ThreadingHTTPServer` elsewhere (`tests/_agentserver.py`, `supervisor/`), so this asks
-            rather than assumes. Without the guard a refused body-bearing request raised
-            `AttributeError` mid-handler on those servers — masked, because the status had already
-            been flushed, so the client still saw its 401 while the thread died on the way out.
+            Deferral is a `BoundedAgentServer` capability, but `make_handler` does not own its
+            server: `tests/_agentserver.py`, `test_agent_jobs_http.py` and `test_swap_orchestration`
+            all mount it on a plain `ThreadingHTTPServer`. So this asks rather than assumes. Without
+            the guard a refused body-bearing request raised `AttributeError` mid-handler there —
+            masked, because the status had already been flushed, so the client still saw its 401
+            while the thread died on the way out.
             """
             mark = getattr(self.server, "mark_undrained", None)
             if mark is not None:

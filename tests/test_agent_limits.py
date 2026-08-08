@@ -308,8 +308,10 @@ def test_a_protected_get_carrying_a_body_defers_its_401_close():
 def test_the_handler_survives_a_refusal_on_a_server_without_the_deferral():
     """`make_handler` is not owned by `BoundedAgentServer`, so it cannot assume the capability.
 
-    `tests/_agentserver.py` and `supervisor/` mount the same handler on a plain
-    `ThreadingHTTPServer`. Calling `mark_undrained` unconditionally raised `AttributeError` there on
+    `tests/_agentserver.py` (the shared fixture behind the domain suites), `test_agent_jobs_http`
+    and `test_swap_orchestration` all mount it on a plain `ThreadingHTTPServer` — the reuse is
+    test-side today, but the factory is public and does not own its server, and the failure mode is
+    silent. Calling `mark_undrained` unconditionally raised `AttributeError` there on
     every refused body-bearing request — and it went unnoticed because the status had already been
     flushed, so the client still saw its 401 and only the request thread died. `handle_error` is
     where that landed, so that is what this watches; asserting the response alone would reproduce
