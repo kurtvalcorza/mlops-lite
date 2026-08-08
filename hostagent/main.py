@@ -853,11 +853,15 @@ class BoundedAgentServer(ThreadingHTTPServer):
         super().process_request(request, client_address)  # spawns process_request_thread
 
     def process_request_thread(self, request, client_address):
+        #: True once `_reject` has handed the socket to the closer. The `finally` below must then
+        #: NOT close it: doing so is the immediate close `_linger` exists to defer, and it would
+        #: reset the 503 away on exactly the path that just sent one.
+        lingering = False
         try:
             if not self._exec_slots.acquire(timeout=self._queue_wait_s):
                 REGISTRY.inc("hostagent_requests_rejected_total",
                              labels={"reason": "queue_timeout"})
-                self._reject(request)
+                lingering = self._reject(request)
                 return
             with self._inflight_lock:
                 self._inflight += 1
@@ -870,10 +874,20 @@ class BoundedAgentServer(ThreadingHTTPServer):
         except Exception:  # noqa: BLE001 — parity with ThreadingMixIn's containment
             self.handle_error(request, client_address)
         finally:
+            # The admission permit is returned immediately either way — a socket lingering for its
+            # 503 holds no admission, so keeping the permit would shrink capacity for the duration.
             self._conn_slots.release()
-            self.shutdown_request(request)
+            if not lingering:
+                self.shutdown_request(request)
 
-    def _reject(self, request):
+    def _reject(self, request) -> bool:
+        """Answer a refusal with the minimal 503. **True if the closer took ownership** of the
+        socket, in which case the caller must not close it — see `_linger`.
+
+        Both refusal paths route through here and both must honour that: the connection-cap refusal
+        in `process_request`, and the queue-timeout refusal in `process_request_thread`, whose
+        `finally` would otherwise close the socket straight back out from under the closer.
+        """
         body = b'{"error":"agent saturated - bounded worker/queue capacity reached (FR-316)"}'
         sent = False
         try:
@@ -885,8 +899,9 @@ class BoundedAgentServer(ThreadingHTTPServer):
         except OSError:
             pass
         if sent and self._linger(request):
-            return  # the closer owns the socket now
+            return True  # the closer owns the socket now
         self.shutdown_request(request)
+        return False
 
     def _linger(self, request) -> bool:
         """Hand a refused connection to the closer so its 503 survives. True if it took ownership.
@@ -910,9 +925,10 @@ class BoundedAgentServer(ThreadingHTTPServer):
         Over any of those bounds it degrades to the immediate close rather than accumulating.
 
         The discarded bytes are not a body being buffered: nothing is parsed, retained, or acted on,
-        no worker is occupied, and the refusal decision was already made and counted before this is
-        reached. FR-316's "before any read" governs the admission decision, which still reads
-        nothing.
+        no worker or admission slot is held, and the refusal was decided and counted before this is
+        reached. What FR-316 requires is that request concurrency and pending work stay bounded, and
+        what SC-160 requires is a stable 413/503 without acquiring admission — reading after the
+        refusal, under fixed bounds, holding nothing, satisfies both.
         """
         try:
             request.shutdown(socket.SHUT_WR)

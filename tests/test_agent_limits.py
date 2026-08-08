@@ -220,6 +220,86 @@ def test_saturated_workers_and_queue_answer_503():
         server.shutdown()
 
 
+def test_a_queued_request_that_times_out_still_receives_its_503():
+    """The **other** refusal path, and the one that bypassed the lingering close.
+
+    A request refused by the connection cap never reaches a worker thread. This one does: it takes
+    an admission permit, parks on the exec semaphore, times out, and is refused from inside
+    `process_request_thread` — whose `finally` used to close the socket unconditionally, straight
+    back out from under the closer that `_reject` had just handed it to. Same reset, same lost 503,
+    on a path the connection-cap test cannot reach because it deliberately keeps the queue slot
+    occupied.
+
+    `queue_timeout` rather than `saturated` is asserted so this cannot silently start passing by
+    exercising the cap instead.
+    """
+    hold = threading.Event()
+    server, host, port, _ = _server(max_workers=1, queue_size=1, queue_wait_s=0.2,
+                                    handler_hold=hold)
+    conns = []
+    try:
+        c1 = http.client.HTTPConnection(host, port, timeout=15)
+        c1.request("GET", "/jobs")  # occupies the only worker, and holds it
+        conns.append(c1)
+        deadline = time.monotonic() + 10
+        while server._inflight < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server._inflight == 1, "the worker is occupied before the queue is probed"
+
+        before = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                        {"reason": "queue_timeout"})
+        # Admitted — a connection permit is free — then refused waiting for the busy worker.
+        c2 = http.client.HTTPConnection(host, port, timeout=10)
+        c2.request("GET", "/healthz")
+
+        # Assert the close-ownership contract DIRECTLY, not through the socket outcome.
+        #
+        # The response alone does not discriminate on this path: measured, the queue-timeout
+        # refusal delivered its 503 10/10 even with the handoff reverted. The connection-cap
+        # refusal resets because the server closes before the client's request bytes have even
+        # arrived; here the server has waited out `queue_wait_s`, so those bytes are long since
+        # delivered and the reset does not reliably follow. The defect is nonetheless real — the
+        # worker's `finally` closes a socket the reaper already owns — so this pins the mechanism
+        # rather than waiting for a symptom that only sometimes appears.
+        # Wait on the handover itself. Not on the counter: that is incremented before `_reject`
+        # runs, so sampling on it can land in the gap before the socket is registered and report a
+        # handover that simply has not happened yet.
+        deadline = time.monotonic() + 10
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.005)
+        assert pending, "the refused socket was handed to the lingering closer"
+
+        # And that it STAYS open. The closer releases a socket only on the peer's FIN or its own
+        # deadline; this client has not closed, and the deadline is far off. A close inside this
+        # window is the worker's `finally` reaching past the handover.
+        time.sleep(0.05)
+        assert all(s.fileno() != -1 for s in pending), \
+            "the worker's finally closed a socket the closer already owns"
+
+        response = c2.getresponse()
+        status, body = response.status, response.read()
+        c2.close()
+
+        after = REGISTRY.counter_value("hostagent_requests_rejected_total",
+                                       {"reason": "queue_timeout"})
+        assert status == 503 and b"saturated" in body
+        assert after == before + 1, "refused by the queue timeout, not by the connection cap"
+    finally:
+        hold.set()
+        for c in conns:
+            try:
+                c.getresponse().read()
+                c.close()
+            except Exception:
+                pass
+        server.shutdown()
+
+
 def test_queued_request_proceeds_once_a_worker_frees():
     hold = threading.Event()
     server, host, port, _ = _server(max_workers=1, queue_size=2, queue_wait_s=5.0,
