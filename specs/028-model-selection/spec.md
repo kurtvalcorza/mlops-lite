@@ -1,0 +1,405 @@
+# Feature Specification: 028 Model-Selective Serving
+
+**Feature Branch**: `028-model-selection`
+
+**Created**: 2026-08-09
+
+**Status**: Draft
+
+**Input**: User description: "Honor the `model` parameter on the OpenAI-compatible broker surface.
+Today `POST /v1/chat/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, and
+`/v1/vision/{task}` accept a `model` field,
+validate nothing against it, and proxy unconditionally to the single modality slot
+`SERVING_URL = {AGENT_URL}/engines/llm`; the response then echoes back either the agent-reported
+`serving_model` or the caller's own string, so a tenant asking for model A can be served model B
+with no signal. `GET /v1/models` lists every registry model with a promoted serving version,
+advertising names that no request can actually select."
+
+> **Correction to the input, 2026-08-09 (`/speckit-analyze` finding F1).** The description as
+> originally given named a `POST /v1/completions` endpoint. **No such endpoint exists** —
+> `gateway/app/routers/broker_openai.py` exposes `GET /models`, `POST /chat/completions`,
+> `POST /embeddings`, `POST /audio/transcriptions`, `POST /vision/{task}`, and `GET /usage`. It also
+> omitted the ASR and vision surfaces, which do exist and do accept `model`. The quote above is
+> corrected to the real surface; the error was in the description, not in the code.
+
+## Summary
+
+026 specified a broker whose admission is **model-targeted**. Its inference contract says so
+explicitly: *"If the target model isn't resident, admission loads it if it fits the VRAM budget
+(co-resident), else evicts idle/LRU serving tenants to fit"*
+([026 contracts/inference-openai.md](../026-lan-gpu-broker/contracts/inference-openai.md)). The
+admission core was built to match — `hostagent/coordinator.py` keys its `residents` map, its
+generation tokens, its claims, and its eviction victim-selection on a `model_key`.
+
+The surface above it was not. Three seams were left unjoined, and together they mean **no request
+has ever selected a model**:
+
+1. **The OpenAI router never reads `model` for routing.** `chat_completions` posts to a fixed
+   `SERVING_URL` ([gateway/app/routers/broker_openai.py:260](../../gateway/app/routers/broker_openai.py)),
+   which `settings.py:28` defines as `f"{AGENT_URL}/engines/llm"` — a **modality slot**, not a model.
+   `body.model` appears only in the response echo and in refusal text.
+2. **The admission shim collapses `model_key` to `engine_id`.** `hostagent/coordadmission.py` presents
+   the legacy `acquire(engine_id, kind, est_gb)` surface over the coordinator, so the coordinator's
+   per-model residency degenerates to per-engine residency: co-residency today is across *engines*
+   (llm / vision / embed / asr), never across two LLMs. 026's own T632 records this honestly —
+   *"Single-resident-model serving path (no co-residency yet)"*.
+3. **The listing advertises what cannot be selected.** `GET /v1/models` returns every registry model
+   carrying a promoted serving version. A tenant reads that list, picks a name, sends it, and is
+   served whatever occupies the llm slot — with the response's `model` field reporting the *served*
+   identity, so a careful client can detect the substitution only by comparing what it asked for
+   against what came back.
+
+The consequence is not cosmetic. A tenant that requests a safety-tuned model and receives a base
+model gets no error, no header, and no log line saying a substitution happened. Every per-model
+claim the platform makes downstream — metering attribution, quality monitoring baselines, shadow
+replay comparisons — is computed against the model that *answered*, while the tenant's own record of
+what it asked for says something else.
+
+028 joins the three seams. `model` becomes the request's routing key: resolved against the registry,
+carried into admission as the coordinator's `model_key`, and answered by that model or refused with a
+reason that names why. Nothing in the admission core needs to be rebuilt — it was designed for this
+and has been waiting for a caller that passes a model.
+
+**This increment does not amend the constitution.** Principle II (v1.6.1) already permits bounded
+co-residency of serving tenants within the usable VRAM budget and already requires that admission
+"evict resident serving tenants by a defined policy (idle-first / least-recently-used) to make room,
+or refuse with a clear reason if it cannot fit even alone." 028 implements that clause for LLMs; it
+does not widen it. Training exclusivity and never-preempt are untouched.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - The named model is the model that answers (Priority: P1) 🎯 MVP
+
+A tenant sends `{"model": "support-assistant", ...}` to `/v1/chat/completions`. If
+`support-assistant` is resident, it answers. If some other model occupies the LLM engine, the request
+does **not** silently receive that other model's output: it is either served by
+`support-assistant` (US2's on-demand load) or refused. A request naming a model the platform does not
+have, or has but has not promoted, is refused before any GPU work is attempted.
+
+**Why this priority**: This is the increment's entire point and the P1 finding it answers. Shipping
+only this story ends the silent substitution — the failure mode with no signal — even if every
+non-resident request is refused rather than loaded. A truthful refusal is strictly better than an
+untruthful success.
+
+**Independent Test**: With model A resident, send a chat request naming model B (promoted, not
+resident) and confirm the response is a refusal naming B, not a completion produced by A. Send a
+request naming A and confirm it is served and the response's `model` field reads A. Send a request
+naming a string that is in no registry and confirm it is refused without the agent being contacted.
+
+**Acceptance Scenarios**:
+
+1. **Given** model A is resident and promoted, **When** a tenant requests `model: A`, **Then** the
+   completion is produced by A and the response's `model` field names A and its resolved version.
+2. **Given** model A is resident and model B is promoted but not resident, **When** a tenant requests
+   `model: B` and on-demand loading is unavailable or refused, **Then** the response is a refusal
+   whose machine-readable code distinguishes "B could not be placed right now" from "B does not
+   exist", and **no** completion produced by A is returned.
+3. **Given** a name matching no registered model, **When** a tenant requests it, **Then** the broker
+   refuses with a permanent, non-retryable code and makes no request to the host agent.
+4. **Given** a registered model with **no** promoted serving version, **When** a tenant requests it,
+   **Then** the broker refuses with a code distinct from "unknown model", because the operator's
+   remedy differs — promote it, versus register it.
+5. **Given** a tenant omits `model` entirely, **When** the request is otherwise valid, **Then** the
+   broker applies the documented default (the platform's promoted serving model) and the response's
+   `model` field names what actually answered, so an omitted field never reads as a granted request.
+
+---
+
+### User Story 2 - A promoted model that is not resident is loaded on demand (Priority: P2)
+
+A tenant names a promoted model that is not currently in VRAM. Admission attempts to make it
+resident: it is admitted co-resident if both VRAM bounds allow, or after evicting idle/least-recently-used
+serving tenants if they must go, or the request is refused with a reason that distinguishes *contention*
+(retry later) from *impossible* (this model does not fit an empty GPU). The tenant's request then
+completes against the model it named.
+
+**Why this priority**: This is what makes the surface usable rather than merely honest. Without it a
+multi-model registry serves exactly one model and refuses the rest, which is truthful but not the
+broker 026 described. It is P2 because US1's refusal path is a coherent shippable product on its own.
+
+**Independent Test**: Start with model A resident and B promoted-but-absent. Request B. Confirm B
+becomes resident (co-resident if both fit, otherwise A is evicted after draining its in-flight
+requests), that B answers, and that the admission journal records the placement decision and any
+eviction with its reason.
+
+**Acceptance Scenarios**:
+
+1. **Given** model B is promoted and not resident and both VRAM bounds admit it alongside the current
+   residents, **When** a tenant requests B, **Then** B is loaded co-resident, no resident is evicted,
+   and B answers the request.
+2. **Given** B cannot fit alongside the current residents but would fit alone, **When** a tenant
+   requests B, **Then** admission evicts serving tenants by the idle-first/LRU policy, drains their
+   in-flight requests before unloading, loads B, and B answers.
+3. **Given** B's estimate exceeds the usable capacity less safety headroom — it would not fit an
+   **empty** GPU, **When** a tenant requests B, **Then** the refusal is the permanent
+   `model_too_large` code, never the transient contention code.
+4. **Given** an exclusive training/HPO/batch job holds the GPU, **When** a tenant requests any model,
+   **Then** the refusal is the transient contention code with `Retry-After`, the job is **not**
+   preempted, and no eviction is attempted.
+5. **Given** two tenants concurrently request two models that cannot co-fit, **When** both are
+   admitted in sequence, **Then** the accounted resident set never exceeds the usable budget at any
+   observed instant, and neither request receives another model's output.
+
+---
+
+### User Story 3 - The listing and the response tell the same truth (Priority: P3)
+
+`GET /v1/models` lists exactly the models a request may select, and every response — streaming and
+non-streaming alike — reports the identity that actually produced the tokens. A client can compare
+what it asked for against what it got, on every response, without reading logs.
+
+**Why this priority**: The discovery surface is what makes the other two stories usable by an
+unmodified OpenAI client, and closes the "advertises names no request can select" half of the
+finding. It is P3 because a tenant who already knows the model name is unblocked by US1 and US2.
+
+**Independent Test**: Call `/v1/models`, then send one request per listed id and confirm each is
+either served by that exact model or refused for a placement reason — never served by a different
+model. Confirm the streaming path reports the same resolved identity as the non-streaming path for
+the same request.
+
+**Acceptance Scenarios**:
+
+1. **Given** the registry holds promoted and unpromoted models, **When** a tenant calls
+   `/v1/models`, **Then** every listed id is selectable and no promoted-and-selectable model is
+   omitted.
+2. **Given** a streaming chat request, **When** the tenant reads the SSE chunks, **Then** the `model`
+   field on the chunks names the resolved serving identity, not the caller's request string echoed
+   back.
+3. **Given** a request whose named model is resolved to a specific version, **When** the response is
+   returned, **Then** the response carries the resolved version alongside the name, so two requests
+   answered by different versions of one model are distinguishable by the client.
+
+---
+
+### Edge Cases
+
+- **A name that is valid for the wrong modality.** A tenant sends an embedding model's name to
+  `/v1/chat/completions`. This must be refused as a modality mismatch, distinctly from "unknown
+  model" — the name exists and is promoted, but not for this surface.
+- **Promotion changes between resolution and admission.** A model is promoted to version 3 while a
+  request that resolved version 2 is in flight. The request completes against the version it
+  resolved, and the response reports that version; it is not silently upgraded.
+- **The named model is resident but `draining` or `evicting`.** The request must await the owning
+  operation rather than starting a competing load (the transient-state branch 026 T675 already
+  built), or be refused as contention — never fall through to a different resident.
+- **Repeated alternating requests for two models that cannot co-fit.** Two tenants alternating
+  between A and B would otherwise thrash the GPU, each load evicting the other. The minimum residency
+  period (FR-456) makes the second request wait rather than swap, and its `Retry-After` says how
+  long. The tenant whose model is resident is not punished for arriving first.
+- **A tenant names the model currently being loaded by another tenant's request.** The second
+  request must join the in-flight load rather than issue a second one.
+- **Registry unreachable.** Resolution cannot consult the registry. The broker must refuse rather
+  than fall back to the modality slot, because falling back is exactly the silent substitution this
+  increment exists to end.
+- **An empty string or omitted `model`.** Distinct from an unknown name: this is the documented
+  default path, and must be answered with the served identity named in the response.
+- **Metering and quota when a request is refused after an eviction has already occurred.** GPU work
+  was done (a drain and an unload) for a request that produced no tokens; the ledger must not record
+  the refusal as billable output, and the eviction must still be journaled.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+**Resolution — turning a request string into a model identity**
+
+- **FR-439**: The broker MUST resolve the request's `model` field to a concrete
+  `(model name, version)` pair before any GPU work is requested, using the registry as the authority.
+- **FR-440**: A bare model name MUST resolve to that model's promoted serving version. The system
+  MUST also accept an explicit version qualifier, subject to FR-457, and MUST refuse a qualifier that
+  names a version that does not exist.
+- **FR-441**: A `model` naming nothing in the registry MUST be refused with a **permanent**,
+  machine-readable code, before any request is made to the host agent.
+- **FR-442**: A `model` naming a registered model with no promoted serving version MUST be refused
+  with a code **distinct** from FR-441's, because the operator remedy differs.
+- **FR-443**: A `model` naming a model promoted for a different modality than the endpoint serves
+  MUST be refused with a code distinct from both FR-441 and FR-442.
+- **FR-444**: An omitted or empty `model` MUST resolve to the platform's documented default serving
+  model, and the response MUST name what actually answered. The default MUST NOT be reached by
+  falling back from a failed resolution.
+- **FR-445**: When the registry cannot be consulted, the broker MUST refuse the request. It MUST NOT
+  fall back to serving whatever occupies the modality slot.
+
+**Routing — carrying the identity through admission**
+
+- **FR-446**: The resolved identity MUST be carried into host-agent admission as the coordinator's
+  `model_key`, so residency, generation tokens, claims, and eviction victim-selection all key on the
+  model the tenant named.
+- **FR-447**: The admission shim MUST stop collapsing `model_key` to `engine_id` for the serving
+  path, while preserving the exclusive-job path unchanged (a job takes the whole GPU and is never
+  preempted).
+- **FR-448**: A request whose resolved model is resident and serving MUST be routed to that model's
+  child process, and MUST NOT be routed to any other resident.
+- **FR-449**: A request whose resolved model is in a transient state (`loading`, `draining`,
+  `evicting`, `rolling_back`) MUST await the owning operation or be refused as contention. It MUST
+  NOT start a competing load and MUST NOT be answered by a different resident.
+- **FR-450**: Concurrent requests naming the same non-resident model MUST result in **one** load,
+  with the later requests joining the in-flight operation.
+
+**Placement — making a named model resident**
+
+- **FR-451**: A resolved model that is promoted but not resident MUST be admitted if both
+  constitutional bounds allow — the accounted resident set plus reservations within the usable
+  budget, and the incoming load within live free VRAM less safety headroom.
+- **FR-452**: When the model cannot be placed alongside current residents but would fit alone,
+  admission MUST evict resident **serving** tenants by the idle-first / least-recently-used policy,
+  draining each victim's in-flight requests before unloading it.
+- **FR-453**: A model whose estimate exceeds the usable capacity less safety headroom MUST be refused
+  with the **permanent** `model_too_large` code. This code MUST NOT be returned for contention.
+- **FR-454**: A model that could fit but cannot be placed right now — an exclusive job holds the GPU,
+  another tenant's reservation is outstanding, a drain timed out, or an unaccounted external consumer
+  holds VRAM — MUST be refused with the **transient** `gpu_busy` code carrying `Retry-After`.
+- **FR-455**: An exclusive training / HPO / batch job MUST NOT be preempted or evicted by any
+  tenant-initiated model placement, and no eviction MUST be attempted while a job barrier is up.
+- **FR-456**: A model that has just become resident MUST be protected from eviction for a **minimum
+  residency period** — a configured tunable alongside 026's other admission tunables. Within that
+  period the model is not an eligible eviction victim, whoever requests the placement and however
+  idle it is.
+- **FR-456a**: A placement that could only proceed by evicting a model still inside its minimum
+  residency period MUST be refused with the **transient** `gpu_busy` code, and its `Retry-After` MUST
+  be derived from the remaining time on that period — so the refusal tells the client when the
+  request would actually succeed rather than offering a generic backoff.
+- **FR-456b**: The minimum residency period MUST bound eviction rate independently of the request
+  pattern: a given resident model MUST NOT be evicted more than once per period, regardless of how
+  many tenants request a competing model or in what order. This is the property that makes an
+  alternating two-model workload cost a bounded number of loads per unit time rather than one per
+  request.
+- **FR-456c**: The minimum residency period MUST NOT apply to the exclusive-job path. A job's whole-GPU
+  claim is governed by FR-455 (never preempted), which is strictly stronger; and a job's *release* is
+  not an eviction.
+- **FR-457**: A version qualifier MUST be an **assertion, not a selection**. `name:version` is served
+  only when that version is the currently promoted serving version; a qualifier naming any other
+  registered version MUST be refused with a machine-readable code distinct from "version does not
+  exist". A tenant request therefore can never place a version that 022's gated promotion path did
+  not promote.
+- **FR-457a**: The refusal in FR-457 MUST name the version that **is** promoted, so a client whose
+  pin failed because promotion moved underneath it can tell that case apart from having pinned a
+  version that was never promoted.
+
+**Truthfulness — the response and the listing**
+
+- **FR-458**: Every non-streaming response MUST report the resolved name **and** version that
+  produced it.
+- **FR-459**: Every streaming response MUST report the same resolved identity as the equivalent
+  non-streaming response, on its chunks and its terminal event.
+- **FR-460**: A response MUST NOT echo the caller's request string as its `model` field when the
+  request was answered by anything other than that model.
+- **FR-461**: `GET /v1/models` MUST list exactly the identities a request may select on the surfaces
+  this platform exposes, and MUST NOT list a name whose every request would be refused as unknown,
+  unpromoted, or wrong-modality.
+- **FR-462**: `GET /v1/models` MUST indicate each listed model's current residency, so a client can
+  prefer a resident model and avoid provoking an eviction it does not need.
+
+**Observability and accounting**
+
+- **FR-463**: Every placement decision made on behalf of a tenant request — admitted co-resident,
+  admitted after eviction, refused with reason — MUST be recorded in the admission journal with the
+  resolved model identity and the deciding bound.
+- **FR-464**: Refusal counters MUST distinguish the resolution refusals (unknown, unpromoted,
+  wrong-modality) from the placement refusals (`gpu_busy`, `model_too_large`), using a **bounded**
+  label vocabulary — the model name is tenant-controlled and MUST NOT become a metric label.
+- **FR-465**: A request refused after an eviction has already occurred MUST NOT be metered as
+  billable output, and the eviction MUST still be journaled.
+- **FR-466**: The README's disclosure that `model` selects nothing MUST be replaced by an accurate
+  description of what `model` now selects, in the same increment that changes the behavior.
+
+**Resource bounds**
+
+- **FR-467**: Multiple co-resident serving children MUST NOT push the platform outside Principle
+  III's host-RAM budget. A configured **host-RAM bound** MUST be enforced as an admission
+  precondition alongside the two VRAM bounds: a placement whose child would take the platform past
+  it MUST be refused with the transient contention code, not admitted and reconciled afterwards.
+  Host RAM, unlike VRAM, cannot be reclaimed by the coordinator once a child has allocated it.
+- **FR-468**: The host-RAM figure the bound is checked against MUST be **measured**, not assumed —
+  recorded for one resident child and for the co-resident case, so the bound is calibrated against
+  the platform's real footprint rather than an estimate.
+
+### Key Entities
+
+- **Resolved model identity**: the `(name, version)` pair a request string resolves to, plus the
+  modality it is promoted for. This is what admission keys on and what the response reports.
+- **Resident model**: an entry in the coordinator's `residents` map — a model currently in VRAM with
+  a state, accounted VRAM, an active-request count, and a last-used timestamp. Already exists; 028
+  makes tenant requests key on it.
+- **Placement decision**: the outcome of admitting a resolved identity — granted, shared with an
+  existing resident, granted after eviction, or refused with a deciding bound. Already journaled by
+  026; 028 attributes it to a resolved model rather than an engine.
+- **Model listing entry**: what `/v1/models` publishes — a selectable identity with its promoted
+  version, modality, and residency.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-204**: In a suite of requests naming every model the listing advertises, **100%** are either
+  served by the model named or refused with a reason — **zero** are served by a different model.
+  This is the finding this increment closes, and it is a count, not a proportion to improve.
+- **SC-205**: For every refusal, a client can determine from the response alone — without operator
+  logs — whether retrying will help. Transient and permanent refusals are distinguishable in 100% of
+  cases.
+- **SC-206**: A tenant naming a promoted, non-resident model that fits the GPU receives that model's
+  output without operator involvement, in a single request.
+- **SC-207**: Across a mixed workload of concurrent requests for multiple models, the accounted
+  resident set never exceeds the usable VRAM budget, and no exclusive job is preempted — verified by
+  reading the admission state endpoint alone, as 026 SC established.
+- **SC-208**: A client comparing its request's `model` against the response's `model` finds them
+  equal on every successful request, on both the streaming and non-streaming paths.
+- **SC-209**: An alternating two-model workload that cannot co-fit performs **at most one eviction of
+  a given model per minimum-residency period**, however many requests arrive — so the cycle count is
+  set by the configured period, not by request volume. Requests refused during a period carry a
+  `Retry-After` that, if honored, succeeds on the first retry.
+- **SC-210**: No documentation in the repository states that `model` selects nothing once this
+  increment ships.
+- **SC-211**: Under the heaviest co-residency the platform admits, measured host RAM stays within
+  Principle III's budget — and the figure is a recorded measurement, not an estimate. A placement
+  that would breach it is refused rather than admitted.
+
+## Assumptions
+
+- **The admission core does not need rebuilding.** `hostagent/coordinator.py` already keys residency,
+  generations, claims, and eviction on `model_key`, and 026 T675 already built the transient-state
+  branch. 028 changes the callers that pass `engine_id` in that slot, not the state machine.
+- **Model identity is the registry's model name.** The registry is the authority for what names
+  exist, what versions they have, and which version is promoted for serving. No new naming scheme is
+  introduced.
+- **Co-residency of multiple LLMs is in scope.** 026's inference contract specifies it and
+  constitution v1.6.1 permits it. 028 does not treat "one LLM at a time" as a constraint to preserve;
+  it treats it as the unimplemented half of 026.
+- **Embeddings and other CPU-only models hold no GPU lease** (Principle II) and therefore resolve and
+  route without a placement decision, though they still resolve and still report a truthful identity.
+- **`BROKER_COORDINATOR_ADMISSION` remains the phase gate.** Per-model routing depends on the
+  coordinator path; with the flag off the platform keeps 018 behavior. The increment must state what
+  the surface does in both positions of that flag rather than assume it is on.
+- **The existing refusal vocabulary is reused where it fits.** 026's contract already defines
+  `gpu_busy`, `model_too_large`, `quota_exhausted`, and `unauthorized`; the resolution refusals this
+  increment adds are new codes alongside them, not replacements.
+- **Hardware validation is required before this is considered delivered.** Co-residency and eviction
+  are GPU behaviors; per Principle VII and 026's own phase gating, a passing test suite on a machine
+  without the GPU is not evidence that this works.
+
+## Dependencies
+
+- **026 LAN GPU Broker** — supplies the coordinator, the admission journal, the refusal vocabulary,
+  and the contract this increment implements. Its Phase 5/6 remain gated; 028 depends on none of the
+  gated scope.
+- **022 Registry-Driven LLM Serving** — supplies the promotion pointer and the gated
+  `POST /control/reload` path. FR-457 keeps that gate intact: a tenant request can place only a
+  promoted version, so tenant-initiated placement widens *when* a promoted model loads, never *what*
+  may load.
+- **The registry (MLflow)** must be reachable for resolution; FR-445 defines the behavior when it is
+  not.
+
+## Out of Scope
+
+- Changing what the promotion pointer means, or who may promote.
+- Multi-node or multi-GPU placement (Principle I).
+- Per-model quota or pricing. Metering stays as 026 built it; only the attribution of a refusal
+  changes (FR-465).
+- **Re-keying ASR and vision placement to `model_key`.** Decided unconditionally out of scope
+  (`/speckit-analyze` finding A1 — the earlier "unless the model-keyed shim makes it free" was a
+  condition with no decision procedure, so it could never be closed). Their placement continues to
+  go through per-engine admission.
+
+  **In scope for those two surfaces**: resolution and truthful reporting. `POST /v1/audio/transcriptions`
+  and `POST /v1/vision/{task}` both accept `model` today and neither validates it, so they carry the
+  same silent-substitution defect as chat. FR-439–FR-445 and FR-458–FR-460 apply to them as written.
