@@ -72,6 +72,36 @@ def _post(host, port, path, body: bytes, headers=None, timeout=10):
         conn.close()
 
 
+def _raw(host, port, blob: bytes, tail: bytes = b"", timeout=5.0):
+    """Send exact bytes and return the raw response.
+
+    `http.client` is the right tool everywhere else in this file, but not for framing tests: an
+    empty or repeated header value is precisely the thing a client library is entitled to
+    normalize, so a test built on one would be asserting against the library's idea of the request
+    rather than the wire. `tail` goes out after a beat, for cases where the body must arrive after
+    the server has already answered.
+    """
+    s = socket.create_connection((host, port), timeout=timeout)
+    try:
+        s.sendall(blob)
+        if tail:
+            time.sleep(0.05)
+            s.sendall(tail)
+        s.settimeout(timeout)
+        chunks = []
+        try:
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                chunks.append(b)
+        except (socket.timeout, ConnectionResetError):
+            pass
+        return b"".join(chunks)
+    finally:
+        s.close()
+
+
 # --- body limits (T532, FR-317) -----------------------------------------------------------------------
 
 def test_declared_oversize_json_is_413_before_any_read(monkeypatch):
@@ -573,6 +603,86 @@ def test_leading_zeros_do_not_inflate_the_digit_count(monkeypatch):
         r = conn.getresponse()
         assert r.status != 413, "512 bytes is under the 1024 limit however it is spelled"
         conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_an_empty_content_length_is_not_an_absent_one():
+    """`or "0"` collapsed the two, so `Content-Length:` with no value became `"0"` before the
+    syntax check could see it — and the comment claiming to reject `""` described a branch nothing
+    reached.
+
+    Measured on the unfixed tree, an empty declaration answered **byte-identically to no
+    declaration at all** (`unknown job kind None` either way): the 40 bytes sent after the headers
+    were never read, and `_declares_a_body()` said no, so the deferral was skipped too. Asserting
+    on which 400 arrives is therefore the whole test — the status is 400 either way, because a
+    `/jobs` POST with an empty body is also a 400.
+    """
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length:\r\n\r\n" + b"G" * 40)
+        assert b"400" in data.split(b"\r\n")[0]
+        assert b"byte count" in data, \
+            "refused on the framing, not answered as though no body had been declared"
+    finally:
+        server.shutdown()
+
+
+def test_conflicting_content_length_headers_are_refused():
+    """Two `Content-Length` headers used to mean first-wins: `5` then `40` read 5 bytes and left 35
+    in the buffer, answering `invalid JSON` over the fragment it happened to take.
+
+    A front end that honours the last value would then disagree with this server about where the
+    request ends, which is the shape request smuggling takes. Found while confirming the empty-value
+    case above, not reported. RFC 9110 8.6 says reject.
+    """
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 5\r\nContent-Length: 40\r\n\r\n" + b"G" * 40)
+        assert b"400" in data.split(b"\r\n")[0] and b"byte count" in data
+    finally:
+        server.shutdown()
+
+
+def test_a_repeated_identical_content_length_is_not_a_conflict():
+    """The guard is about disagreement, not repetition. The same value twice names one request
+    boundary, so refusing it would turn a legal-if-odd message into a framing error."""
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}")
+        assert b"byte count" not in data, "identical repeats agree about where the body ends"
+    finally:
+        server.shutdown()
+
+
+def test_an_absent_content_length_still_means_no_body():
+    """The other half of splitting absent from empty: a POST with no `Content-Length` at all is not
+    a framing error, it is a request with no body, and it must stay one."""
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n")
+        assert b"byte count" not in data, "no declaration is not a malformed declaration"
+    finally:
+        server.shutdown()
+
+
+def test_a_refused_request_with_an_empty_length_keeps_its_401():
+    """The auth-gate half, which is where the collapsed empty value actually cost something: the
+    401 goes out over 8 KiB still in flight, and `_declares_a_body()` returning False skipped the
+    deferral that keeps the close from resetting the status away (#85)."""
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length:\r\n\r\n", tail=b"G" * 8192)
+        assert b"401" in data.split(b"\r\n")[0], "the gate's verdict survived the unread body"
     finally:
         server.shutdown()
 

@@ -1247,8 +1247,30 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             ever compared against being the limit and zero. It is a well-formed number, so it earns
             a 413 rather than being called malformed — and the widest string that ever reaches
             `int()` is now as many digits as the limit has.
+
+            **An absent header and an empty one are different things.** `or "0"` collapsed them:
+            `Content-Length:` with no value is falsy, so it became `"0"` before the check could
+            see it, and the comment here claimed to reject `""` while nothing ever reached that
+            branch. Measured, an empty declaration behaved byte-identically to no declaration —
+            same `unknown job kind None` answer — so a body sent after it was never read, and
+            `_declares_a_body()` said no, which also skipped the deferral (review of `e55d078`).
+            Absent means no body and stays `0`; present-but-empty is a declaration that is not a
+            byte count, like any other.
+
+            **Conflicting declarations are unresolvable, not first-wins.** Found while confirming
+            the above rather than reported: two `Content-Length` headers made this read the FIRST
+            and leave the rest in the buffer — `5` then `40` read 5 bytes and left 35. A front end
+            that honours the last value would disagree with this server about where the request
+            ends, which is the shape request smuggling takes. RFC 9110 §8.6 says reject, so this
+            rejects. Repeats of the SAME value are not a conflict and are allowed through.
             """
-            raw = (self.headers.get("Content-Length") or "0").strip()
+            declared = self.headers.get_all("Content-Length")
+            if declared is None:
+                return 0  # no declaration is not a malformed one — there is simply no body
+            values = {v.strip() for v in declared}
+            if len(values) > 1:
+                return None  # two answers to "where does this request end" is no answer
+            raw = values.pop()
             if not (raw.isascii() and raw.isdigit()):  # rejects "", "-1", "+1", "0x10", "1 2", "²"
                 return None
             digits = raw.lstrip("0") or "0"  # `000000000512` is 12 wide and names 512 bytes
