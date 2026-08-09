@@ -1,6 +1,12 @@
 # Contract: Model-Addressed Inference (gateway ↔ host agent)
 
-**Requirements**: FR-446–FR-450, FR-458–FR-460 · **Phase**: 1 (field accepted) / 2 (field honoured)
+**Requirements**: FR-446–FR-450, FR-458–FR-460, FR-473–FR-473c · **Phase**: 1 (field **asserted**) / 2 (field drives placement)
+
+> **Corrected after the second PR #88 review.** This contract previously said the field was merely
+> *"accepted"* in Phase 1 and *"honoured"* in Phase 2. That left Phase 1 with a check-then-use race
+> and no closure of the defect: the gateway reads residency from a separate `GET /health`
+> (`gateway/app/serving.py:49`), then issues the inference as a second call, and the resident model
+> can change in between. **Phase 1 asserts the field at the agent** — a guard, not placement.
 
 ## The change
 
@@ -23,7 +29,7 @@ test that exists to catch exactly this kind of surface growth.
 | `model_key` absent | today's behaviour — serve whatever occupies the engine. Preserves every existing caller |
 | `model_key` names the resident model | serve it |
 | `model_key` names a model in a transient state (`loading`/`draining`/`evicting`/`rolling_back`) | await the owning operation (026 T675's branch) or refuse `gpu_busy` — **never** fall through to another resident (FR-449) |
-| `model_key` names a non-resident model, Phase 1 | refuse `gpu_busy` |
+| `model_key` names a non-resident model, Phase 1 | refuse `gpu_busy` — **compared and dispatched under the same lock that guards the resident set** (FR-473a), so the answer cannot go stale between the check and the dispatch |
 | `model_key` names a non-resident model, Phase 2+ | `Coordinator.admit_serving(model_key, est_bytes)`, then serve (FR-451–FR-454) |
 | `model_key` names a model this engine cannot host | refuse — a routing error, not a placement one |
 
@@ -66,3 +72,9 @@ obligation, not new machinery.
 3. Absent `model_key` behaves exactly as before, for all three existing callers.
 4. Two concurrent requests for the same non-resident key produce exactly one load.
 5. A streamed response's chunks name the served identity, not the request string.
+6. **The TOCTOU case.** Resolve against model A, then swap the engine to B **between** the residency
+   read and the inference call, and confirm the request is refused rather than answered by B. A test
+   that never interleaves a swap passes against the check-then-use race, which is why this is its own
+   case rather than a variant of case 2.
+7. The assert never waits for a load, evicts anything, or consults the VRAM bounds (FR-473b) —
+   asserted with a coordinator stub that fails the test if admission is called.

@@ -25,9 +25,10 @@ is three caller-side joins and one new bound —
    (FR-456–FR-456c).
 
 Delivery is phase-gated per Principle VII, and the gate is chosen so that **the P1 finding closes in
-Phase 1** — before any GPU behavior changes at all. Phase 1 is gateway-only: resolution, truthful
-responses, truthful listing, and refusal for anything not currently resident. That alone ends the
-silent substitution, which is the defect. Phases 2 and 3 turn refusals into service.
+Phase 1** — before any GPU behavior changes at all. Phase 1 is the gateway resolution plus a minimal
+agent-side identity assert: truthful responses, truthful listing, and refusal for anything not
+currently resident. That alone ends the silent substitution, which is the defect. Phases 2 and 3 turn
+refusals into service.
 
 ## Technical Context
 
@@ -120,11 +121,12 @@ gateway/app/
 └── settings.py               # SERVING_URL stops being the sole serving address
 
 hostagent/                    # stdlib-only
-├── coordinator.py            # + became_resident_at; victim eligibility honours the window (P2)
-├── gpuconfig.py              # + min_residency_s tunable (P2)
+├── main.py                   # P1: expected-identity assert on dispatch, under the resident-set lock
+│                             # P2: model-addressed dispatch on the existing engine verb route
+├── coordinator.py            # + became_resident_at, host_ram_accounted_bytes, host_ram_est_bytes (P2)
+├── gpuconfig.py              # + min_residency_s, host_ram_budget_bytes, host_ram_estimate_bytes (P2)
 ├── coordadmission.py         # stop collapsing model_key → engine_id on the serving path (P2)
-├── lifecycle.py              # one runtime per resident model, not per engine (P3)
-└── main.py                   # model-addressed dispatch on the existing engine verb route (P2)
+└── lifecycle.py              # one runtime per resident model, not per engine (P3)
 
 tests/
 ├── test_broker_openai_resolution.py   # NEW (P1)
@@ -145,12 +147,27 @@ introduce.
 
 Each phase is independently runnable and independently valuable, per Principle VII.
 
-**Phase 1 — Resolution and truth (gateway only; closes the P1 finding).**
+**Phase 1 — Resolution and truth (gateway + a minimal agent assert; closes the P1 finding).**
 `model` is resolved against the registry and validated. A request for the currently resident model is
 served as today. A request for anything else is refused with the correct code — unknown, unpromoted,
 wrong-modality, or `gpu_busy`. Responses and `/v1/models` report resolved identities.
-**No GPU behavior changes**, no agent change, and the coordinator is not touched. Shipping only this
-means the platform never again serves model B to a request for model A. Verifiable without a GPU.
+**No GPU behavior changes**, and the coordinator's admission logic is not touched. Verifiable without
+a GPU.
+
+> **Corrected after the second PR #88 review.** An earlier revision called this phase **gateway-only**.
+> It cannot be. The gateway learns residency from a **separate** `GET /health`
+> (`gateway/app/serving.py:49`) and then issues the inference as a second call, so a check-then-use
+> pair has a time-of-check/time-of-use window: the resident model can change in between — operator
+> swap, promotion-triggered reload, idle-release — and the request passes the check for A and is
+> answered by B. That is the defect, merely narrowed.
+>
+> Phase 1 therefore includes the **smallest possible agent change**: the request carries its expected
+> identity and the agent refuses when the engine it would dispatch to does not host it, compared under
+> the same lock that guards the resident set (FR-473–FR-473c). It is a **guard, not placement** — it
+> never waits for a load, evicts anything, or consults the VRAM bounds, which is what keeps the phase
+> free of GPU behaviour change and CPU-verifiable. Post-hoc comparison of the response's
+> `serving_model` was rejected as the mechanism: it burns the GPU work, and on the streaming path the
+> tokens have already reached the client.
 
 **Phase 2 — Model-keyed admission and on-demand placement (agent; hardware-gated).**
 `coordadmission.py` stops collapsing `model_key` to `engine_id` on the serving path. The

@@ -30,10 +30,19 @@ What a request's `model` string becomes before anything else happens. Produced b
 **`model_key` is `name@version`, not `name`.** Two versions of one model are two different sets of
 weights with two different VRAM footprints; keying residency on the bare name would let a promotion
 silently change what a resident `model_key` refers to, which is the same class of defect this
-increment closes one level up. The `@` separator is chosen because MLflow model names permit `:` in
-practice and the OpenAI `model` string uses `:` as the user-facing qualifier — keeping the wire
-separator distinct from the request separator means a malformed request string can never be mistaken
-for a well-formed key.
+increment closes one level up.
+
+**`model_key` is constructed, never parsed from tenant input.** It is built from an
+already-resolved `(name, version)` pair, so no ambiguity from a name containing `@` or `:` can reach
+it. The user-facing qualifier has its own grammar (FR-440a): split on the **rightmost** `:`, accept
+the suffix as a version only when it is all decimal digits, otherwise treat the whole string as a
+bare name. Registry versions are integers — `gateway/app/registry.py` sorts them with `int(...)` —
+which is what makes that rule total.
+
+An earlier revision of this document said the `@` separator was chosen "because MLflow model names
+permit `:` in practice and the OpenAI `model` string uses `:` as the user-facing qualifier". That
+asserted the ambiguity and then did not resolve it; FR-440a resolves it and FR-440b refuses the one
+name shape that stays ambiguous under it.
 
 **Validation** (FR-439–FR-445):
 
@@ -57,6 +66,12 @@ Current `__slots__`: `model_key`, `state`, `vram_accounted_bytes`, `active_reque
 | added field | type | notes |
 |---|---|---|
 | `became_resident_at` | float | set once, when the entry reaches `resident`; **never** touched afterwards |
+| `host_ram_accounted_bytes` | float | the child's attributed host RAM (PSS basis, FR-471). 0 while `loading` — the reservation carries the estimate during that window, exactly as `vram_accounted_bytes` does |
+
+**`host_ram_accounted_bytes` is not optional bookkeeping.** FR-470's equation sums "accounted host
+RAM of resident serving children", and until this field exists that sum has nothing to read.
+`ResidentModel` today carries `vram_accounted_bytes` and no host-RAM analogue, so the equation was
+stated against state that did not exist — it described an intent, not a computation.
 
 The distinction from `last_used_at` is the point. `last_used_at` moves on every request, so using it
 as the window start would protect a busy model forever and expose an idle one immediately — the
@@ -69,6 +84,22 @@ creation would let a slow load consume its own protection.
 **State transitions** are unchanged from 026: `loading → resident → draining → evicting`, with
 `rolling_back` on a failed load. The window affects only *eligibility for eviction*, never the
 transitions themselves.
+
+---
+
+## Reservation *(existing — `hostagent/coordinator.py:193`, one field added)*
+
+Current `__slots__`: `op_id`, `model_key`, `est_bytes`, `generation`, `materialized`, `waiters`.
+
+| added field | type | notes |
+|---|---|---|
+| `host_ram_est_bytes` | float | the incoming child's host-RAM estimate (FR-469), held for the same window `est_bytes` holds the VRAM estimate |
+
+`est_bytes` is VRAM-only today, so "Σ outstanding host-RAM reservations" in FR-470's equation had no
+field behind it either. Both sides of that sum now have state.
+
+Unlike the VRAM reservation, this one is **not** deducted from any live-free figure — there is no
+host-RAM analogue of that bound (FR-470), so `materialized` governs only the VRAM side.
 
 ---
 

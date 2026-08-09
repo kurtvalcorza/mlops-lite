@@ -44,9 +44,14 @@ Then confirm the listing no longer advertises what cannot be selected:
 curl -s localhost:8000/v1/models -H 'Authorization: Bearer <tenant-key>'
 ```
 
-Every `id` returned must be selectable on this surface. Send one request per listed id; each must be
-served by that model or refused for a *placement* reason — never served by a different model
-(**SC-204**).
+The listing spans **all** modalities and tags each entry — there is only one `/v1/models`, so it is
+not filtered per surface (FR-461). Send one request per listed id **to the endpoint its modality
+names**; each must be served by that model, or refused for a placement reason, or — if you send it to
+the wrong endpoint on purpose — refused `model_wrong_modality`. What must never happen is being
+served by a *different* model (**SC-204**).
+
+Confirm residency is sourced from the agent, not the registry: stop the agent and re-list. The
+`resident` field must be **absent**, not `false` (FR-462a).
 
 ## Phase 2 — model-keyed admission and the window (GPU required)
 
@@ -71,9 +76,12 @@ placement and any eviction with its deciding bound (**FR-463**, **SC-207**).
 
 **The window.** With `min_residency_s=60`, load A, then immediately request B where B cannot co-fit:
 
-- expect `503` with code `gpu_busy` and a `Retry-After` close to the remaining window — assert the
-  **number**, not merely its presence;
-- sleep that long, retry once, expect success (**FR-456a**);
+- expect `503` with code `gpu_busy` and a `Retry-After` equal to when a **sufficient victim set**
+  becomes eligible — assert the **number**, not merely its presence, and include a multi-victim case,
+  since a single-victim-only check passes against the superseded earliest-victim rule;
+- sleep that long, retry once, expect success — **with no competing traffic in the interval**.
+  `Retry-After` is a lower bound (FR-456a): it says when the window stops being the obstacle, not
+  that no other tenant will take the slot;
 - drive an alternating A/B workload for N windows and count evictions in the journal: ≤ N, not one
   per request (**SC-209**).
 
@@ -98,8 +106,14 @@ Record resident host RAM with one LLM and with two, set `host_ram_budget_bytes` 
 that the second placement is **refused**, not admitted. If the real delta puts the platform outside
 the budget, that is a Phase-3 finding to report, not a number to omit.
 
-Unlike VRAM, this is checked **before** the spawn and never reconciled afterwards — once a child has
-allocated host RAM the coordinator cannot take it back.
+Unlike VRAM, this is checked **before** the spawn — once a child has allocated host RAM the
+coordinator cannot take it back. It **is** still reconciled to the measured value after the spawn
+(FR-472), which reclaims nothing for the request that just ran but leaves the *next* admission
+deciding against a real number. An earlier revision of this file said it was "never reconciled
+afterwards", which contradicted FR-472.
+
+Measure on a **PSS** basis (FR-471). Two children sharing mmap'd GGUF pages each report those pages
+in full under RSS, so an RSS sum over-counts and the bound would refuse placements that fit.
 
 ## What "done" requires
 

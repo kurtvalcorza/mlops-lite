@@ -208,6 +208,17 @@ the same request.
 - **FR-440**: A bare model name MUST resolve to that model's promoted serving version. The system
   MUST also accept an explicit version qualifier, subject to FR-457, and MUST refuse a qualifier that
   names a version that does not exist.
+- **FR-440a**: The qualifier grammar MUST be **unambiguous for names that themselves contain `:`**.
+  Parsing MUST split on the **rightmost** `:` and accept the suffix as a version only when it is a
+  run of decimal digits; otherwise the entire string is a bare model name. Registry versions are
+  integers — `gateway/app/registry.py` sorts them with `int(...)` in two places — so this rule is
+  total and deterministic: `svc:chat:3` is version 3 of `svc:chat`, while `svc:chat` is the bare name
+  `svc:chat`. An earlier revision asserted that names may contain `:` and then used `:` as the
+  separator without saying how to split, which is not a grammar.
+- **FR-440b**: A model whose name is ambiguous under FR-440a **cannot exist**: a registered name
+  ending in `:` followed by digits would be indistinguishable from a qualified reference to a shorter
+  name. Resolution MUST refuse such a name with a distinct code rather than guessing, and the refusal
+  MUST be reachable — this is a registry-content problem the operator must fix, not a client error.
 - **FR-441**: A `model` naming nothing in the registry MUST be refused with a **permanent**,
   machine-readable code, before any request is made to the host agent.
 - **FR-442**: A `model` naming a registered model with no promoted serving version MUST be refused
@@ -219,6 +230,26 @@ the same request.
   falling back from a failed resolution.
 - **FR-445**: When the registry cannot be consulted, the broker MUST refuse the request. It MUST NOT
   fall back to serving whatever occupies the modality slot.
+
+**Atomicity — the identity must be asserted where dispatch happens**
+
+- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. A
+  gateway-side residency check followed by a separate inference call is a time-of-check/time-of-use
+  window: `gateway/app/serving.py` reads residency from a separate `GET /health`, and between that
+  read and the inference the resident model can change — via an operator swap, a promotion-triggered
+  reload, or idle-release. A request could pass the check for model A and be answered by model B,
+  which is the exact defect this increment exists to remove.
+- **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
+  the engine it would dispatch to does not host it. The comparison and the dispatch MUST occur under
+  the same lock that guards the resident set; a check performed anywhere else in the agent
+  reintroduces a narrower version of the same window.
+- **FR-473b**: This assertion is **not** placement, and MUST NOT wait for a load, evict anything, or
+  consult the VRAM bounds. It is a guard, and it is what allows the truthfulness guarantee to be
+  delivered before on-demand placement exists.
+- **FR-473c**: Post-hoc detection — comparing the agent's reported `serving_model` against the
+  resolved identity **after** the response arrives — MUST NOT be used as the mechanism. It burns the
+  GPU work, and on the streaming path the tokens have already reached the client by the time the
+  mismatch is visible.
 
 **Routing — carrying the identity through admission**
 
@@ -281,10 +312,20 @@ the same request.
   pointer. A cached promoted-version answer MUST NOT be used to authorize a pin, because FR-457's
   assertion is about what is promoted *now*; serving a pin from a stale cache authorizes a version
   the platform may have already demoted.
-- **FR-457c**: An **unpinned** request MAY resolve from a bounded-staleness cache. Its tolerance
-  comes from what the tenant asked for: "the current model" is answered truthfully by naming the
-  version actually served (FR-458), whereas a pin is a claim about the pointer itself. The staleness
-  bound MUST be stated, and it is the cache TTL — **not** eager invalidation.
+- **FR-457c**: An **unpinned** request MAY resolve from a bounded-staleness cache **only when the
+  resolved identity is already resident**. Its tolerance comes from what the tenant asked for: "the
+  current model" is answered truthfully by naming the version actually served (FR-458), whereas a pin
+  is a claim about the pointer itself. The staleness bound MUST be stated, and it is the cache TTL —
+  **not** eager invalidation.
+- **FR-457e**: A resolution that would cause a **placement** MUST be revalidated against a fresh read
+  of the promotion pointer before admission, cached or not. Serving a stale-but-resident version is a
+  truthful answer about a slightly older model; **loading** one is the platform putting an
+  unpromoted version into VRAM on tenant traffic, which is precisely what 022's gated promotion
+  exists to prevent. Reporting the served version truthfully does not repair that — the placement
+  already happened.
+- **FR-457f**: The revalidation in FR-457e costs one registry read per **placement**, not per
+  request. Placements are rare relative to requests, so the cache keeps its purpose: the common case
+  is a resident model requested repeatedly, and that path is unchanged.
 - **FR-457d**: The specification MUST NOT rely on eager invalidation from the gateway's promotion
   path as the freshness mechanism. The `serving` alias has writers outside it —
   `scripts/retag_serving_llm.py`, `scripts/seed_asr_model.py`, `scripts/seed_embedding_model.py`,
@@ -396,7 +437,11 @@ the same request.
 - **SC-209**: An alternating two-model workload that cannot co-fit performs **at most one eviction of
   a given model per minimum-residency period**, however many requests arrive — so the cycle count is
   set by the configured period, not by request volume. Requests refused during a period carry a
-  `Retry-After` that, if honored, succeeds on the first retry.
+  `Retry-After` that, if honored, succeeds on the first retry **when no competing traffic arrives in
+  the interval**. That qualifier is not a weakening: `Retry-After` is a lower bound (FR-456a), it
+  says when the *window* stops being the obstacle, and no bound stated by one tenant can promise
+  what another tenant's traffic will do. A criterion asserting unconditional first-retry success
+  would be asserting something the system cannot deliver.
 - **SC-210**: No documentation in the repository states that `model` selects nothing once this
   increment ships.
 - **SC-211**: Under the heaviest co-residency the platform admits, measured host RAM stays within
