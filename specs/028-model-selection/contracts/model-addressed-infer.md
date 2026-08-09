@@ -33,6 +33,7 @@ test that exists to catch exactly this kind of surface growth.
 | `model_key` names a non-resident model, Phase 2+, **no placement authorization** | refuse `not_resident` — **never** auto-admit (FR-474) |
 | `model_key` names a non-resident model, Phase 2+, **with a valid placement authorization** | `Coordinator.admit_serving(model_key, est_bytes)`, then serve (FR-451–FR-454) |
 | placement authorization present but lapsed, or naming a different version | refuse; do **not** treat a lapsed authorization as still good (FR-474b) |
+| `model_key` names a model this engine cannot host | refuse — a routing error, not a placement one |
 
 ### Why placement is two-step
 
@@ -56,7 +57,6 @@ in different processes, so the alias can still move between steps 2 and 3. The g
 that matters: tenant traffic can never place a version resolved from a cache of arbitrary age — only
 one confirmed promoted within the authorization's validity. Claiming exactness here would be
 claiming a cross-process atomicity the design does not have.
-| `model_key` names a model this engine cannot host | refuse — a routing error, not a placement one |
 
 **`model_key` absent must keep working.** `gateway/app/routers/infer.py`,
 `gateway/app/platform_health.py`, and `training/flows/batch_infer.py` all call the engine today

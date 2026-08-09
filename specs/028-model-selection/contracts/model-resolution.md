@@ -1,33 +1,57 @@
 # Contract: Model Resolution
 
 **Owner**: `gateway/app/modelresolve.py` (new) · **Consumers**: `gateway/app/routers/broker_openai.py`
-· **Requirements**: FR-439–FR-445, FR-457, FR-457a, FR-461, FR-464
+· **Requirements**: FR-439–FR-445, FR-440a–FR-440c, FR-457–FR-457f, FR-461, FR-464, FR-475–FR-475b
 
 Resolution turns the request's `model` string into a `ResolvedModel` or a refusal. It runs **before**
 any call to the host agent, so a refusal here costs no GPU work.
+
+## The linearization point
+
+Everything below is read against **FR-475**: a version is "current" for an operation **iff it was the
+promoted version at that operation's authorizing read**. Three reads, three bounds —
+
+| operation | authorizing read | staleness |
+|---|---|---|
+| **pinned** request | read-through, immediately before the decision (FR-457b) | none beyond the read itself |
+| **placement** | fresh revalidation issuing the authorization (FR-457e) | bounded by the authorization's validity (FR-474b) |
+| **unpinned, already-resident** request | the cached read (FR-457c) | bounded by the TTL (FR-440) |
+
+Nothing here claims currency at a later instant. An earlier revision of this contract did — see the
+grammar note below.
 
 ## Request grammar
 
 ```text
 model := ""                     ; absent or empty → the platform default (FR-444)
-       | <name>                 ; → that model's promoted serving version
-       | <name> ":" <version>   ; an ASSERTION that <version> is the promoted one (FR-457)
+       | <name>                 ; → the version promoted AT THE AUTHORIZING READ (FR-440, FR-475)
+       | <name> ":" <version>   ; an ASSERTION that <version> is promoted, checked by
+                                ; read-through immediately before the decision (FR-457, FR-457b)
 ```
 
-`<name>` is a registered model name. `<version>` is a registry version string.
+`<name>` is a registered model name. `<version>` is a run of decimal digits. **Parsing splits on the
+rightmost `:`** and accepts the suffix as a version only when it is all digits; otherwise the whole
+string is a bare name (FR-440a). A registered name that is still ambiguous under that rule — one
+ending in `:` followed by digits — is refused `model_name_ambiguous` (FR-440b).
+
+> **Corrected after the third PR #88 review.** This grammar previously read
+> `<name> ; → that model's promoted serving version`, unqualified, which contradicted FR-440's
+> TTL-bounded normative statement and FR-474c's admission that freshness is bounded. It also said a
+> tenant request *"can never place a version that 022's gated promotion path did not promote"* —
+> stronger than the design delivers. Both now reference the single linearization point.
 
 **The qualifier is an assertion, not a selection.** `support-assistant:3` means *"serve version 3, or
 tell me you can't"* — never *"load version 3"*. A tenant request can therefore never place a version
-that 022's gated promotion path did not promote, and 011's evaluation gate remains the only way a
-version becomes servable.
+that 022's gated promotion path had not promoted **at the request's authorizing read**, and 011's
+evaluation gate remains the only way a version becomes servable at all (FR-475b).
 
 ## Outcomes
 
 | input | outcome |
 |---|---|
 | `""` / absent | `ResolvedModel` for the platform default; response names what answered |
-| `<name>`, promoted, right modality | `ResolvedModel(name, promoted_version, modality, pinned=false)` |
-| `<name>:<v>` where `<v>` **is** the promoted version | `ResolvedModel(..., pinned=true)` |
+| `<name>`, promoted at the authorizing read, right modality | `ResolvedModel(name, promoted_version, modality, pinned=false)` — cache permitted only when the identity is already resident (FR-457c) |
+| `<name>:<v>` where `<v>` **is** promoted at read-through | `ResolvedModel(..., pinned=true)` — never answered from cache (FR-457b) |
 | `<name>:<v>` where `<v>` exists but is **not** promoted | `409 model_version_not_promoted`, body names the promoted version |
 | `<name>:<v>` where `<v>` does not exist | `404 model_version_not_found` |
 | `<name>` not registered | `404 model_not_found` |

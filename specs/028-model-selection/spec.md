@@ -211,11 +211,13 @@ the same request.
   states the same bound from the cache's side rather than granting a competing allowance. The system
   MUST also accept an explicit version qualifier, subject to FR-457, and MUST refuse a qualifier that
   names a version that does not exist.
-- **FR-440c**: The TTL bound in FR-440 is the **only** permitted staleness, and it applies solely to
-  *serving an already-resident* version. Any resolution that would cause a **placement** revalidates
-  fresh (FR-457e), and any **pinned** request reads through (FR-457b). An earlier revision stated
-  bare-name resolution as unqualified ("resolves to the promoted version") while FR-457c separately
-  permitted serving a stale-but-resident version; those were two policies, and this is one.
+- **FR-440c**: The TTL bound in FR-440 is the **only** permitted *cache* staleness, and it applies
+  solely to *serving an already-resident* version. Any resolution that would cause a **placement**
+  revalidates fresh (FR-457e), and any **pinned** request reads through (FR-457b). All three are
+  read against the single linearization point in **FR-475**: each is current as of its own
+  authorizing read, and none claims currency at a later instant. An earlier revision stated bare-name
+  resolution as unqualified ("resolves to the promoted version") while FR-457c separately permitted
+  serving a stale-but-resident version; those were two policies, and this is one.
 - **FR-440a**: The qualifier grammar MUST be **unambiguous for names that themselves contain `:`**.
   Parsing MUST split on the **rightmost** `:` and accept the suffix as a version only when it is a
   run of decimal digits; otherwise the entire string is a bare model name. Registry versions are
@@ -263,9 +265,11 @@ the same request.
 
 **Placement — making a named model resident**
 
-- **FR-451**: A resolved model that is promoted but not resident MUST be admitted if both
-  constitutional bounds allow — the accounted resident set plus reservations within the usable
-  budget, and the incoming load within live free VRAM less safety headroom.
+- **FR-451**: A resolved model that is promoted **at its authorizing revalidation** (FR-475) but not
+  resident MUST be admitted if both constitutional bounds allow — the accounted resident set plus
+  reservations within the usable budget, and the incoming load within live free VRAM less safety
+  headroom. The authorizing read may be relied upon for no longer than the authorization's validity
+  bound (FR-474b).
 - **FR-452**: When the model cannot be placed alongside current residents but would fit alone,
   admission MUST evict resident **serving** tenants by the idle-first / least-recently-used policy,
   draining each victim's in-flight requests before unloading it.
@@ -295,10 +299,11 @@ the same request.
   claim is governed by FR-455 (never preempted), which is strictly stronger; and a job's *release* is
   not an eviction.
 - **FR-457**: A version qualifier MUST be an **assertion, not a selection**. `name:version` is served
-  only when that version is the currently promoted serving version; a qualifier naming any other
-  registered version MUST be refused with a machine-readable code distinct from "version does not
-  exist". A tenant request therefore can never place a version that 022's gated promotion path did
-  not promote.
+  only when that version is the promoted serving version **at the pin's read-through** (FR-457b) —
+  the linearization point FR-475 defines, and the tightest bound available, since the read is
+  immediately before the decision. A qualifier naming any other registered version MUST be refused
+  with a machine-readable code distinct from "version does not exist". A tenant request therefore can
+  never place a version that 022's gated promotion path did not promote **at its authorizing read**.
 - **FR-457a**: The refusal in FR-457 MUST name the version that **is** promoted, so a client whose
   pin failed because promotion moved underneath it can tell that case apart from having pinned a
   version that was never promoted.
@@ -439,6 +444,35 @@ at FR-446–FR-450.*
   arbitrary age — only one confirmed promoted within the authorization's validity bound. The
   specification MUST state this limit rather than implying exactness.
 
+**The linearization point — what "current" means**
+
+- **FR-475**: The specification MUST define **exactly one linearization point** for promotion
+  currency, and every requirement that says "current", "currently promoted", or "only promoted" MUST
+  be read against it. That point is **the registry read that authorizes the operation**:
+  - for a **pinned** request, the read-through of FR-457b;
+  - for a **placement**, the fresh revalidation of FR-457e that issues the authorization;
+  - for an **unpinned, already-resident** request, the cached read, whose age is bounded by FR-440's
+    TTL.
+
+  A version is "current" for an operation **iff it was the promoted version at that operation's
+  authorizing read**. Nothing in this specification claims currency at any later instant, and no
+  requirement may be read as promising it.
+- **FR-475a**: Consequently the guarantees are **bounded, not instantaneous**, and MUST be stated
+  that way wherever they appear:
+  - FR-440/FR-440c — a bare name resolves to the version promoted at its authorizing read, whose age
+    is bounded by the TTL and which applies solely to serving an already-resident version.
+  - FR-457 — a pin is served iff the named version was promoted at its read-through, which is
+    immediately before the decision and is the tightest bound available.
+  - FR-451 — a placement admits the version promoted at its authorizing revalidation, relied upon for
+    no longer than the authorization's validity.
+  - The 022 dependency — a tenant request can place only a version that **was promoted at its
+    authorizing read**, never one resolved from a cache of arbitrary age.
+- **FR-475b**: This is a **statement of what the design achieves**, not a weakening of 022's gate.
+  The gate's property is that no version becomes servable without passing 011's evaluation gate, and
+  that is unaffected by when the pointer is read: an unpromoted version is never authorized at any
+  instant. What FR-475 bounds is only the staleness of a *promotion*, and a version promoted moments
+  ago being placed is the system working, not a violation.
+
 ### Key Entities
 
 - **Resolved model identity**: the `(name, version)` pair a request string resolves to, plus the
@@ -513,8 +547,10 @@ at FR-446–FR-450.*
   gated scope.
 - **022 Registry-Driven LLM Serving** — supplies the promotion pointer and the gated
   `POST /control/reload` path. FR-457 keeps that gate intact: a tenant request can place only a
-  promoted version, so tenant-initiated placement widens *when* a promoted model loads, never *what*
-  may load.
+  version that **was promoted at its authorizing read** (FR-475), so tenant-initiated placement
+  widens *when* a promoted model loads, never *what* may load. The gate's property — that no version
+  becomes servable without passing 011's evaluation gate — is unaffected by *when* the pointer is
+  read, because an unpromoted version is never authorized at any instant (FR-475b).
 - **The registry (MLflow)** must be reachable for resolution; FR-445 defines the behavior when it is
   not.
 
