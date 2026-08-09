@@ -1200,6 +1200,9 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
                 # non-hex token is equally unframeable. Neither can be counted against the limit,
                 # so neither is a 413. An EMPTY token is left alone deliberately: it is what a
                 # truncated stream yields at EOF, and it already terminates the read below.
+                #
+                # `set(token)` is a set of ints — iterating `bytes` yields ints in Python 3 — which
+                # is why `_HEX_DIGITS` is built from a bytes literal and the comparison lines up.
                 if token and not set(token) <= _HEX_DIGITS:
                     return _MALFORMED_LENGTH
                 size = int(token or b"0", 16)
@@ -1212,7 +1215,7 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
                 buf.extend(self.rfile.read(size))
                 self.rfile.readline(4)  # chunk-terminating CRLF
 
-        def _declared_length(self):
+        def _declared_length(self, limit: int):
             """The declared body length as a byte count, or `None` if it is not one.
 
             **`int()` is not a validation.** It accepts a sign, so `Content-Length: -1` parsed to
@@ -1230,11 +1233,28 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
 
             The check is ASCII-explicit rather than `str.isdigit()`, which is True for characters
             like `²` that `int()` then refuses — the same shape of gap one layer down.
+
+            **Digits are counted before anything is converted.** Python 3.11+ caps `int()` on
+            decimal strings at `sys.get_int_max_str_digits()` (4300 by default) and raises
+            `ValueError` beyond it, so an all-digit header long enough to clear the syntax check
+            could still blow up in the conversion. That landed worst on a protected route: `_deny`
+            asks `_declares_a_body()` *before* it writes the 401, so the exception escaped ahead of
+            the status and the client got a bare close — the non-numeric failure reintroduced one
+            layer along (Codex, review of #87).
+
+            A decimal with more digits than the limit itself cannot be under the limit, so it is
+            answered without conversion: saturate at `limit + 1`, the only two things this value is
+            ever compared against being the limit and zero. It is a well-formed number, so it earns
+            a 413 rather than being called malformed — and the widest string that ever reaches
+            `int()` is now as many digits as the limit has.
             """
             raw = (self.headers.get("Content-Length") or "0").strip()
             if not (raw.isascii() and raw.isdigit()):  # rejects "", "-1", "+1", "0x10", "1 2", "²"
                 return None
-            return int(raw)
+            digits = raw.lstrip("0") or "0"  # `000000000512` is 12 wide and names 512 bytes
+            if len(digits) > len(str(limit)):
+                return limit + 1
+            return int(digits)
 
         def _read_body(self):
             """(raw_bytes | None-when-too-large | `_MALFORMED_LENGTH`). Declared Content-Length
@@ -1244,7 +1264,7 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             limit = self._body_limit()
             if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
                 return self._read_chunked(limit)
-            length = self._declared_length()
+            length = self._declared_length(limit)
             if length is None:
                 return _MALFORMED_LENGTH
             if length > limit:
@@ -1270,14 +1290,15 @@ def make_handler(admission, journal, manager, jobs, policy=None, scheduler=None)
             """
             if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
                 return True
-            length = self._declared_length()
+            length = self._declared_length(self._body_limit())
             return length is None or length > 0
 
         def _answered_over_an_unread_body(self) -> None:
             """Tell the server this response went out over a body we deliberately did not read, so
             the close is deferred rather than resetting the status away (issue #85).
 
-            Announced rather than detected: both callers can answer from the headers alone, so the
+            Announced rather than detected: all three callers — the auth gate, the over-limit 413,
+            and the malformed-framing 400 — can answer from the headers alone, so the
             body may still be in flight when this runs and no amount of looking at the socket would
             see it.
 

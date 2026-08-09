@@ -475,6 +475,108 @@ def test_a_negative_length_cannot_smuggle_a_body_past_the_cap(monkeypatch):
         server.shutdown()
 
 
+def test_a_refused_request_with_a_malformed_length_still_keeps_its_401():
+    """The `_declares_a_body` half of this change, which the 400 tests above cannot reach.
+
+    They all go through `_do_post`'s malformed branch, which calls `_answered_over_an_unread_body()`
+    unconditionally — so none of them exercises `_declares_a_body`, which only matters inside
+    `_deny`. It used to return False for an unparseable length, so a refused request carrying one
+    had its 401 written and then reset away by the undrained close (#85). Found by review, not by
+    the tests that shipped with the change.
+
+    Headers first, ownership asserted before a body byte exists, body only afterwards — the same
+    shape as `test_a_protected_get_carrying_a_body_defers_its_401_close`.
+    """
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")           # no X-Agent-Key: refused at the gate
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "abc")    # unparseable: `_declares_a_body` used to say no
+        conn.endheaders()
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "handed over on the refusal, even though the length could not be parsed"
+
+        conn.send(b"x" * 8192)  # arrives only now — after the unmarked close would have happened
+        assert conn.getresponse().status == 401  # the gate's verdict, not a reset
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_length_too_long_to_convert_answers_instead_of_escaping():
+    """Python 3.11+ caps `int()` on decimal strings at `sys.get_int_max_str_digits()` — 4300 by
+    default — and raises `ValueError` past it. A 5,000-digit `Content-Length` is all ASCII digits,
+    so it clears a syntax check and then blows up in the conversion.
+
+    That lands worst on a protected route: `_deny` asks `_declares_a_body()` BEFORE it writes the
+    401, so the exception escaped the handler ahead of the status and the client got a bare close —
+    the same failure the non-numeric case had, reintroduced one layer along. (Codex, review of #87.)
+    """
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "1" * 5000)
+        conn.endheaders()
+        assert conn.getresponse().status == 401, "the gate answered; the conversion never ran"
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_an_unconvertibly_long_length_is_too_large_not_malformed(monkeypatch):
+    """Authenticated, so it reaches `_read_body`.
+
+    A decimal with more digits than the limit itself cannot be *under* the limit, so it is refused
+    as too large without being converted at all — nothing to trip the 4300-digit ceiling, and no
+    reason to call a perfectly well-formed number malformed. 413, not 400.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "9" * 5000)
+        conn.endheaders()
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 413 and "limit" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_leading_zeros_do_not_inflate_the_digit_count(monkeypatch):
+    """The digit-count shortcut compares against the limit's own width, so it has to strip leading
+    zeros first: `000000000512` is 12 digits against a 4-digit limit but names 512 bytes, which is
+    under it. Refusing that would turn a valid request into a 413 on formatting alone."""
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "000000000512")
+        conn.endheaders()
+        conn.send(b"{}" + b" " * 510)
+        r = conn.getresponse()
+        assert r.status != 413, "512 bytes is under the 1024 limit however it is spelled"
+        conn.close()
+    finally:
+        server.shutdown()
+
+
 def test_multipart_rides_the_larger_bound(monkeypatch):
     monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 512, raising=True)
     monkeypatch.setattr(agent_main, "AGENT_MAX_MULTIPART_BYTES", 1 << 20, raising=True)
