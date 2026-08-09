@@ -66,10 +66,14 @@ REGISTRY.describe("hostagent_jobs_interrupted_total", "counter",
 REGISTRY.describe("hostagent_wedged", "gauge",
                   "1 if a tenant is wedged (kill failed) and holds the GPU slot")
 # 023 US6 (T534, FR-321): bounded-cardinality transport/operation signals — labels are a fixed
-# vocabulary (method GET|POST; reason saturated|queue_timeout|too_large), never request-derived.
+# vocabulary (method GET|POST; reason saturated|queue_timeout|too_large|malformed_length), never
+# request-derived. `malformed_length` is deliberately one value rather than one per bad header: the
+# offending string is client-controlled, so labelling with it is exactly the unbounded cardinality
+# this vocabulary exists to prevent.
 REGISTRY.describe("hostagent_requests_total", "counter", "HTTP requests, by method")
 REGISTRY.describe("hostagent_requests_rejected_total", "counter",
-                  "Requests refused at the transport bound (saturated/queue_timeout/too_large)")
+                  "Requests refused at the transport bound "
+                  "(saturated/queue_timeout/too_large/malformed_length)")
 REGISTRY.describe("hostagent_request_seconds_sum", "counter",
                   "Total request handling seconds (with _count: average latency)")
 REGISTRY.describe("hostagent_request_seconds_count", "counter", "Requests measured for latency")

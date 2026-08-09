@@ -2,9 +2,11 @@
 
 Real `BoundedAgentServer` sockets on an ephemeral port over fake components. Pins: declared
 Content-Length over the route-class limit → immediate 413 with NO body read; counted chunked
-reads abort at the same limit; multipart rides the larger bound; authentication precedes body
-buffering (oversized + wrong key → the auth status, not 413); worker/queue saturation answers a
-minimal 503 (never an unbounded thread pile); graceful shutdown drains in-flight requests.
+reads abort at the same limit; a declared length that is not a byte count (negative, non-numeric,
+or a negative chunk size) is a 400 on the framing rather than a read to EOF that the limit cannot
+measure; multipart rides the larger bound; authentication precedes body buffering (oversized +
+wrong key → the auth status, not 413); worker/queue saturation answers a minimal 503 (never an
+unbounded thread pile); graceful shutdown drains in-flight requests.
 """
 import http.client
 import json
@@ -68,6 +70,36 @@ def _post(host, port, path, body: bytes, headers=None, timeout=10):
         return r.status, json.loads(r.read() or b"{}")
     finally:
         conn.close()
+
+
+def _raw(host, port, blob: bytes, tail: bytes = b"", timeout=5.0):
+    """Send exact bytes and return the raw response.
+
+    `http.client` is the right tool everywhere else in this file, but not for framing tests: an
+    empty or repeated header value is precisely the thing a client library is entitled to
+    normalize, so a test built on one would be asserting against the library's idea of the request
+    rather than the wire. `tail` goes out after a beat, for cases where the body must arrive after
+    the server has already answered.
+    """
+    s = socket.create_connection((host, port), timeout=timeout)
+    try:
+        s.sendall(blob)
+        if tail:
+            time.sleep(0.05)
+            s.sendall(tail)
+        s.settimeout(timeout)
+        chunks = []
+        try:
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                chunks.append(b)
+        except (socket.timeout, ConnectionResetError):
+            pass
+        return b"".join(chunks)
+    finally:
+        s.close()
 
 
 # --- body limits (T532, FR-317) -----------------------------------------------------------------------
@@ -370,6 +402,287 @@ def test_chunked_body_is_counted_and_aborted_at_the_limit(monkeypatch):
         r = conn.getresponse()
         assert r.status == 413
         conn.close()
+    finally:
+        server.shutdown()
+
+
+# --- malformed framing: lengths that are not byte counts (FR-317) --------------------------------
+
+def test_a_negative_content_length_is_refused_before_any_read(monkeypatch):
+    """Send NOTHING after the headers, exactly as `test_declared_oversize_json_is_413_before_any_read`
+    does: a server that refuses on the declaration answers at once, while one that reaches
+    `rfile.read(-1)` sits reading to EOF and answers nothing at all.
+
+    That is what this did before the fix — measured at 0 bytes back, and only after
+    `AGENT_IO_TIMEOUT_S` expired. The timeout is pulled down here so the FAILING direction costs a
+    second rather than thirty.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_IO_TIMEOUT_S", 1.0, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_non_numeric_content_length_answers_instead_of_killing_the_thread(monkeypatch):
+    """`int("abc")` raised straight out of `_read_body` and out of the handler, so the request
+    thread died with nothing on the wire and the client saw a bare close where a status belonged.
+
+    This one needs no timeout nudge: the old failure was immediate, not slow. What it pins is that
+    a status now exists at all.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_IO_TIMEOUT_S", 1.0, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "abc")
+        conn.endheaders()
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_negative_chunk_size_is_refused_before_any_read(monkeypatch):
+    """`int(b"-1", 16)` is -1, so the chunked reader had the identical hole one base up: the size
+    line passed the `total > limit` test and `read(-1)` ran to EOF."""
+    monkeypatch.setattr(agent_main, "AGENT_IO_TIMEOUT_S", 1.0, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Transfer-Encoding", "chunked")
+        conn.endheaders()
+        conn.send(b"-1\r\n")  # a size line that parses and then means "read to EOF"
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_negative_length_cannot_smuggle_a_body_past_the_cap(monkeypatch):
+    """The property the three above protect, and the reason this is a bug rather than an untidiness.
+
+    FR-317's ceiling is only a ceiling if the declared length is a byte count. It was not checked,
+    so a body under a negative declaration was read to EOF and the limit never ran: measured against
+    the real handler, **8 MiB landed in one buffer under the 1 MiB JSON limit** and came back a 400
+    from the JSON parser. The bound was the sender's bandwidth, not the route class.
+
+    Both directions answer 400, which is exactly why this asserts on WHICH 400 — a status-only
+    assertion is green against the defect and would not hold the fix in place.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        conn.send(b"x" * 8192)  # 8x the limit, and declared as nothing the limit can measure
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 400 and "byte count" in body["error"], \
+            "refused on the framing — not parsed, which is how the 8 KiB used to get in"
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_refused_request_with_a_malformed_length_still_keeps_its_401():
+    """The `_declares_a_body` half of this change, which the 400 tests above cannot reach.
+
+    They all go through `_do_post`'s malformed branch, which calls `_answered_over_an_unread_body()`
+    unconditionally — so none of them exercises `_declares_a_body`, which only matters inside
+    `_deny`. It used to return False for an unparseable length, so a refused request carrying one
+    had its 401 written and then reset away by the undrained close (#85). Found by review, not by
+    the tests that shipped with the change.
+
+    Headers first, ownership asserted before a body byte exists, body only afterwards — the same
+    shape as `test_a_protected_get_carrying_a_body_defers_its_401_close`.
+    """
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")           # no X-Agent-Key: refused at the gate
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "abc")    # unparseable: `_declares_a_body` used to say no
+        conn.endheaders()
+
+        deadline = time.monotonic() + 5
+        pending = []
+        while time.monotonic() < deadline:
+            with server._linger_lock:
+                pending = list(server._lingering)
+            if pending:
+                break
+            time.sleep(0.002)
+        assert pending, "handed over on the refusal, even though the length could not be parsed"
+
+        conn.send(b"x" * 8192)  # arrives only now — after the unmarked close would have happened
+        assert conn.getresponse().status == 401  # the gate's verdict, not a reset
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_a_length_too_long_to_convert_answers_instead_of_escaping():
+    """Python 3.11+ caps `int()` on decimal strings at `sys.get_int_max_str_digits()` — 4300 by
+    default — and raises `ValueError` past it. A 5,000-digit `Content-Length` is all ASCII digits,
+    so it clears a syntax check and then blows up in the conversion.
+
+    That lands worst on a protected route: `_deny` asks `_declares_a_body()` BEFORE it writes the
+    401, so the exception escaped the handler ahead of the status and the client got a bare close —
+    the same failure the non-numeric case had, reintroduced one layer along. (Codex, review of #87.)
+    """
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "1" * 5000)
+        conn.endheaders()
+        assert conn.getresponse().status == 401, "the gate answered; the conversion never ran"
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_an_unconvertibly_long_length_is_too_large_not_malformed(monkeypatch):
+    """Authenticated, so it reaches `_read_body`.
+
+    A decimal with more digits than the limit itself cannot be *under* the limit, so it is refused
+    as too large without being converted at all — nothing to trip the 4300-digit ceiling, and no
+    reason to call a perfectly well-formed number malformed. 413, not 400.
+    """
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "9" * 5000)
+        conn.endheaders()
+        r = conn.getresponse()
+        body = json.loads(r.read())
+        assert r.status == 413 and "limit" in body["error"]
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_leading_zeros_do_not_inflate_the_digit_count(monkeypatch):
+    """The digit-count shortcut compares against the limit's own width, so it has to strip leading
+    zeros first: `000000000512` is 12 digits against a 4-digit limit but names 512 bytes, which is
+    under it. Refusing that would turn a valid request into a 413 on formatting alone."""
+    monkeypatch.setattr(agent_main, "AGENT_MAX_JSON_BYTES", 1024, raising=True)
+    server, host, port, _ = _server()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.putrequest("POST", "/jobs")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", "000000000512")
+        conn.endheaders()
+        conn.send(b"{}" + b" " * 510)
+        r = conn.getresponse()
+        assert r.status != 413, "512 bytes is under the 1024 limit however it is spelled"
+        conn.close()
+    finally:
+        server.shutdown()
+
+
+def test_an_empty_content_length_is_not_an_absent_one():
+    """`or "0"` collapsed the two, so `Content-Length:` with no value became `"0"` before the
+    syntax check could see it — and the comment claiming to reject `""` described a branch nothing
+    reached.
+
+    Measured on the unfixed tree, an empty declaration answered **byte-identically to no
+    declaration at all** (`unknown job kind None` either way): the 40 bytes sent after the headers
+    were never read, and `_declares_a_body()` said no, so the deferral was skipped too. Asserting
+    on which 400 arrives is therefore the whole test — the status is 400 either way, because a
+    `/jobs` POST with an empty body is also a 400.
+    """
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length:\r\n\r\n" + b"G" * 40)
+        assert b"400" in data.split(b"\r\n")[0]
+        assert b"byte count" in data, \
+            "refused on the framing, not answered as though no body had been declared"
+    finally:
+        server.shutdown()
+
+
+def test_conflicting_content_length_headers_are_refused():
+    """Two `Content-Length` headers used to mean first-wins: `5` then `40` read 5 bytes and left 35
+    in the buffer, answering `invalid JSON` over the fragment it happened to take.
+
+    A front end that honours the last value would then disagree with this server about where the
+    request ends, which is the shape request smuggling takes. Found while confirming the empty-value
+    case above, not reported. RFC 9110 8.6 says reject.
+    """
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 5\r\nContent-Length: 40\r\n\r\n" + b"G" * 40)
+        assert b"400" in data.split(b"\r\n")[0] and b"byte count" in data
+    finally:
+        server.shutdown()
+
+
+def test_a_repeated_identical_content_length_is_not_a_conflict():
+    """The guard is about disagreement, not repetition. The same value twice names one request
+    boundary, so refusing it would turn a legal-if-odd message into a framing error."""
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}")
+        assert b"byte count" not in data, "identical repeats agree about where the body ends"
+    finally:
+        server.shutdown()
+
+
+def test_an_absent_content_length_still_means_no_body():
+    """The other half of splitting absent from empty: a POST with no `Content-Length` at all is not
+    a framing error, it is a request with no body, and it must stay one."""
+    server, host, port, _ = _server()
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n")
+        assert b"byte count" not in data, "no declaration is not a malformed declaration"
+    finally:
+        server.shutdown()
+
+
+def test_a_refused_request_with_an_empty_length_keeps_its_401():
+    """The auth-gate half, which is where the collapsed empty value actually cost something: the
+    401 goes out over 8 KiB still in flight, and `_declares_a_body()` returning False skipped the
+    deferral that keeps the close from resetting the status away (#85)."""
+    server, host, port, _ = _server(policy=auth.AgentAuthPolicy(KEY))
+    try:
+        data = _raw(host, port,
+                    b"POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length:\r\n\r\n", tail=b"G" * 8192)
+        assert b"401" in data.split(b"\r\n")[0], "the gate's verdict survived the unread body"
     finally:
         server.shutdown()
 
