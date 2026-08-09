@@ -30,16 +30,45 @@ report **why** it came back empty rather than returning a bare `[]`:
 | `None` | victims found | proceed to eviction |
 | `insufficient` | even evicting everything eligible does not satisfy both bounds | `413 model_too_large` if `est_bytes > capacity − headroom`, else `503 gpu_busy` |
 | `transient` | candidates exist but are draining/evicting/unmaterialized | `503 gpu_busy`, generic `Retry-After` |
-| `residency_window` | a sufficient set exists but is inside its window | `503 gpu_busy`, `Retry-After` = remaining time on the **earliest** sufficient victim's window |
+| `residency_window` | a sufficient set exists but is inside its window | `503 gpu_busy`, `Retry-After` = when a **sufficient set** first becomes eligible — see below |
 
 The last row is the one that would be silently lost if `_select_victims` kept returning a bare `[]` —
 and losing it turns a client that retries once into a client that polls.
 
+## Computing `retry_after_s` — a set property, not a victim property
+
+**An earlier revision of this contract said "remaining time on the earliest sufficient victim's
+window." That is wrong** whenever a placement needs more than one victim, and it fails in the
+direction that costs the most: the client is told to come back too early, is refused again, and the
+"retry once and succeed" property this whole mechanism exists to provide is lost.
+
+Eviction is cumulative — victims free VRAM together. A set of victims is unusable until the **last**
+of them leaves its window. So the value is:
+
+```text
+retry_after_s = min over sufficient sets S of ( max over v in S of expiry(v) ) − now
+```
+
+Computed against the same greedy the evictor itself uses, so the answer is consistent with what the
+evictor would actually pick: walk the eligible-ignoring-window list in the evictor's order
+(idle-first, then LRU), accumulating freed bytes; take the **shortest prefix** that satisfies both
+bounds; `retry_after_s` is the latest window expiry within that prefix.
+
+The shortest sufficient prefix is also the one minimising the maximum expiry **among prefixes**,
+because prefixes are nested and their maximum is non-decreasing as they extend. A non-prefix set
+could in principle expire sooner, but the evictor does not consider non-prefix sets, so promising one
+would name a time at which the evictor still would not act.
+
+**Worked case.** Victims A, B, C with windows expiring in 10 s, 20 s, 30 s; the placement needs all
+three. The old rule answered 10 s and the retry failed twice. The rule above answers 30 s, and the
+retry succeeds on the first attempt.
+
 ## `Retry-After` is a lower bound, honestly labelled
 
-The value says **when the window expires**, not when the eviction will happen. Another tenant's
-traffic may keep the model busy past that point. Promising the eviction would be promising something
-no other tenant agreed to; the contract promises only that the *window* is no longer the obstacle.
+The value says **when the window stops being the obstacle**, not when the eviction will happen.
+Another tenant's traffic may keep a victim busy past that point. Promising the eviction would be
+promising something no other tenant agreed to; the contract promises only that the *window* is no
+longer what is blocking.
 
 ## What the window does not touch
 
@@ -63,8 +92,13 @@ from a regression in the window.
 1. A model resident for less than the window is not selected as a victim, even when it is idle and
    is the LRU candidate.
 2. A placement blocked **only** by the window returns `gpu_busy` with `Retry-After` equal to the
-   remaining window time, within tolerance — asserted on the number, not merely on its presence.
-3. Honouring that `Retry-After` and retrying once succeeds.
+   computed set-eligibility time, within tolerance — asserted on the number, not merely on its
+   presence.
+2a. **The multi-victim case explicitly**: a placement needing three victims whose windows expire at
+   10 s / 20 s / 30 s returns **30**, not 10. This is the case the earlier single-victim rule got
+   wrong, so a test that only ever needs one victim would pass against the defect.
+3. Honouring that `Retry-After` and retrying once succeeds — for the multi-victim case as well as
+   the single-victim one.
 4. An alternating two-model workload over N windows performs ≤ N evictions, not one per request
    (SC-209).
 5. `min_residency_s = 0` reproduces 026's victim selection exactly — the characterization suite

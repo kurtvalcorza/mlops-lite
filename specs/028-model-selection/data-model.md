@@ -81,7 +81,7 @@ different things (research R4). It returns a small record instead:
 |---|---|---|
 | `victims` | list[ResidentModel] | non-empty when a sufficient set was found |
 | `blocked_by` | str \| None | `None`, `"insufficient"`, `"transient"`, or `"residency_window"` |
-| `retry_after_s` | float \| None | set only for `residency_window`: time remaining on the earliest sufficient victim's window |
+| `retry_after_s` | float \| None | set only for `residency_window`: `min over sufficient sets S of (max expiry in S)` — when a **sufficient set** first becomes eligible, **not** when the earliest protected victim does. See [contracts/residency-window.md](./contracts/residency-window.md) |
 
 This is what makes FR-456a implementable. Without `blocked_by`, a request blocked purely by the
 window is indistinguishable at the call site from one blocked because the GPU is genuinely too small,
@@ -102,13 +102,41 @@ Alongside `safety_headroom_bytes`, `drain_timeout_s`, `job_drain_timeout_s`,
 | added | type | default | notes |
 |---|---|---|---|
 | `min_residency_s` | float | see `quickstart.md` | 0 disables the window and restores exact 026 eviction behaviour — which is what the Phase-2 characterization tests set it to |
-| `host_ram_budget_bytes` | float | see `quickstart.md` | FR-467. Checked as an admission **precondition**, alongside the two VRAM bounds |
+| `host_ram_budget_bytes` | float | calibrated by T817 | FR-467/FR-470. Platform RAM allowance less the measured idle-infrastructure baseline |
+| `host_ram_estimate_bytes` | float | per-adapter default + per-model override | FR-469. The incoming child's estimate — mirrors the existing per-adapter `estimate_vram()` |
 
-**Why host RAM is a precondition and VRAM is reconciled.** The coordinator admits on a VRAM estimate
-and corrects it against a real post-load reading, because an over-estimate merely refuses a load that
+### The host-RAM bound, stated completely
+
+An earlier revision named a budget but defined neither the incoming estimate nor what is summed
+against it, which left FR-467 with no left-hand side. Both are now fixed:
+
+```text
+Σ accounted host RAM of resident serving children
+  + Σ outstanding host-RAM reservations
+  + host_ram_estimate_bytes(incoming)
+  ≤ host_ram_budget_bytes
+```
+
+**One bound, not two.** The VRAM rule has a usable-budget bound *and* a live-free bound. Host RAM has
+only the budget analogue: there is no device-reported "free host RAM" figure that is meaningful across
+memory-mapped children, so a second bound would be arithmetic on a number that does not mean what it
+appears to (FR-470).
+
+**Measured as PSS, never RSS** (FR-471). The llama.cpp child `mmap`s its GGUF. Two children sharing
+page-cache pages each report those pages in full, so summing RSS over-counts real usage and a bound
+built on it would refuse placements that comfortably fit. Proportional set size attributes each
+shared page once. Where PSS is unavailable the fallback subtracts shared file-backed pages and is
+**recorded as a fallback**, because the two are not interchangeable.
+
+**Why it is a precondition and VRAM is reconciled.** The coordinator admits on a VRAM estimate and
+corrects it against a real post-load reading, because an over-estimate merely refuses a load that
 would have fit. Host RAM has no such symmetry: once a child has allocated it, the coordinator cannot
-reclaim it — there is no unload-and-retry that gives it back within the request. So the host-RAM
-check refuses *before* the spawn, and refuses transiently (`gpu_busy`), never permanently.
+reclaim it — no unload-and-retry gives it back within the request. So the check refuses *before* the
+spawn, and refuses transiently (`gpu_busy`), never permanently.
+
+**It is still reconciled afterwards** (FR-472) — not to help the request that just ran, which is
+past helping, but so the *next* admission decides against a measured number instead of an estimate
+already proven wrong.
 
 Documented in `.specify/memory/hardware-profile.md` with the other admission tunables, since that is
 where 026's tunables were recorded after the Codex review.
@@ -119,16 +147,39 @@ where 026's tunables were recorded after the Codex review.
 
 Today: `{id, object, owned_by, version}`, filtered on `serving_version` alone.
 
-| field | change |
-|---|---|
-| `id` | unchanged — the registered model name |
-| `version` | unchanged — the promoted serving version |
-| `modality` | **added**; the listing is filtered to the surface's modality (FR-461) |
-| `resident` | **added**; whether it is currently in VRAM (FR-462) |
+**`GET /v1/models` is a single global endpoint.** `gateway/app/routers/broker_openai.py` declares
+exactly one, alongside `POST /chat/completions`, `POST /embeddings`,
+`POST /audio/transcriptions`, `POST /vision/{task}`, and `GET /usage`. An earlier revision of this
+document said the listing is "filtered to the surface's modality" — **there is no per-surface
+listing for that to mean anything against**. The listing spans modalities and tags each entry
+instead (FR-461).
 
-`resident` is advisory and may be stale by the time a request arrives. It exists so a client can
-*prefer* a resident model, not so it can rely on one — and it must be labelled that way, or it
-becomes a promise the platform did not make.
+| field | change | source |
+|---|---|---|
+| `id` | unchanged — the registered model name | registry |
+| `version` | unchanged — the promoted serving version | registry |
+| `modality` | **added**; tags the entry, does not filter the listing (FR-461) | registry (`_resolve_engine`) |
+| `resident` | **added**; whether it is currently in VRAM (FR-462) | **host agent** — see below |
+
+### `resident` comes from the agent, never the registry
+
+The registry knows what is **promoted**. It knows nothing about what is **loaded**.
+`gateway/app/routers/infer.py` states the rule and names the failure it prevents: *"the agent is the
+only component that knows what is actually resident"*, established by 022 FR-260/261/262 after the
+divergence where a response said `model: ops-bot-v2` while the prediction logged
+`registry_model: qwen…`.
+
+So the listing is a **join**: registry for identity, the agent's resident set for `resident`. An
+earlier revision of this document put the field on `registry.list_models()`, which reintroduces
+exactly the shape 022 closed.
+
+**When the agent is unreachable the field is omitted** (FR-462a) — not defaulted to `false`, not
+inferred from the promotion pointer. A listing that reports residency it did not observe is the same
+untruth, one field over, as a response that reports a model it did not serve.
+
+`resident` is advisory even when present: it may be stale by the time a request arrives. It exists so
+a client can *prefer* a resident model, not so it can rely on one — and it must be labelled that way,
+or it becomes a promise the platform did not make.
 
 ---
 

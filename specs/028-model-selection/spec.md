@@ -257,8 +257,10 @@ the same request.
   idle it is.
 - **FR-456a**: A placement that could only proceed by evicting a model still inside its minimum
   residency period MUST be refused with the **transient** `gpu_busy` code, and its `Retry-After` MUST
-  be derived from the remaining time on that period — so the refusal tells the client when the
-  request would actually succeed rather than offering a generic backoff.
+  be the earliest time at which a **sufficient victim set** becomes eligible — not the earliest time
+  at which any single protected victim becomes eligible. When a placement needs several victims to
+  free enough VRAM, the set is not evictable until the **last** of them leaves its window, so a value
+  taken from the earliest sends the client back to be refused again.
 - **FR-456b**: The minimum residency period MUST bound eviction rate independently of the request
   pattern: a given resident model MUST NOT be evicted more than once per period, regardless of how
   many tenants request a competing model or in what order. This is the property that makes an
@@ -275,6 +277,19 @@ the same request.
 - **FR-457a**: The refusal in FR-457 MUST name the version that **is** promoted, so a client whose
   pin failed because promotion moved underneath it can tell that case apart from having pinned a
   version that was never promoted.
+- **FR-457b**: A **pinned** request MUST be validated against a **fresh** read of the promotion
+  pointer. A cached promoted-version answer MUST NOT be used to authorize a pin, because FR-457's
+  assertion is about what is promoted *now*; serving a pin from a stale cache authorizes a version
+  the platform may have already demoted.
+- **FR-457c**: An **unpinned** request MAY resolve from a bounded-staleness cache. Its tolerance
+  comes from what the tenant asked for: "the current model" is answered truthfully by naming the
+  version actually served (FR-458), whereas a pin is a claim about the pointer itself. The staleness
+  bound MUST be stated, and it is the cache TTL — **not** eager invalidation.
+- **FR-457d**: The specification MUST NOT rely on eager invalidation from the gateway's promotion
+  path as the freshness mechanism. The `serving` alias has writers outside it —
+  `scripts/retag_serving_llm.py`, `scripts/seed_asr_model.py`, `scripts/seed_embedding_model.py`,
+  and `scripts/seed_tabular_model.py` all call `set_registered_model_alias` directly. Eager
+  invalidation is an optimization for one writer; the TTL is the guarantee.
 
 **Truthfulness — the response and the listing**
 
@@ -284,11 +299,25 @@ the same request.
   non-streaming response, on its chunks and its terminal event.
 - **FR-460**: A response MUST NOT echo the caller's request string as its `model` field when the
   request was answered by anything other than that model.
-- **FR-461**: `GET /v1/models` MUST list exactly the identities a request may select on the surfaces
-  this platform exposes, and MUST NOT list a name whose every request would be refused as unknown,
-  unpromoted, or wrong-modality.
+- **FR-461**: `GET /v1/models` is a **single global endpoint** — the platform exposes exactly one,
+  not one per modality. It MUST therefore list the selectable identities across **all** modalities
+  and MUST tag each entry with the modality it is promoted for, so a client can choose one that the
+  endpoint it intends to call will accept. It MUST NOT list a name whose every request would be
+  refused as unknown or unpromoted. It MUST NOT be "filtered to the surface's modality" — there is
+  no per-surface listing for that phrase to mean anything against.
+- **FR-461a**: Because the listing spans modalities while each inference endpoint serves one, a name
+  that is valid in the listing may still be refused `model_wrong_modality` (FR-443) by a given
+  endpoint. The modality tag is what lets a client avoid that, and the listing's documentation MUST
+  say so rather than implying every listed id is valid everywhere.
 - **FR-462**: `GET /v1/models` MUST indicate each listed model's current residency, so a client can
-  prefer a resident model and avoid provoking an eviction it does not need.
+  prefer a resident model and avoid provoking an eviction it does not need. **Residency MUST be
+  sourced from the host agent**, which is the only component that knows what is actually resident
+  (022 FR-260/261/262; `gateway/app/routers/infer.py` states this and names the pre-022 divergence
+  it prevents). It MUST NOT be derived from the registry, which knows what is *promoted* and nothing
+  about what is loaded.
+- **FR-462a**: When the agent cannot be reached, the residency field MUST be **omitted** rather than
+  defaulted, guessed, or inferred from the promotion pointer. A listing that reports residency it
+  did not observe is the same class of untruth this increment exists to remove.
 
 **Observability and accounting**
 
@@ -313,6 +342,26 @@ the same request.
 - **FR-468**: The host-RAM figure the bound is checked against MUST be **measured**, not assumed —
   recorded for one resident child and for the co-resident case, so the bound is calibrated against
   the platform's real footprint rather than an estimate.
+- **FR-469**: The **incoming model's host-RAM estimate** MUST be defined, not left implicit. It is a
+  per-adapter default (mirroring the existing `estimate_vram()` per-adapter constant) with a
+  per-model override, calibrated from FR-468's measurements. Without a defined estimate FR-467's
+  precondition has no left-hand side and cannot be implemented.
+- **FR-470**: The **accounting equation** MUST be stated:
+  `Σ accounted host RAM of resident serving children + Σ outstanding host-RAM reservations +
+  incoming estimate ≤ host_ram_budget_bytes`, where the budget is the platform's RAM allowance less
+  the measured idle-infrastructure baseline (Principle III's ~3 GB). This mirrors the VRAM
+  usable-budget bound; there is deliberately **no** second live-free-style bound, because host RAM
+  has no equivalent of a device-reported free figure that is meaningful across mmap'd children.
+- **FR-471**: The **measurement basis** MUST be proportional set size (PSS), or an equivalent that
+  attributes shared pages once. Resident set size (RSS) MUST NOT be used as the basis: the llama.cpp
+  child memory-maps its GGUF, so two children sharing page-cache pages each report those pages in
+  full and their RSS sum over-counts real usage — a bound built on RSS would refuse placements that
+  fit. Where PSS is unavailable, the fallback MUST subtract shared file-backed pages and MUST be
+  recorded as a fallback.
+- **FR-472**: After a child spawns, its accounted host RAM MUST be **reconciled to the measured
+  value**. Unlike VRAM this cannot reclaim anything for the request that just ran — the point is
+  that the *next* admission decides against a real number rather than against an estimate that has
+  already been proven wrong.
 
 ### Key Entities
 

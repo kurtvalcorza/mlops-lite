@@ -58,8 +58,31 @@ operator. Without that, a well-behaved client retries forever against a moved po
 
 ## Caching
 
-`name → (version, modality)` is cached with a bounded TTL and invalidated eagerly by
-`registry.promote`, which runs in the same process.
+The cache is **split by volatility**, because the two halves of a resolution have different
+correctness requirements:
+
+| cached | volatility | policy |
+|---|---|---|
+| `name → modality` | a model's modality does not change | cacheable, long TTL |
+| `name → promoted version` | moves whenever the `serving` alias moves | **never used to authorize a pin**; short TTL for unpinned only |
+
+**A pinned request always reads through (FR-457b).** `name:version` asserts something about the
+pointer *now* — "serve version 3, or tell me you can't". Answering that from a cache can authorize a
+version the platform has already demoted, which is precisely what FR-457 exists to prevent. The
+read-through cost lands only on pinned requests, which are the rare ones.
+
+**An unpinned request may be answered from cache (FR-457c)**, bounded by the TTL. The tolerance is
+not laxity: the tenant asked for "the current model", and FR-458 requires the response to name the
+version that actually answered — so a slightly stale resolution produces a truthful answer about a
+slightly older model, never a false claim about a newer one.
+
+**Eager invalidation is an optimisation, not the guarantee (FR-457d).** An earlier revision of this
+contract leaned on `registry.promote` invalidating in-process and called out-of-band alias moves
+"unusual". They are not — the repo ships four scripts that move the alias directly:
+`scripts/retag_serving_llm.py:49`, `scripts/seed_asr_model.py:33`,
+`scripts/seed_embedding_model.py:52`, `scripts/seed_tabular_model.py:78`, none of which passes
+through `registry.promote`. Eager invalidation therefore covers **one of five** writers. **The TTL is
+the staleness bound**, and it must be documented as such.
 
 **Only successful resolutions are cached.** A tenant-supplied string that resolves to nothing must
 never create an entry — the key space would then be attacker-controlled and unbounded. This is the
@@ -83,3 +106,10 @@ time series per string any client has ever sent.
 3. A failed resolution does not grow the cache.
 4. Every row runs in **both** positions of `BROKER_COORDINATOR_ADMISSION` (research R7). The default
    is off, and the default is what an operator has.
+5. **The stale-pin case.** Resolve `name:3` (promoted, cached), move the alias to version 4 **without
+   going through `registry.promote`** — as `scripts/retag_serving_llm.py` does — then request
+   `name:3` again *within the TTL*. It must refuse `model_version_not_promoted` naming 4. A test that
+   moves the alias via `registry.promote` exercises the eager-invalidation path and would pass
+   against the defect.
+6. The unpinned counterpart of the same setup may serve the stale version, and its response must name
+   the version it served — never the newly promoted one it did not.

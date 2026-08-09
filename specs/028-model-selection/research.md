@@ -103,12 +103,21 @@ config alongside `safety_headroom_bytes`, `drain_timeout_s`, `job_drain_timeout_
 |---|---|---|
 | even evicting everything eligible is not enough | `413 model_too_large` if it exceeds `capacity − headroom`, else `503 gpu_busy` | correct |
 | every candidate is `draining`/`evicting`/not materialized | `503 gpu_busy`, generic `Retry-After` | correct |
-| **candidates exist and would suffice, but are inside their window** | `503 gpu_busy`, `Retry-After` = **time remaining on the earliest sufficient victim's window** | would fall through to the generic path |
+| **candidates exist and would suffice, but are inside their window** | `503 gpu_busy`, `Retry-After` = **when a sufficient victim *set* becomes eligible** (corrected — see below) | would fall through to the generic path |
 
 So `_select_victims` must report *why* it returned empty — not merely that it did. FR-456a's
-"`Retry-After` derived from the remaining window" is unimplementable otherwise, and a generic
-backoff here is not a cosmetic loss: it is the difference between a client that retries once
-successfully and one that polls.
+computed `Retry-After` is unimplementable otherwise, and a generic backoff here is not a cosmetic
+loss: it is the difference between a client that retries once successfully and one that polls.
+
+> **Correction, PR #88 review (finding 2).** This item originally specified `Retry-After` as the
+> *"time remaining on the earliest sufficient victim's window"*. **That is wrong whenever a placement
+> needs more than one victim.** Eviction is cumulative, so a victim set is unusable until the **last**
+> of its members leaves its window; taking the earliest sends the client back too soon, it is refused
+> again, and the retry-once-and-succeed property the whole mechanism exists for is lost. The correct
+> value is `min over sufficient sets S of (max expiry in S)`, evaluated over the evictor's own greedy
+> order so the answer matches what the evictor would actually pick. Worked in
+> [contracts/residency-window.md](./contracts/residency-window.md); pinned by T797a, which fails
+> against the old rule.
 
 **Alternatives considered**: (a) Reusing `last_used_at` as the window start — rejected, it is
 touched on every request, so a busy model would be permanently protected and an idle one immediately
@@ -126,21 +135,39 @@ with a race.
 (`broker_openai.py:193`) filters on `serving_version` alone, which is why it advertises embedding and
 vision models on a surface whose only endpoint is chat.
 
-**Decision**: Enrich the listing with the resolved engine/modality and current residency, and filter
-per surface. FR-443's wrong-modality refusal and FR-461's "lists exactly what is selectable" are the
-same fact viewed from the two ends.
+**Decision (revised)**: Tag each entry with its engine/modality and join residency **from the host
+agent**. Do **not** filter per surface.
+
+> **Correction, PR #88 review (finding 3).** The original said "filter per surface". There is only
+> **one** `/v1/models` endpoint — verified against the router's decorators — so "the surface's
+> modality" names nothing. The listing spans modalities and tags each entry, and FR-461a states that
+> a listed id may still be refused `model_wrong_modality` by a given endpoint, which is what the tag
+> is for. The same review caught that residency was sourced from `registry.list_models()`; the
+> registry knows what is *promoted*, not what is *loaded*, and `gateway/app/routers/infer.py` is
+> explicit that the agent is the only component that knows. FR-462/FR-462a move it to the agent and
+> require the field omitted when the agent is unreachable.
 
 ---
 
 ## R6 — Resolution caching
 
-**Decision**: Cache `name → (version, modality)` with a short bounded TTL, invalidated eagerly by the
-promotion path (`registry.promote`, `registry.py:117`) which already runs in-process in the gateway.
+**Decision (revised — see the correction below)**: Split the cache by volatility. `name → modality`
+is cacheable with a long TTL. `name → promoted version` is served from cache **only for unpinned
+requests**, bounded by a short TTL; a **pinned** request always reads through.
 
-**Rationale**: Resolution is on the per-request path. An MLflow round-trip per chat request is a real
-latency cost for the common case (a resident model, repeatedly requested). Eager invalidation on
-promotion means the TTL bounds only the *unusual* staleness — an out-of-band alias move — not the
-normal one.
+**Rationale**: Resolution is on the per-request path, and an MLflow round-trip per chat request is a
+real latency cost for the common case. But a pin is an assertion about the pointer *now*
+(FR-457), so answering it from cache can authorize a version already demoted. Splitting puts the
+read-through cost on the rare request and keeps the cache for the common one.
+
+> **Correction, PR #88 review (finding 1).** The original version of this item said eager
+> invalidation from `registry.promote` meant *"the TTL bounds only the unusual staleness — an
+> out-of-band alias move — not the normal one."* **That premise is false.** The repo ships four
+> scripts that move the `serving` alias by calling `set_registered_model_alias` directly, none
+> through `registry.promote`: `scripts/retag_serving_llm.py:49`, `scripts/seed_asr_model.py:33`,
+> `scripts/seed_embedding_model.py:52`, `scripts/seed_tabular_model.py:78`. Out-of-band moves are a
+> scripted, ordinary path here, so eager invalidation covers **one of five writers** and the TTL is
+> the guarantee, not a backstop. FR-457b/c/d encode the corrected design.
 
 **Bound to state in tasks**: the cache is keyed by model name, which is registry-controlled, not
 tenant-controlled. A tenant-supplied string that resolves to nothing must **not** create an entry, or
