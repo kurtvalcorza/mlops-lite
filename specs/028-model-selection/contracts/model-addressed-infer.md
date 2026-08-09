@@ -30,7 +30,32 @@ test that exists to catch exactly this kind of surface growth.
 | `model_key` names the resident model | serve it |
 | `model_key` names a model in a transient state (`loading`/`draining`/`evicting`/`rolling_back`) | await the owning operation (026 T675's branch) or refuse `gpu_busy` — **never** fall through to another resident (FR-449) |
 | `model_key` names a non-resident model, Phase 1 | refuse `gpu_busy` — **compared and dispatched under the same lock that guards the resident set** (FR-473a), so the answer cannot go stale between the check and the dispatch |
-| `model_key` names a non-resident model, Phase 2+ | `Coordinator.admit_serving(model_key, est_bytes)`, then serve (FR-451–FR-454) |
+| `model_key` names a non-resident model, Phase 2+, **no placement authorization** | refuse `not_resident` — **never** auto-admit (FR-474) |
+| `model_key` names a non-resident model, Phase 2+, **with a valid placement authorization** | `Coordinator.admit_serving(model_key, est_bytes)`, then serve (FR-451–FR-454) |
+| placement authorization present but lapsed, or naming a different version | refuse; do **not** treat a lapsed authorization as still good (FR-474b) |
+
+### Why placement is two-step
+
+Only the gateway can read the registry; only the agent knows residency atomically. An agent that
+admits whatever `model_key` arrives will place a version resolved from a **stale cache**, which
+defeats FR-457e's fresh-read requirement — the check would exist in the gateway and be unenforceable
+at the point that acts on it.
+
+So the flow is explicit (FR-474a):
+
+1. **Inference, unauthorized.** Carries the expected identity, no placement authorization. Served if
+   resident; otherwise refused `not_resident` — a code deliberately distinct from contention, because
+   the gateway's next move differs.
+2. **Fresh revalidation.** The gateway re-reads the promotion pointer. If the identity is no longer
+   promoted, the tenant is refused and **nothing is placed**.
+3. **Inference, authorized.** Re-issued carrying an authorization naming the exact `(name, version)`
+   validated, with a short validity bound. The agent places **that** version and no other.
+
+**This narrows the window; it does not close it** (FR-474c). The registry read and the admission are
+in different processes, so the alias can still move between steps 2 and 3. The guarantee is the one
+that matters: tenant traffic can never place a version resolved from a cache of arbitrary age — only
+one confirmed promoted within the authorization's validity. Claiming exactness here would be
+claiming a cross-process atomicity the design does not have.
 | `model_key` names a model this engine cannot host | refuse — a routing error, not a placement one |
 
 **`model_key` absent must keep working.** `gateway/app/routers/infer.py`,

@@ -205,9 +205,17 @@ the same request.
 
 - **FR-439**: The broker MUST resolve the request's `model` field to a concrete
   `(model name, version)` pair before any GPU work is requested, using the registry as the authority.
-- **FR-440**: A bare model name MUST resolve to that model's promoted serving version. The system
+- **FR-440**: A bare model name MUST resolve to **the version promoted as of a registry read no older
+  than the configured resolution TTL**, and the response MUST name the version actually served
+  (FR-458). This is the **normative** statement of bare-name resolution and it governs FR-457c, which
+  states the same bound from the cache's side rather than granting a competing allowance. The system
   MUST also accept an explicit version qualifier, subject to FR-457, and MUST refuse a qualifier that
   names a version that does not exist.
+- **FR-440c**: The TTL bound in FR-440 is the **only** permitted staleness, and it applies solely to
+  *serving an already-resident* version. Any resolution that would cause a **placement** revalidates
+  fresh (FR-457e), and any **pinned** request reads through (FR-457b). An earlier revision stated
+  bare-name resolution as unqualified ("resolves to the promoted version") while FR-457c separately
+  permitted serving a stale-but-resident version; those were two policies, and this is one.
 - **FR-440a**: The qualifier grammar MUST be **unambiguous for names that themselves contain `:`**.
   Parsing MUST split on the **rightmost** `:` and accept the suffix as a version only when it is a
   run of decimal digits; otherwise the entire string is a bare model name. Registry versions are
@@ -231,27 +239,13 @@ the same request.
 - **FR-445**: When the registry cannot be consulted, the broker MUST refuse the request. It MUST NOT
   fall back to serving whatever occupies the modality slot.
 
-**Atomicity — the identity must be asserted where dispatch happens**
-
-- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. A
-  gateway-side residency check followed by a separate inference call is a time-of-check/time-of-use
-  window: `gateway/app/serving.py` reads residency from a separate `GET /health`, and between that
-  read and the inference the resident model can change — via an operator swap, a promotion-triggered
-  reload, or idle-release. A request could pass the check for model A and be answered by model B,
-  which is the exact defect this increment exists to remove.
-- **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
-  the engine it would dispatch to does not host it. The comparison and the dispatch MUST occur under
-  the same lock that guards the resident set; a check performed anywhere else in the agent
-  reintroduces a narrower version of the same window.
-- **FR-473b**: This assertion is **not** placement, and MUST NOT wait for a load, evict anything, or
-  consult the VRAM bounds. It is a guard, and it is what allows the truthfulness guarantee to be
-  delivered before on-demand placement exists.
-- **FR-473c**: Post-hoc detection — comparing the agent's reported `serving_model` against the
-  resolved identity **after** the response arrives — MUST NOT be used as the mechanism. It burns the
-  GPU work, and on the streaming path the tokens have already reached the client by the time the
-  mismatch is visible.
-
 **Routing — carrying the identity through admission**
+
+> Atomicity of the identity assert is **FR-473–FR-473c**, under *Atomicity and placement
+> authorization* below. It is placed there rather than here because `scripts/check_specs.py`
+> (FR-296) requires FR identifiers to be **defined in ascending order**, and these were written
+> after the routing block. The gate is right to insist: an out-of-order definition is how a
+> duplicate or skipped identifier gets in unnoticed.
 
 - **FR-446**: The resolved identity MUST be carried into host-agent admission as the coordinator's
   `model_key`, so residency, generation tokens, claims, and eviction victim-selection all key on the
@@ -312,11 +306,11 @@ the same request.
   pointer. A cached promoted-version answer MUST NOT be used to authorize a pin, because FR-457's
   assertion is about what is promoted *now*; serving a pin from a stale cache authorizes a version
   the platform may have already demoted.
-- **FR-457c**: An **unpinned** request MAY resolve from a bounded-staleness cache **only when the
-  resolved identity is already resident**. Its tolerance comes from what the tenant asked for: "the
-  current model" is answered truthfully by naming the version actually served (FR-458), whereas a pin
-  is a claim about the pointer itself. The staleness bound MUST be stated, and it is the cache TTL —
-  **not** eager invalidation.
+- **FR-457c**: *(subordinate to FR-440, which is normative.)* An **unpinned** request MAY resolve
+  from the cache **only when the resolved identity is already resident**, within FR-440's TTL bound.
+  Its tolerance comes from what the tenant asked for: "the current model" is answered truthfully by
+  naming the version actually served (FR-458), whereas a pin is a claim about the pointer itself. The
+  staleness bound is the cache TTL — **not** eager invalidation.
 - **FR-457e**: A resolution that would cause a **placement** MUST be revalidated against a fresh read
   of the promotion pointer before admission, cached or not. Serving a stale-but-resident version is a
   truthful answer about a slightly older model; **loading** one is the platform putting an
@@ -403,6 +397,47 @@ the same request.
   value**. Unlike VRAM this cannot reclaim anything for the request that just ran — the point is
   that the *next* admission decides against a real number rather than against an estimate that has
   already been proven wrong.
+
+**Atomicity and placement authorization**
+
+*Numbered here, after the resource bounds, because `scripts/check_specs.py` (FR-296) requires
+ascending definition order and these were written last. They govern the routing behaviour described
+at FR-446–FR-450.*
+
+- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. A
+  gateway-side residency check followed by a separate inference call is a time-of-check/time-of-use
+  window: `gateway/app/serving.py` reads residency from a separate `GET /health`, and between that
+  read and the inference the resident model can change — via an operator swap, a promotion-triggered
+  reload, or idle-release. A request could pass the check for model A and be answered by model B,
+  which is the exact defect this increment exists to remove.
+- **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
+  the engine it would dispatch to does not host it. The comparison and the dispatch MUST occur under
+  the same lock that guards the resident set; a check performed anywhere else in the agent
+  reintroduces a narrower version of the same window.
+- **FR-473b**: This assertion is **not** placement, and MUST NOT wait for a load, evict anything, or
+  consult the VRAM bounds. It is a guard, and it is what allows the truthfulness guarantee to be
+  delivered before on-demand placement exists.
+- **FR-473c**: Post-hoc detection — comparing the agent's reported `serving_model` against the
+  resolved identity **after** the response arrives — MUST NOT be used as the mechanism. It burns the
+  GPU work, and on the streaming path the tokens have already reached the client by the time the
+  mismatch is visible.
+- **FR-474**: The agent MUST NOT place a non-resident `model_key` on the strength of the key alone.
+  Only the gateway can read the registry and only the agent knows residency atomically, so an agent
+  that auto-admits whatever key arrives will place a version resolved from a **stale cache** —
+  defeating FR-457e, which requires a fresh promotion read before any placement.
+- **FR-474a**: Placement MUST therefore be a **two-step, explicitly authorized** flow. Step one is an
+  ordinary inference carrying the expected identity and **no** placement authorization: the agent
+  serves it if resident, and otherwise refuses with a distinct `not_resident` code that is not
+  confusable with contention. Step two, taken by the gateway only after a **fresh** promotion-pointer
+  read confirms the identity, re-issues the request carrying an explicit placement authorization.
+- **FR-474b**: The authorization MUST name the exact `(name, version)` it validated and MUST carry a
+  short validity bound. The agent MUST place **that** version and no other, and MUST refuse an
+  authorization whose validity has lapsed rather than treating it as still good.
+- **FR-474c**: This narrows the window; it does not eliminate it. The registry read and the admission
+  are in different processes, so the alias can still move between them. What the design guarantees is
+  the property that matters: tenant traffic can never place a version resolved from a cache of
+  arbitrary age — only one confirmed promoted within the authorization's validity bound. The
+  specification MUST state this limit rather than implying exactness.
 
 ### Key Entities
 

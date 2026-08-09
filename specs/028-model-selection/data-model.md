@@ -227,11 +227,19 @@ answered before any agent call:
 | `model_wrong_modality` | 400 | promoted, but not for this endpoint's modality |
 | `model_version_not_found` | 404 | the qualifier names a version that does not exist |
 | `model_version_not_promoted` | 409 | the version exists but is not the promoted one (FR-457) |
+| `model_name_ambiguous` | 409 | a registered name ends in `:` followed by digits, so it cannot be told apart from a qualified reference to a shorter name (FR-440b) |
 | `registry_unavailable` | 503 | resolution could not be performed; transient, carries `Retry-After` |
+
+`model_name_ambiguous` is a **registry-content** problem, not a client error: the caller sent a
+well-formed string and the registry holds a name no rightmost-split grammar can disambiguate. It is
+409 rather than 400 for that reason, and its message must point at the operator remedy — rename the
+model — rather than at the request.
 
 `registry_unavailable` is the only transient one, and it is deliberately **not** `gpu_busy`: the GPU
 is fine, and a client that treats it as GPU contention would back off against the wrong resource.
 
-Per FR-464 these are counted with a **bounded** label vocabulary. The model name is tenant-controlled
-and never becomes a label — the same trap `hostagent/metrics.py` already documents for
-`malformed_length`.
+Per FR-464 these are counted with a **bounded** label vocabulary:
+`model_not_found | model_not_promoted | model_wrong_modality | model_version_not_found |
+model_version_not_promoted | model_name_ambiguous | registry_unavailable`. The model name is
+tenant-controlled and never becomes a label — the same trap `hostagent/metrics.py` already documents
+for `malformed_length`.

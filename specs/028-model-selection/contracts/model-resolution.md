@@ -33,6 +33,7 @@ version becomes servable.
 | `<name>` not registered | `404 model_not_found` |
 | `<name>` registered, nothing promoted | `409 model_not_promoted` |
 | `<name>` promoted for another modality | `400 model_wrong_modality`, body names the modality it is promoted for |
+| a registered name ends in `:` + digits | `409 model_name_ambiguous` — indistinguishable from a qualified reference to a shorter name under FR-440a's rightmost-split rule |
 | registry unreachable | `503 registry_unavailable` with `Retry-After` |
 
 Every refusal body carries `{"error": {"code": ..., "message": ..., "type": "invalid_request_error"}}`
@@ -92,7 +93,11 @@ identical trap `hostagent/metrics.py` documents for `malformed_length` metric la
 
 A single counter with a **bounded** `reason` vocabulary:
 `model_not_found | model_not_promoted | model_wrong_modality | model_version_not_found |
-model_version_not_promoted | registry_unavailable`.
+model_version_not_promoted | model_name_ambiguous | registry_unavailable`.
+
+`model_name_ambiguous` is worth its own value rather than folding into `model_not_found`: it is the
+one refusal in the set that indicts the **registry's contents** rather than the request, and an
+operator watching it wants to see it separately.
 
 The model name is **never** a label. It is tenant-controlled, so labelling with it mints a permanent
 time series per string any client has ever sent.
