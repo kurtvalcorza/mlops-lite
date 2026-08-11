@@ -9,8 +9,9 @@ Principle VII and are not "done" on a passing suite alone.
 |---|---|---|---|
 | `min_residency_s` | coordinator config; documented in `.specify/memory/hardware-profile.md` with 026's other admission tunables | **60 s** — long enough that an alternating workload cannot thrash, short enough that a genuine model switch is not an outage | `0` disables the window and restores exact 026 behaviour |
 | `vram_estimate_multiplier` | coordinator/adapter config | **1.2** | applied to artifact size; must be ≥ 1 (research R3 — under-estimating is the dangerous direction) |
-| `model_resolution_ttl_s` | gateway | **30 s** | eagerly invalidated by `registry.promote`, so this bounds only out-of-band alias moves |
-| `host_ram_budget_bytes` | coordinator config; `hardware-profile.md` | **calibrated in T817, not guessed** | FR-467. An admission **precondition**, checked before the spawn — host RAM cannot be reclaimed once a child has allocated it |
+| `model_resolution_ttl_s` | gateway | **30 s** | **the staleness bound itself**, not a backstop (FR-457d). Four of the five alias writers in this repo bypass `registry.promote` (`retag_serving_llm.py:49`, `seed_asr_model.py:33`, `seed_embedding_model.py:52`, `seed_tabular_model.py:78`), so eager invalidation covers one writer in five — size this for the ordinary case, not an unusual one. Applies only to serving an **already-resident** version; pins read through and placements revalidate fresh |
+| `host_ram_budget_bytes` | coordinator config; `hardware-profile.md` | **calibrated in T817, not guessed** | FR-467. An admission **precondition**, checked before the spawn: terminating a child does reclaim its memory, but nothing gives host RAM back *within* the request, so transient overcommit during load is the failure being avoided |
+| `host_ram_estimate_bytes` | per-adapter default with per-model override | **derived from T817's measurement** | FR-469. The precondition's left-hand side; measured **PSS, never RSS** (FR-471), or an RSS sum double-counts mmap'd GGUF pages and refuses placements that fit |
 
 ## Phase 1 — resolution and truth (no GPU required)
 
@@ -18,12 +19,17 @@ Principle VII and are not "done" on a passing suite alone.
 .venv/Scripts/python.exe -m pytest tests/test_broker_openai_resolution.py -q
 ```
 
-Run the same file with the flag in both positions — the default is off, and the default is what an
-operator has:
+Run the same file with the flag in **both** positions. The first command above inherits the default,
+which is `"0"` — so it is the off position, and the off position is what an operator actually has.
+The on position must be set explicitly:
 
 ```bash
 BROKER_COORDINATOR_ADMISSION=0 .venv/Scripts/python.exe -m pytest tests/test_broker_openai_resolution.py -q
+BROKER_COORDINATOR_ADMISSION=1 .venv/Scripts/python.exe -m pytest tests/test_broker_openai_resolution.py -q
 ```
+
+An earlier revision of this procedure showed two commands that both ran with the flag off, so the
+on position was never exercised despite the heading.
 
 **The one check that decides whether the P1 finding is closed.** With model A resident, ask for a
 different promoted model B and confirm you do **not** get A's answer:

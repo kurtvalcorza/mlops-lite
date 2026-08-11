@@ -155,19 +155,32 @@ wrong-modality, or `gpu_busy`. Responses and `/v1/models` report resolved identi
 a GPU.
 
 > **Corrected after the second PR #88 review.** An earlier revision called this phase **gateway-only**.
-> It cannot be. The gateway learns residency from a **separate** `GET /health`
-> (`gateway/app/serving.py:49`) and then issues the inference as a second call, so a check-then-use
-> pair has a time-of-check/time-of-use window: the resident model can change in between — operator
-> swap, promotion-triggered reload, idle-release — and the request passes the check for A and is
-> answered by B. That is the defect, merely narrowed.
+> It cannot be. A gateway-side fix is a residency read followed by a separate inference call, and
+> that check-then-use pair has a time-of-check/time-of-use window: the resident model can change in
+> between — operator swap, promotion-triggered reload, idle-release — so the request passes the check
+> for A and is answered by B. The defect would be narrowed, not closed.
+>
+> **Corrected again after the PR #88 code review.** The paragraph above previously grounded that in
+> the gateway learning residency from a separate `GET /health` at `gateway/app/serving.py:49`. **The
+> OpenAI path makes no such call.** `gateway/app/routers/broker_openai.py` posts straight to
+> `{SERVING_URL}/infer` (line 260) and `{SERVING_URL}/infer/stream` (line 301); `serving.health()`
+> serves other routers. The true starting position is worse than a racy check — there is **no
+> identity assertion on this surface at all**, only a fixed modality slot answered by whatever
+> occupies it. The conclusion is unchanged and better supported: a gateway-side fix would have to
+> introduce the two-call window, so the assert belongs at the agent.
 >
 > Phase 1 therefore includes the **smallest possible agent change**: the request carries its expected
-> identity and the agent refuses when the engine it would dispatch to does not host it, compared under
-> the same lock that guards the resident set (FR-473–FR-473c). It is a **guard, not placement** — it
-> never waits for a load, evicts anything, or consults the VRAM bounds, which is what keeps the phase
-> free of GPU behaviour change and CPU-verifiable. Post-hoc comparison of the response's
-> `serving_model` was rejected as the mechanism: it burns the GPU work, and on the streaming path the
-> tokens have already reached the client.
+> identity and the agent refuses when the engine it would dispatch to does not host it. The
+> comparison and the **claim** that pins the matched resident are taken together under the
+> resident-set lock; the dispatch runs with that lock released (FR-473–FR-473c). Holding the lock
+> across dispatch would contradict `coordinator.py:24-29` — `_lock` guards state only and is never
+> held across load/unload, with `LifecycleGuard` raising when it is — and would serialize every
+> generation, unbounded when streaming. It is a **guard, not placement**: it never waits for a load,
+> evicts anything, or consults the VRAM bounds, which is what keeps the phase free of GPU behaviour
+> change and CPU-verifiable. A promoted but non-resident model is refused **`not_resident`**,
+> permanent and without `Retry-After`, because the phase has no placement path that a retry could
+> ever find. Post-hoc comparison of the response's `serving_model` was rejected as the mechanism: it
+> burns the GPU work, and on the streaming path the tokens have already reached the client.
 
 **Phase 2 — Model-keyed admission and on-demand placement (agent; hardware-gated).**
 `coordadmission.py` stops collapsing `model_key` to `engine_id` on the serving path. The

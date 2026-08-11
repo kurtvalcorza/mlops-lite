@@ -53,7 +53,7 @@ name shape that stays ambiguous under it.
 | promoted, but modality ≠ the endpoint's | refuse `model_wrong_modality` (permanent) |
 | qualifier names a version that does not exist | refuse `model_version_not_found` (permanent) |
 | qualifier names a real version that is not promoted | refuse `model_version_not_promoted` (permanent), naming the promoted version (FR-457a) |
-| `model` absent or empty | resolve the platform default; never a fallback from a failed resolution (FR-444) |
+| `model` absent or empty | resolve the default for the **calling endpoint's modality**; never a fallback from a failed resolution (FR-444) |
 | registry unreachable | refuse; **never** fall through to the modality slot (FR-445) |
 
 ---
@@ -217,8 +217,9 @@ or it becomes a promise the platform did not make.
 ## Refusal codes *(new values in an existing vocabulary)*
 
 026's `contracts/inference-openai.md` defines `unauthorized`, `quota_exhausted`, `gpu_busy`,
-`model_too_large`, `metering_unavailable`. 028 adds the **resolution** refusals — all permanent, all
-answered before any agent call:
+`model_too_large`, `metering_unavailable`. 028 adds two groups. The **resolution** refusals are
+answered before any agent call, and all are permanent **except `registry_unavailable`**, which is
+transient and carries `Retry-After`:
 
 | code | HTTP | meaning |
 |---|---|---|
@@ -230,6 +231,22 @@ answered before any agent call:
 | `model_name_ambiguous` | 409 | a registered name ends in `:` followed by digits, so it cannot be told apart from a qualified reference to a shorter name (FR-440b) |
 | `registry_unavailable` | 503 | resolution could not be performed; transient, carries `Retry-After` |
 
+The **routing** refusal is produced by the agent rather than the resolver, because residency is the
+agent's fact and nothing upstream can state it atomically (FR-473):
+
+| code | HTTP | meaning |
+|---|---|---|
+| `not_resident` | 409 | the identity resolved and is promoted, but is not loaded on the agent, and the request carried no valid placement authorization (FR-473b in Phase 1, FR-474/FR-474a in Phase 2+) |
+
+`not_resident` is **permanent for the request as sent** and MUST NOT carry `Retry-After`. It is 409
+rather than 503 because it is a conflict with current state, not GPU contention — and the
+distinction is load-bearing rather than cosmetic in both phases. In **Phase 2+** it is the trigger
+for the gateway's fresh revalidation and re-issue with an authorization (FR-474a); a gateway that
+reads it as 503 treats it as backoff-and-retry, never takes that step, and the two-step flow
+degenerates into the auto-admit path it was written to replace. In **Phase 1** there is no placement
+path at all, so a transient code would send a client into an unbounded retry against a state that
+cannot change within the phase.
+
 `model_name_ambiguous` is a **registry-content** problem, not a client error: the caller sent a
 well-formed string and the registry holds a name no rightmost-split grammar can disambiguate. It is
 409 rather than 400 for that reason, and its message must point at the operator remedy — rename the
@@ -240,6 +257,6 @@ is fine, and a client that treats it as GPU contention would back off against th
 
 Per FR-464 these are counted with a **bounded** label vocabulary:
 `model_not_found | model_not_promoted | model_wrong_modality | model_version_not_found |
-model_version_not_promoted | model_name_ambiguous | registry_unavailable`. The model name is
+model_version_not_promoted | model_name_ambiguous | registry_unavailable | not_resident`. The model name is
 tenant-controlled and never becomes a label — the same trap `hostagent/metrics.py` already documents
 for `malformed_length`.

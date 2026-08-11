@@ -41,7 +41,9 @@
   job-path exemption are each testable, and SC-209 restated as a per-period eviction count.
 - **FR-457 (version pinning) → promoted versions only.** A qualifier is an assertion, not a
   selection: `name:version` is served only when that version is the promoted one, so a tenant request
-  can never place a version 022's gated promotion path did not promote. FR-457a requires the refusal
+  can never place a version 022's gated promotion path did not promote **at the request's authorizing
+  read** — the qualifier FR-475/FR-475b added, and without which this sentence claims a cross-process
+  atomicity the design does not have (FR-474c). FR-457a requires the refusal
   to name the version that *is* promoted, which is what separates "promotion moved under me" from "I
   pinned something never promoted".
 
@@ -57,9 +59,12 @@ already-written contract**, and a description of the defect that cannot name the
 checked against the code. Specs 026 and 027 in this repo set the same precedent, and the audience
 for this platform's specs is its operators and maintainers, not an external business stakeholder.
 
-The deviation is bounded: every **requirement** (FR-439–FR-466) is stated as an observable
-behavior, and every **success criterion** (SC-204–SC-210) is checkable from a client's or an
-operator's position without reading source. SC-207 references the admission state endpoint
+The deviation is bounded: every **requirement** (FR-439–FR-475b) is stated as an observable
+behavior, and every **success criterion** (SC-204–SC-211) is checkable from a client's or an
+operator's position without reading source. *(Ranges corrected after the PR #88 code review — this
+file still certified coverage over FR-439–FR-466 / SC-204–SC-210 after four review rounds had
+extended the spec to FR-475b and SC-211. T805d's audit is scoped to requirements and contracts and
+does not reach the checklists.)* SC-207 references the admission state endpoint
 because 026 established that endpoint as the observation surface for exactly this invariant.
 
 **`/speckit-analyze` remediation, 2026-08-09.** All ten findings applied. The load-bearing ones:

@@ -114,10 +114,20 @@ loss: it is the difference between a client that retries once successfully and o
 > needs more than one victim.** Eviction is cumulative, so a victim set is unusable until the **last**
 > of its members leaves its window; taking the earliest sends the client back too soon, it is refused
 > again, and the retry-once-and-succeed property the whole mechanism exists for is lost. The correct
-> value is `min over sufficient sets S of (max expiry in S)`, evaluated over the evictor's own greedy
-> order so the answer matches what the evictor would actually pick. Worked in
+> value is `min over sufficient sets S of (max expiry in S)`. Worked in
 > [contracts/residency-window.md](./contracts/residency-window.md); pinned by T797a, which fails
 > against the old rule.
+>
+> **Second correction, PR #88 code review.** The sentence above continued *"evaluated over the
+> evictor's own greedy order so the answer matches what the evictor would actually pick"*. That
+> **overshoots**. At any instant the evictor has the whole eligible set available, so its
+> idle-first/LRU order decides *which* victims it takes, never *whether* it can take enough.
+> Evaluating over that order takes the shortest prefix and can name a far later time than the
+> earliest sufficient one: A(30 s, 8 GiB), B(5 s, 8 GiB), C(5 s, 8 GiB) needing 16 GiB answers 30,
+> when `{B,C}` frees enough at 5. The evaluation order is **expiry ascending** — the minimising set
+> is a prefix in *that* order, and the predicate is monotone in time because windows only expire.
+> Pinned by T797b; case 2a cannot catch it, because a placement needing every victim has its prefix
+> and its optimum coincide.
 
 **Alternatives considered**: (a) Reusing `last_used_at` as the window start — rejected, it is
 touched on every request, so a busy model would be permanently protected and an idle one immediately

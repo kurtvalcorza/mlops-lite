@@ -225,19 +225,31 @@ the same request.
   total and deterministic: `svc:chat:3` is version 3 of `svc:chat`, while `svc:chat` is the bare name
   `svc:chat`. An earlier revision asserted that names may contain `:` and then used `:` as the
   separator without saying how to split, which is not a grammar.
-- **FR-440b**: A model whose name is ambiguous under FR-440a **cannot exist**: a registered name
-  ending in `:` followed by digits would be indistinguishable from a qualified reference to a shorter
-  name. Resolution MUST refuse such a name with a distinct code rather than guessing, and the refusal
-  MUST be reachable — this is a registry-content problem the operator must fix, not a client error.
+- **FR-440b**: A model whose name is ambiguous under FR-440a **cannot be served**: a registered name
+  ending in `:` followed by digits is indistinguishable from a qualified reference to a shorter name.
+  Resolution MUST refuse such a name with a distinct code rather than guessing, and the refusal MUST
+  be **reachable**. Reachability requires an explicit step, because FR-440a's split rule is *total*:
+  applied alone it resolves `svc:chat:3` to version 3 of `svc:chat` and, finding no such model,
+  answers `model_not_found` — so the distinct code is never returned and the operator never learns
+  the registry holds an unservable name. Resolution MUST therefore look the **unsplit** string up in
+  the registry as an exact name before applying the split, and refuse `model_name_ambiguous` when
+  that lookup hits a registered model whose name ends in `:` followed by digits. This is a
+  registry-content problem the operator must fix, not a client error.
 - **FR-441**: A `model` naming nothing in the registry MUST be refused with a **permanent**,
   machine-readable code, before any request is made to the host agent.
 - **FR-442**: A `model` naming a registered model with no promoted serving version MUST be refused
   with a code **distinct** from FR-441's, because the operator remedy differs.
 - **FR-443**: A `model` naming a model promoted for a different modality than the endpoint serves
   MUST be refused with a code distinct from both FR-441 and FR-442.
-- **FR-444**: An omitted or empty `model` MUST resolve to the platform's documented default serving
-  model, and the response MUST name what actually answered. The default MUST NOT be reached by
-  falling back from a failed resolution.
+- **FR-444**: An omitted or empty `model` MUST resolve to the documented default serving model **for
+  the modality of the endpoint being called**, and the response MUST name what actually answered. The
+  default MUST NOT be reached by falling back from a failed resolution. A **single platform-wide**
+  default MUST NOT be used: `model: str = ""` is today's declared default on the embeddings,
+  transcription, and vision handlers (`gateway/app/routers/broker_openai.py:220`, `:373`, `:464`), so
+  a platform default carrying one modality would resolve every omitting caller on the other three
+  surfaces to a model FR-443 then refuses `model_wrong_modality`. Omission MUST remain a working
+  request on every surface where it works today; a per-modality default is what makes FR-443 and
+  back-compatibility hold at once.
 - **FR-445**: When the registry cannot be consulted, the broker MUST refuse the request. It MUST NOT
   fall back to serving whatever occupies the modality slot.
 
@@ -409,19 +421,42 @@ the same request.
 ascending definition order and these were written last. They govern the routing behaviour described
 at FR-446–FR-450.*
 
-- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. A
-  gateway-side residency check followed by a separate inference call is a time-of-check/time-of-use
-  window: `gateway/app/serving.py` reads residency from a separate `GET /health`, and between that
-  read and the inference the resident model can change — via an operator swap, a promotion-triggered
-  reload, or idle-release. A request could pass the check for model A and be answered by model B,
-  which is the exact defect this increment exists to remove.
+- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. The
+  OpenAI surface today asserts identity **nowhere**: `gateway/app/routers/broker_openai.py` posts
+  straight to `{SERVING_URL}/infer` (line 260) and `{SERVING_URL}/infer/stream` (line 301), with no
+  residency read on the path at all — `SERVING_URL` is a fixed modality slot, and whatever occupies
+  it answers. Moving the check to the gateway does not fix that, it only makes the window narrower:
+  a gateway-side check *is* a residency read followed by a separate inference call, and between the
+  two the resident model can change via an operator swap, a promotion-triggered reload, or
+  idle-release, so a request that passed the check for model A is still answered by model B. The
+  assert therefore belongs where residency is known and dispatch happens — at the agent.
 - **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
-  the engine it would dispatch to does not host it. The comparison and the dispatch MUST occur under
-  the same lock that guards the resident set; a check performed anywhere else in the agent
-  reintroduces a narrower version of the same window.
+  the engine it would dispatch to does not host it. The comparison and the **acquisition of the claim
+  that pins the matched resident** MUST occur together under the lock guarding the resident set; the
+  dispatch itself MUST then run with that lock **released**, against the claim. A comparison
+  performed anywhere else in the agent reintroduces a narrower version of the same window, and a
+  comparison that does not take a claim leaves the model evictable between the check and the
+  dispatch — which is the same window by another route.
+  > **Corrected after the PR #88 code review.** This requirement previously demanded the comparison
+  > and *the dispatch* occur under one lock. That contradicts `hostagent/coordinator.py:24-29`, which
+  > states that `_lock` **guards state only and is never held across `load`/`unload`** and has
+  > `LifecycleGuard` (026 T635) raise rather than deadlock when it is — so the requirement as written
+  > was unimplementable against the code it governs, and would additionally serialize every
+  > generation behind one lock, unbounded on the streaming path. The **claim** is the mechanism 026
+  > already provides: the ref-count that keeps a resident alive across a generation, established for
+  > precisely the case where a model must not be evicted while a request it authorized is still
+  > running. Identity settles atomically under the lock; the long I/O runs outside it.
 - **FR-473b**: This assertion is **not** placement, and MUST NOT wait for a load, evict anything, or
   consult the VRAM bounds. It is a guard, and it is what allows the truthfulness guarantee to be
-  delivered before on-demand placement exists.
+  delivered before on-demand placement exists. Because the guard cannot place, a promoted but
+  non-resident model MUST be refused in Phase 1 with the **permanent** `not_resident` code (FR-474a)
+  and MUST NOT carry `Retry-After`.
+  > **Corrected after the PR #88 code review.** Phase 1 previously refused this case with
+  > `gpu_busy`, which 026 defines as **transient** contention carrying `Retry-After`. Phase 1 has no
+  > placement path — that is the phase boundary — so the condition holds for the entire life of the
+  > phase and no retry can ever succeed. A client honouring the header backs off forever against a
+  > permanent state. `not_resident` already describes exactly this and is permanent; Phase 2 makes
+  > the same condition actionable by adding the authorization flow, not by relabelling it.
 - **FR-473c**: Post-hoc detection — comparing the agent's reported `serving_model` against the
   resolved identity **after** the response arrives — MUST NOT be used as the mechanism. It burns the
   GPU work, and on the streaming path the tokens have already reached the client by the time the

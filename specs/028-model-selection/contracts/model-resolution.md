@@ -23,7 +23,7 @@ grammar note below.
 ## Request grammar
 
 ```text
-model := ""                     ; absent or empty → the platform default (FR-444)
+model := ""                     ; absent or empty → the default for THIS ENDPOINT'S modality (FR-444)
        | <name>                 ; → the version promoted AT THE AUTHORIZING READ (FR-440, FR-475)
        | <name> ":" <version>   ; an ASSERTION that <version> is promoted, checked by
                                 ; read-through immediately before the decision (FR-457, FR-457b)
@@ -33,6 +33,23 @@ model := ""                     ; absent or empty → the platform default (FR-4
 rightmost `:`** and accepts the suffix as a version only when it is all digits; otherwise the whole
 string is a bare name (FR-440a). A registered name that is still ambiguous under that rule — one
 ending in `:` followed by digits — is refused `model_name_ambiguous` (FR-440b).
+
+**Ordering matters, and it is the whole of FR-440b's reachability.** The resolver MUST look the
+**unsplit** string up as an exact registered name *before* applying the split, and refuse
+`model_name_ambiguous` when that lookup hits a name ending in `:` followed by digits:
+
+```text
+1. exact-name lookup on the unsplit string
+     → hit, and the name ends in ":" + digits  → 409 model_name_ambiguous   (FR-440b)
+     → hit, otherwise                          → bare name, resolve as <name>
+     → miss                                    → 2
+2. rightmost-":" split per FR-440a
+```
+
+Without step 1 the refusal is **unreachable**: FR-440a's rule is total, so `svc:chat:3` splits to
+version 3 of `svc:chat`, that model does not exist, and the resolver answers `model_not_found`. The
+distinct code is never returned, T776's reachability requirement cannot be satisfied, and the
+operator never learns the registry holds a name the platform cannot serve.
 
 > **Corrected after the third PR #88 review.** This grammar previously read
 > `<name> ; → that model's promoted serving version`, unqualified, which contradicted FR-440's
@@ -49,7 +66,7 @@ evaluation gate remains the only way a version becomes servable at all (FR-475b)
 
 | input | outcome |
 |---|---|
-| `""` / absent | `ResolvedModel` for the platform default; response names what answered |
+| `""` / absent | `ResolvedModel` for the **calling endpoint's modality** default; response names what answered (FR-444 — a single platform-wide default would refuse every omitting caller on three of the four surfaces) |
 | `<name>`, promoted at the authorizing read, right modality | `ResolvedModel(name, promoted_version, modality, pinned=false)` — cache permitted only when the identity is already resident (FR-457c) |
 | `<name>:<v>` where `<v>` **is** promoted at read-through | `ResolvedModel(..., pinned=true)` — never answered from cache (FR-457b) |
 | `<name>:<v>` where `<v>` exists but is **not** promoted | `409 model_version_not_promoted`, body names the promoted version |
@@ -89,17 +106,20 @@ correctness requirements:
 | cached | volatility | policy |
 |---|---|---|
 | `name → modality` | a model's modality does not change | cacheable, long TTL |
-| `name → promoted version` | moves whenever the `serving` alias moves | **never used to authorize a pin**; short TTL for unpinned only |
+| `name → promoted version` | moves whenever the `serving` alias moves | **never used to authorize a pin**; short TTL, unpinned only, and **only when the identity is already resident** (FR-457c) |
 
 **A pinned request always reads through (FR-457b).** `name:version` asserts something about the
 pointer *now* — "serve version 3, or tell me you can't". Answering that from a cache can authorize a
 version the platform has already demoted, which is precisely what FR-457 exists to prevent. The
 read-through cost lands only on pinned requests, which are the rare ones.
 
-**An unpinned request may be answered from cache (FR-457c)**, bounded by the TTL. The tolerance is
-not laxity: the tenant asked for "the current model", and FR-458 requires the response to name the
-version that actually answered — so a slightly stale resolution produces a truthful answer about a
-slightly older model, never a false claim about a newer one.
+**An unpinned request may be answered from cache (FR-457c) only when the resolved identity is
+already resident**, bounded by the TTL. The tolerance is not laxity: the tenant asked for "the
+current model", and FR-458 requires the response to name the version that actually answered — so a
+slightly stale resolution produces a truthful answer about a slightly older model, never a false
+claim about a newer one. The already-resident qualifier is not a detail of the cache: truthful
+reporting repairs a stale *answer*, but nothing repairs a stale **placement**, so a resolution that
+would cause a load revalidates fresh regardless of the cache (FR-457e).
 
 **Eager invalidation is an optimisation, not the guarantee (FR-457d).** An earlier revision of this
 contract leaned on `registry.promote` invalidating in-process and called out-of-band alias moves
@@ -123,6 +143,11 @@ model_version_not_promoted | model_name_ambiguous | registry_unavailable`.
 one refusal in the set that indicts the **registry's contents** rather than the request, and an
 operator watching it wants to see it separately.
 
+`not_resident` is deliberately **absent** from this vocabulary. It is a routing refusal the agent
+produces, not a resolution outcome — resolution succeeded — so it is counted on the placement side
+of FR-464's split. Its code and status are defined in
+[data-model.md](../data-model.md#refusal-codes-new-values-in-an-existing-vocabulary).
+
 The model name is **never** a label. It is tenant-controlled, so labelling with it mints a permanent
 time series per string any client has ever sent.
 
@@ -140,5 +165,10 @@ time series per string any client has ever sent.
    `name:3` again *within the TTL*. It must refuse `model_version_not_promoted` naming 4. A test that
    moves the alias via `registry.promote` exercises the eager-invalidation path and would pass
    against the defect.
-6. The unpinned counterpart of the same setup may serve the stale version, and its response must name
-   the version it served — never the newly promoted one it did not.
+6. The unpinned counterpart of the same setup may serve the stale version **only when it is already
+   resident**, and its response must name the version it served — never the newly promoted one it
+   did not.
+7. **The ambiguous-name case is reached.** Register a model literally named `svc:chat:3`, request it,
+   and assert `409 model_name_ambiguous` — not `404 model_not_found`. A resolver that applies
+   FR-440a's split without the exact-name lookup first returns 404 and passes no test that only
+   checks "it is refused", which is why the assertion is on the code.

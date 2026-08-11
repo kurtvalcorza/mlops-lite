@@ -3,10 +3,19 @@
 **Requirements**: FR-446–FR-450, FR-458–FR-460, FR-473–FR-473c · **Phase**: 1 (field **asserted**) / 2 (field drives placement)
 
 > **Corrected after the second PR #88 review.** This contract previously said the field was merely
-> *"accepted"* in Phase 1 and *"honoured"* in Phase 2. That left Phase 1 with a check-then-use race
-> and no closure of the defect: the gateway reads residency from a separate `GET /health`
-> (`gateway/app/serving.py:49`), then issues the inference as a second call, and the resident model
-> can change in between. **Phase 1 asserts the field at the agent** — a guard, not placement.
+> *"accepted"* in Phase 1 and *"honoured"* in Phase 2. That left Phase 1 without closure of the
+> defect. **Phase 1 asserts the field at the agent** — a guard, not placement.
+>
+> **Corrected again after the PR #88 code review.** The paragraph above used to justify that by
+> describing the gateway as reading residency from a separate `GET /health`
+> (`gateway/app/serving.py:49`) and then issuing the inference as a second call. **That read does not
+> happen on this surface.** `gateway/app/routers/broker_openai.py` posts straight to
+> `{SERVING_URL}/infer` (line 260) and `{SERVING_URL}/infer/stream` (line 301); `serving.health()`
+> exists and is used by other routers, not by the OpenAI path. The accurate statement is stronger,
+> not weaker: **the surface asserts identity nowhere at all** — it posts to a fixed modality slot and
+> whatever occupies it answers. A gateway-side fix would have to *introduce* the residency read, and
+> the check-then-use pair with it. That is why the assert belongs at the agent, and it is what the
+> tests below must construct rather than observe.
 
 ## The change
 
@@ -29,7 +38,8 @@ test that exists to catch exactly this kind of surface growth.
 | `model_key` absent | today's behaviour — serve whatever occupies the engine. Preserves every existing caller |
 | `model_key` names the resident model | serve it |
 | `model_key` names a model in a transient state (`loading`/`draining`/`evicting`/`rolling_back`) | await the owning operation (026 T675's branch) or refuse `gpu_busy` — **never** fall through to another resident (FR-449) |
-| `model_key` names a non-resident model, Phase 1 | refuse `gpu_busy` — **compared and dispatched under the same lock that guards the resident set** (FR-473a), so the answer cannot go stale between the check and the dispatch |
+| `model_key` names a non-resident model, Phase 1 | refuse **`not_resident`** — permanent, no `Retry-After`: Phase 1 has no placement path, so a transient code would send the client into an unbounded retry (FR-473b) |
+| `model_key` names the resident model, any phase | **compare and take the claim under the resident-set lock, then dispatch with the lock released** (FR-473a) — `_lock` guards state only and is never held across load/unload (`coordinator.py:24-29`, enforced by `LifecycleGuard`), and the claim is what keeps the matched resident alive for the generation |
 | `model_key` names a non-resident model, Phase 2+, **no placement authorization** | refuse `not_resident` — **never** auto-admit (FR-474) |
 | `model_key` names a non-resident model, Phase 2+, **with a valid placement authorization** | `Coordinator.admit_serving(model_key, est_bytes)`, then serve (FR-451–FR-454) |
 | placement authorization present but lapsed, or naming a different version | refuse; do **not** treat a lapsed authorization as still good (FR-474b) |
@@ -97,9 +107,12 @@ obligation, not new machinery.
 3. Absent `model_key` behaves exactly as before, for all three existing callers.
 4. Two concurrent requests for the same non-resident key produce exactly one load.
 5. A streamed response's chunks name the served identity, not the request string.
-6. **The TOCTOU case.** Resolve against model A, then swap the engine to B **between** the residency
-   read and the inference call, and confirm the request is refused rather than answered by B. A test
-   that never interleaves a swap passes against the check-then-use race, which is why this is its own
-   case rather than a variant of case 2.
+6. **The TOCTOU case.** Resolve against model A, drive a swap to B **concurrently with the in-flight
+   request**, and confirm the request is refused rather than answered by B. A test that never
+   interleaves a swap passes against the race, which is why this is its own case rather than a
+   variant of case 2. **The interleaving point must be constructed, not observed**: the OpenAI path
+   performs no residency read today, so the case is written against the two-call check-then-use pair
+   a *gateway-side* fix would introduce, and must fail against that implementation while passing
+   against the agent-side compare-and-claim.
 7. The assert never waits for a load, evicts anything, or consults the VRAM bounds (FR-473b) —
    asserted with a coordinator stub that fails the test if admission is called.
