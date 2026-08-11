@@ -100,8 +100,9 @@ naming a string that is in no registry and confirm it is refused without the age
    **Then** the broker refuses with a code distinct from "unknown model", because the operator's
    remedy differs — promote it, versus register it.
 5. **Given** a tenant omits `model` entirely, **When** the request is otherwise valid, **Then** the
-   broker applies the documented default (the platform's promoted serving model) and the response's
-   `model` field names what actually answered, so an omitted field never reads as a granted request.
+   broker applies the documented default **for the modality of the endpoint called** (FR-444, FR-477
+   — there are four defaults, not one platform-wide model) and the response's `model` field names
+   what actually answered, so an omitted field never reads as a granted request.
 
 ---
 
@@ -433,10 +434,11 @@ at FR-446–FR-450.*
 - **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
   the engine it would dispatch to does not host it. The comparison and the **acquisition of the claim
   that pins the matched resident** MUST occur together under the lock guarding the resident set; the
-  dispatch itself MUST then run with that lock **released**, against the claim. A comparison
+  dispatch itself MUST then run with that lock **released**, against the pin. A comparison
   performed anywhere else in the agent reintroduces a narrower version of the same window, and a
-  comparison that does not take a claim leaves the model evictable between the check and the
-  dispatch — which is the same window by another route.
+  comparison that does not take a pin leaves the model evictable or swappable between the check and
+  the dispatch — which is the same window by another route. **Which lock and which pin depends on
+  the admission mode, and both modes MUST be specified — see FR-476.**
   > **Corrected after the PR #88 code review.** This requirement previously demanded the comparison
   > and *the dispatch* occur under one lock. That contradicts `hostagent/coordinator.py:24-29`, which
   > states that `_lock` **guards state only and is never held across `load`/`unload`** and has
@@ -507,6 +509,58 @@ at FR-446–FR-450.*
   that is unaffected by when the pointer is read: an unpromoted version is never authorized at any
   instant. What FR-475 bounds is only the staleness of a *promotion*, and a version promoted moments
   ago being placed is the system working, not a violation.
+
+**The identity pin, in both admission modes**
+
+*Numbered last for the same FR-296 ascending-order reason as FR-473. They govern FR-473a's mechanism
+and FR-444's default, and were written after the PR #89 review found each specified against only one
+of the two configurations the platform actually ships.*
+
+- **FR-476**: The identity guard of FR-473a MUST be defined as an **identity pin**: an object
+  acquired under the lock that guards the identity being compared, guaranteeing that the runtime
+  which answers is the one whose identity was matched, and released on **every** terminal path —
+  success, error, client disconnect, and stream termination alike. The pin is an abstraction with
+  **two required implementations**, because the platform ships two admission modes and Phase 1 is
+  required to hold in both (T791):
+  - **`BROKER_COORDINATOR_ADMISSION=1`** — the coordinator is the serving authority. The lock is the
+    coordinator's resident-set lock and the pin is 026's **claim**, the ref-count that already exists
+    to keep a resident alive across a generation.
+  - **`BROKER_COORDINATOR_ADMISSION=0`, the default** — the coordinator is **not** the runtime
+    admission authority and holds no resident entry for the live engine, so **no claim can be minted
+    there**. `hostagent/main.py::_build_admission()` returns the legacy `adm.Admission`; the
+    coordinator is constructed separately and later by `build_broker()`, so `_register_runtime()` is
+    a no-op during `build_agent()` because `_RUNTIME_LIFECYCLE` does not yet exist. In this mode the
+    comparison MUST be against the **runtime's own child/model identity**, pinned under the
+    **runtime's** lock — which `coordadmission.py` already documents as the owner of request
+    lifetime under the legacy shim.
+- **FR-476a**: The two implementations MUST satisfy one **stated invariant**, so the guard is a
+  property of the platform rather than of a configuration: *once an identity is accepted for
+  dispatch, no concurrent swap, reload, eviction, or idle-release can cause a different model to
+  answer that request, and the pin is released on every terminal path.* A requirement whose only
+  mechanism exists in the non-default configuration is not implemented in the configuration an
+  operator actually runs.
+
+**Per-modality default authority**
+
+- **FR-477**: Each of the four modality defaults required by FR-444 MUST have a **single designated
+  authority** that names a concrete registry identity, and the resolver and the runtime that answers
+  MUST be guaranteed to agree on it. Only the LLM modality has one today —
+  `registry.DEFAULT_LLM` (`SERVING_MODEL`) with `registry.active_serving_llm_name()`. Embeddings,
+  ASR, and vision have none: `registry.resolve_serving_target(task)` finds versions tagged for a task
+  and, when several models share it, documents that *"otherwise the first match is used"*. That is
+  **discovery, not a designated default** — deterministic only while exactly one promoted model
+  carries the tag.
+- **FR-477a**: The reason this becomes load-bearing now: omission works today because each endpoint
+  posts to a fixed engine slot, so no identity is ever chosen. Once FR-439 requires an omitted
+  `model` to resolve to a concrete identity **before** the agent call, an arbitrary pick can differ
+  from the runtime that answers — and FR-473a's guard would then refuse a request that works today,
+  or FR-458 would report an identity that did not serve. That is the identity divergence 022 closed,
+  reintroduced through the default path.
+- **FR-477b**: Each modality's default MUST therefore specify: the **source** of the identity; the
+  behaviour when **no** default exists; the behaviour when **several** promoted models carry the
+  modality and none is designated; and the mechanism guaranteeing **resolver/runtime agreement**. A
+  missing default MUST be refused with a permanent, machine-readable code naming the modality — never
+  silently resolved to whichever model is found first.
 
 ### Key Entities
 

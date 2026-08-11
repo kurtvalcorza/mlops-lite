@@ -1,7 +1,7 @@
 # Contract: Model Resolution
 
 **Owner**: `gateway/app/modelresolve.py` (new) · **Consumers**: `gateway/app/routers/broker_openai.py`
-· **Requirements**: FR-439–FR-445, FR-440a–FR-440c, FR-457–FR-457f, FR-461, FR-464, FR-475–FR-475b
+· **Requirements**: FR-439–FR-445, FR-440a–FR-440c, FR-457–FR-457f, FR-461, FR-464, FR-475–FR-475b, FR-477–FR-477b
 
 Resolution turns the request's `model` string into a `ResolvedModel` or a refusal. It runs **before**
 any call to the host agent, so a refusal here costs no GPU work.
@@ -66,7 +66,8 @@ evaluation gate remains the only way a version becomes servable at all (FR-475b)
 
 | input | outcome |
 |---|---|
-| `""` / absent | `ResolvedModel` for the **calling endpoint's modality** default; response names what answered (FR-444 — a single platform-wide default would refuse every omitting caller on three of the four surfaces) |
+| `""` / absent | `ResolvedModel` for the **calling endpoint's modality** default, from that modality's designated authority (FR-444, FR-477); response names what answered. A single platform-wide default would refuse every omitting caller on three of the four surfaces |
+| `""` / absent, modality has **no** designated default | permanent refusal naming the modality (FR-477b) — never an arbitrary first match among promoted models |
 | `<name>`, promoted at the authorizing read, right modality | `ResolvedModel(name, promoted_version, modality, pinned=false)` — cache permitted only when the identity is already resident (FR-457c) |
 | `<name>:<v>` where `<v>` **is** promoted at read-through | `ResolvedModel(..., pinned=true)` — never answered from cache (FR-457b) |
 | `<name>:<v>` where `<v>` exists but is **not** promoted | `409 model_version_not_promoted`, body names the promoted version |
@@ -97,6 +98,30 @@ chosen by what the caller should *do*, not by what went wrong internally.
 
 The response names the currently promoted version, so a client can tell these apart without an
 operator. Without that, a well-behaved client retries forever against a moved pointer.
+
+## The four defaults
+
+An omitted `model` resolves per modality, and each modality needs a **designated authority** — one
+place that names a concrete registry identity the runtime will also agree on (FR-477).
+
+| modality | authority today | status |
+|---|---|---|
+| LLM | `registry.DEFAULT_LLM` (`SERVING_MODEL`) via `registry.active_serving_llm_name()` | **exists** |
+| embeddings | — | **must be defined** (FR-477b) |
+| ASR | — | **must be defined** (FR-477b) |
+| vision | — | **must be defined** (FR-477b) |
+
+`registry.resolve_serving_target(task)` is **not** an authority. It finds versions tagged for a task
+and, when several models share one, its own docstring says *"otherwise the first match is used"* —
+deterministic only while exactly one promoted model carries the tag, and silent when that stops being
+true.
+
+**Why this only becomes load-bearing now.** Omission works today because each endpoint posts to a
+fixed engine slot, so no identity is ever chosen and nothing can disagree. Once FR-439 requires
+resolving an omitted `model` to a concrete identity *before* the agent call, an arbitrary pick can
+differ from the runtime that answers — and FR-473a's guard then refuses a request that works today,
+or FR-458 reports an identity that did not serve. That is the 022 divergence, re-entering through
+the default path (FR-477a).
 
 ## Caching
 
@@ -168,7 +193,10 @@ time series per string any client has ever sent.
 6. The unpinned counterpart of the same setup may serve the stale version **only when it is already
    resident**, and its response must name the version it served — never the newly promoted one it
    did not.
-7. **The ambiguous-name case is reached.** Register a model literally named `svc:chat:3`, request it,
+7. **Each modality's default resolves to its designated authority's identity**, and a modality with
+   no designated default is **refused** naming the modality — never resolved to whichever promoted
+   model is found first. Asserted per surface, since three of the four have no authority today.
+8. **The ambiguous-name case is reached.** Register a model literally named `svc:chat:3`, request it,
    and assert `409 model_name_ambiguous` — not `404 model_not_found`. A resolver that applies
    FR-440a's split without the exact-name lookup first returns 404 and passes no test that only
    checks "it is refused", which is why the assertion is on the code.

@@ -1,6 +1,6 @@
 # Contract: Model-Addressed Inference (gateway ↔ host agent)
 
-**Requirements**: FR-446–FR-450, FR-458–FR-460, FR-473–FR-473c · **Phase**: 1 (field **asserted**) / 2 (field drives placement)
+**Requirements**: FR-446–FR-450, FR-451–FR-454, FR-458–FR-460, FR-473–FR-473c, FR-474–FR-474c, FR-476–FR-476a · **Phase**: 1 (field **asserted**) / 2 (field drives placement)
 
 > **Corrected after the second PR #88 review.** This contract previously said the field was merely
 > *"accepted"* in Phase 1 and *"honoured"* in Phase 2. That left Phase 1 without closure of the
@@ -39,7 +39,7 @@ test that exists to catch exactly this kind of surface growth.
 | `model_key` names the resident model | serve it |
 | `model_key` names a model in a transient state (`loading`/`draining`/`evicting`/`rolling_back`) | await the owning operation (026 T675's branch) or refuse `gpu_busy` — **never** fall through to another resident (FR-449) |
 | `model_key` names a non-resident model, Phase 1 | refuse **`not_resident`** — permanent, no `Retry-After`: Phase 1 has no placement path, so a transient code would send the client into an unbounded retry (FR-473b) |
-| `model_key` names the resident model, any phase | **compare and take the claim under the resident-set lock, then dispatch with the lock released** (FR-473a) — `_lock` guards state only and is never held across load/unload (`coordinator.py:24-29`, enforced by `LifecycleGuard`), and the claim is what keeps the matched resident alive for the generation |
+| `model_key` names the resident model, any phase | **compare and take the identity pin under the lock guarding the compared identity, then dispatch with the lock released** (FR-473a, FR-476) — `_lock` guards state only and is never held across load/unload (`coordinator.py:24-29`, enforced by `LifecycleGuard`). The pin is the coordinator's **claim** with `BROKER_COORDINATOR_ADMISSION=1`; with the flag **off** (the default) the coordinator is not the runtime admission authority and holds no resident entry to claim, so the comparison is against the **runtime's own child identity under the runtime's lock** |
 | `model_key` names a non-resident model, Phase 2+, **no placement authorization** | refuse `not_resident` — **never** auto-admit (FR-474) |
 | `model_key` names a non-resident model, Phase 2+, **with a valid placement authorization** | `Coordinator.admit_serving(model_key, est_bytes)`, then serve (FR-451–FR-454) |
 | placement authorization present but lapsed, or naming a different version | refuse; do **not** treat a lapsed authorization as still good (FR-474b) |
@@ -116,3 +116,8 @@ obligation, not new machinery.
    against the agent-side compare-and-claim.
 7. The assert never waits for a load, evicts anything, or consults the VRAM bounds (FR-473b) —
    asserted with a coordinator stub that fails the test if admission is called.
+8. **Both admission modes** (FR-476, FR-476a). Cases 1, 2, 5, and 6 run with
+   `BROKER_COORDINATOR_ADMISSION` in **both** positions and assert the same invariant in each: once
+   an identity is accepted for dispatch, no concurrent swap can cause a different model to answer,
+   and the pin is released on success, error, and stream termination. A case that skips with the flag
+   off leaves the **default** configuration unguarded while the suite reports green.
