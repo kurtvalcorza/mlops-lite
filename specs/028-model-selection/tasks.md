@@ -1,0 +1,202 @@
+# Tasks — 028 Model-Selective Serving
+
+**Input**: [spec.md](./spec.md), [plan.md](./plan.md), [data-model.md](./data-model.md), [research.md](./research.md), [contracts/](./contracts/), [quickstart.md](./quickstart.md)
+
+Ordered by the delivery phasing in [plan.md](./plan.md): **Phase 1 (CPU) → Phase 2 (GPU) → Phase 3
+(GPU)**. Task IDs continue the repo's global series; 027 ended at T769.
+
+**Conventions**
+- `[USn]` traces a task to a spec user story; every story carries coverage.
+- Foundational tasks carry no story tag — they unblock several stories at once.
+- `[P]` may run in parallel with its siblings (different files, no incomplete dependency).
+- **`[GPU]` cannot be claimed complete from a CPU-only test run.** Its check must be performed on the
+  target GPU host. A green suite on a machine without the GPU is evidence about the code, not about
+  the behaviour — which is exactly what 026 phase-gated for. There are **6**: T801, T802, T811, T814,
+  T816, T817.
+- **A `[GPU]` marker on a phase heading and on a task mean different things.** The heading marks the
+  phase's *exit* as hardware-gated; the per-task marker marks *that task's check* as requiring the
+  device. Most tasks inside a hardware-gated phase are code plus unit tests and are perfectly
+  CPU-verifiable — writing `became_resident_at` does not need a GPU, but proving an alternating
+  workload evicts at most once per window does. Do not read an unmarked task in Phase 2 or 3 as
+  needing hardware, and do not read the phase's CPU-verifiable majority as licence to call the phase
+  done without the six.
+- A task is done when its stated check passes, not when the code merely exists.
+
+**Where the P1 finding closes.** The reported defect — a request for model A answered by model B with
+no signal — closes at the **end of Phase 1**, with no GPU behaviour change. Phases 2 and 3 turn
+refusals into service. If only Phase 1 ever ships, the defect is still fixed.
+
+---
+
+## Phase 0 — Foundational (blocks everything; no story tag)
+
+- [ ] **T770** Record the full-suite baseline on the branch point before any change — total / failures / errors / skipped — into `specs/028-model-selection/evidence/baseline.md`, captured with the real exit code rather than read off a piped tail. Check: a later "no regressions" claim is a diff against this file, not an assertion.
+- [ ] **T771** Write the defect-pinning regression test in `tests/test_broker_openai_resolution.py`: with model A resident, a chat request naming promoted-but-not-resident model B must not return A's completion. Assert on the **response body**, not the status — before 028 this path returns `200`. Check: the test **fails** against unmodified `master`, and the failure is recorded. A regression test never measured red is a guess.
+- [ ] **T772** `[P]` Add `specs/028-model-selection/evidence/` and record in it which checks are CPU-verifiable and which are `[GPU]`, so a later completion claim cannot quietly cover a GPU task with a CPU run. Check: every `[GPU]` task in this file appears in that list.
+
+---
+
+## Phase 1 — Resolution and truth (CPU-only; closes the P1 finding) [US1] [US3]
+
+> **Not gateway-only.** An earlier revision said it was. The gateway reads residency from a separate
+> `GET /health` and issues the inference as a second call, so a check-then-use pair leaves a
+> time-of-check/time-of-use window (T783a–T783c). The phase includes the **smallest possible agent
+> change** — an identity assert under the resident-set lock. It is still CPU-verifiable and still
+> changes no GPU behaviour, because the assert is a guard, never a placement.
+
+### Resolution core
+
+- [ ] **T773** `[US1]` (**FR-439**) Create `gateway/app/modelresolve.py` with the `ResolvedModel` shape from [data-model.md](./data-model.md) — `name`, `version`, `modality`, `model_key`, `pinned`, `resolved_at`. Check: `model_key` renders as `name@version`, and a request string containing `@` cannot produce a key that collides with a well-formed one.
+- [ ] **T774** `[US1]` (**FR-440**, **FR-440a**) Implement the request grammar from [contracts/model-resolution.md](./contracts/model-resolution.md) — `""` / `<name>` / `<name>:<version>` — splitting on the **rightmost** `:` and accepting the suffix as a version only when it is all decimal digits, else treating the whole string as a bare name. Check: `svc:chat:3` resolves version 3 of `svc:chat`, and `svc:chat` resolves the bare name `svc:chat`. Registry versions are integers (`gateway/app/registry.py` sorts with `int(...)` in two places), which is what makes the rule total — without it a name containing `:` has no defined parse.
+- [ ] **T774a** `[US1]` (**FR-440b**) Refuse a registered name that stays ambiguous under FR-440a — one ending in `:` followed by digits, indistinguishable from a qualified reference to a shorter name — with a distinct code rather than guessing. Check: the refusal is reachable and reads as a registry-content problem for the operator, not a client error.
+- [ ] **T775** `[US1]` (**FR-439**, **FR-440**) Implement resolution against `gateway/app/registry.py` (`get_serving`, `_serving_version`, `_resolve_engine`), producing a `ResolvedModel` or a typed refusal. Check: a bare name resolves to the **promoted** version and its engine/modality.
+- [ ] **T776** `[US1]` (**FR-441**, **FR-442**, **FR-443**, **FR-440b**) Implement the **seven** refusal codes in [data-model.md](./data-model.md) — `model_not_found` 404, `model_not_promoted` 409, `model_wrong_modality` 400, `model_version_not_found` 404, `model_version_not_promoted` 409, `model_name_ambiguous` 409, `registry_unavailable` 503 — in the OpenAI error-body shape 026's contract uses. Check: an unmodified OpenAI client surfaces the message for each; `model_not_found` / `model_not_promoted` / `model_wrong_modality` stay three distinct codes because the operator remedy differs; and `model_name_ambiguous` is **reachable**, with a message pointing at the operator remedy (rename the model) rather than at the request — it indicts the registry's contents, not the caller.
+- [ ] **T777** `[US1]` Implement FR-457: a version qualifier is an **assertion**. `<name>:<v>` is served only when `<v>` is the promoted version; any other real version refuses `model_version_not_promoted`. Check: pinning a registered-but-unpromoted version refuses, and no load is attempted.
+- [ ] **T778** `[US1]` Implement FR-457a: the `model_version_not_promoted` body names the **currently promoted** version. Check: a client can distinguish "pinned something never promoted" from "promotion moved under me" from the response alone.
+- [ ] **T779** `[US1]` Implement FR-444: absent or empty `model` resolves to the platform default, reached directly and **never** as a fallback from a failed resolution. Check: a failed resolution does not silently become a default-model request.
+- [ ] **T780** `[US1]` Implement FR-445: when the registry is unreachable, refuse `registry_unavailable` with `Retry-After`. Check: with the registry down, no request reaches the host agent — asserted with a fake agent client that fails the test if called.
+- [ ] **T781** `[US1]` `[P]` (**FR-440c**, **FR-457c**, **FR-457d**) Implement the **volatility-split** resolution cache, honouring FR-440 as the normative bare-name policy — the TTL is the **only** permitted staleness and it applies solely to serving an already-resident version per [contracts/model-resolution.md](./contracts/model-resolution.md): `name → modality` long TTL, `name → promoted version` short TTL and unpinned-only, eager invalidation from `registry.promote` as an optimisation, and **only successful resolutions cached**. Check: 10k distinct unknown model strings leave the cache size unchanged; the key space is registry-controlled, never tenant-controlled; and the documented staleness bound is the **TTL**, not the invalidation hook.
+- [ ] **T781b** `[US1]` (**FR-457b**) Make a **pinned** request read the promotion pointer through, never from cache. Check: resolve `name:3`, move the alias to 4 via `set_registered_model_alias` **directly** — the path `scripts/retag_serving_llm.py:49` uses, bypassing `registry.promote` — then request `name:3` within the TTL. It must refuse `model_version_not_promoted` naming 4. A test that moves the alias through `registry.promote` exercises the eager-invalidation path and **passes against the defect**.
+- [ ] **T781c** `[US1]` `[P]` (**FR-457c**, **FR-458**) The unpinned counterpart: the same stale-alias setup may serve the stale version **only when it is already resident**, and the response must name the version it **served** — never the newly promoted one it did not. Check: request `model` equals response `model` on a stale hit.
+- [ ] **T781d** `[US1]` (**FR-457e**, **FR-457f**) Revalidate against a fresh promotion-pointer read before any **placement**, cached or not. Check: with a stale cache naming a demoted version that is **not** resident, the placement does not load it — serving a stale-but-resident version is a truthful answer about an older model, but *loading* one puts an unpromoted version into VRAM on tenant traffic, which is what 022's gate exists to prevent. Reporting the served version truthfully does not repair that; the placement already happened. Cost is one read per placement, not per request.
+- [ ] **T781a** `[US1]` `[P]` Measure resolution overhead on a **cache hit** and assert the plan's p50 budget of **≤ 5 ms**. Check: the number is recorded in `evidence/`. The plan previously said "a few ms", which gave nothing to check (`/speckit-analyze` finding A2) — an unmeasured performance goal is a wish.
+
+### Wiring the surface
+
+- [ ] **T782** `[US1]` (**FR-439**) Call resolution at the top of `POST /chat/completions` and `POST /embeddings` in `gateway/app/routers/broker_openai.py`, before `_Meter` and before any agent call. Check: a refused request consumes no quota reservation and produces no agent request. **Note**: an earlier revision of this task also named `/v1/completions`, which **does not exist** — the router exposes `GET /models`, `POST /chat/completions`, `POST /embeddings`, `POST /audio/transcriptions`, `POST /vision/{task}`, `GET /usage` (`/speckit-analyze` finding F1).
+- [ ] **T782a** `[US1]` (**FR-439**, **FR-443**, **FR-458**–**FR-460**) Wire resolution and truthful reporting into `POST /audio/transcriptions` and `POST /vision/{task}`. Both accept `model` today and neither validates it, so both carry the **same silent-substitution defect as chat**. Check: a transcription request naming a chat model refuses `model_wrong_modality`; each response names the identity that actually answered. Placement stays per-engine — re-keying these two surfaces is out of scope by decision, not by omission.
+- [ ] **T783** `[US1]` (**FR-448**) Phase-1 placement behaviour: a resolved model that is not the currently resident one refuses `gpu_busy` and is **never** answered by the resident model instead. Check: **T771 now passes** — a request for B returns a refusal naming B, and the body is not A's completion.
+- [ ] **T783a** `[US1]` (**FR-473**, **FR-473a**) Carry the expected identity on the inference request and assert it **at the agent**, comparing and dispatching under the **same lock** that guards the resident set. Check: the gateway's residency read (`gateway/app/serving.py:49`, a separate `GET /health`) is no longer what the guarantee rests on. Without this the phase has a check-then-use window and does not close the defect — it narrows it.
+- [ ] **T783b** `[US1]` (**FR-473**) Pin the TOCTOU directly: swap the engine from A to B **between** the residency read and the inference call, and assert the request is refused rather than answered by B. Check: the test fails against a gateway-only check. A suite that never interleaves a swap passes against the race, which is why this is its own task.
+- [ ] **T783c** `[US1]` (**FR-473b**, **FR-473c**) Keep the assert a **guard, not placement**: it must never wait for a load, evict, or consult the VRAM bounds. Check: a coordinator stub fails the test if admission is called — this is what keeps Phase 1 free of GPU behaviour change. And confirm the mechanism is not post-hoc comparison of the response's `serving_model`, which burns the GPU work and, on the streaming path, reports a mismatch after the tokens have already reached the client.
+- [ ] **T784** `[US3]` Remove the substitution-hiding branch at `gateway/app/routers/broker_openai.py:274` — `payload.get("serving_model") or body.model`. After 028 an absent `serving_model` is an **error**, not a cue to echo the request (FR-460). Check: a stubbed agent response omitting `serving_model` produces an error, not a response echoing the caller's string.
+- [ ] **T785** `[US3]` (**FR-458**, **SC-208**) Report the resolved name **and** version on every non-streaming response. Check: two requests answered by different versions of one model are distinguishable by the client, and a client comparing request `model` to response `model` finds them equal.
+- [ ] **T786** `[US3]` (**FR-459**, **SC-208**) Fix the streaming path: `broker_openai.py:320` puts `body.model` on every chunk unconditionally, making streaming **less** truthful than non-streaming. Emit the served identity on chunks and the terminal event. Check: a streamed and a non-streamed request for the same model report identical identities.
+- [ ] **T787** `[US3]` `[P]` (**FR-461**, **FR-461a**) Tag each `GET /v1/models` entry with its modality from `registry._resolve_engine`. **Do not filter** — there is exactly one global `/v1/models`, so there is no "surface's modality" to filter to. Check: the listing spans modalities, every entry carries its tag, and the documentation says a listed id may still be refused `model_wrong_modality` by a given endpoint.
+- [ ] **T787a** `[US3]` (**FR-462**, **FR-462a**) Source `resident` from the **host agent**, joining the agent's resident set onto the registry identities — not from `registry.list_models()`, which knows what is promoted and nothing about what is loaded (022 FR-260/261/262; `gateway/app/routers/infer.py`). Check: with the agent unreachable the field is **omitted**, not `false` and not inferred from the promotion pointer.
+- [ ] **T788** `[US3]` (**FR-462**) Label `resident` in the listing as advisory. Check: the field's documentation says it may be stale on arrival, so a client cannot read it as a guarantee the platform did not make.
+- [ ] **T789** `[US1]` `[P]` Add the resolution-refusal counter with the **bounded** `reason` vocabulary from [contracts/model-resolution.md](./contracts/model-resolution.md) (FR-464). Check: the model name is never a label — the trap `hostagent/metrics.py` already documents for `malformed_length`.
+
+### Phase 1 verification
+
+- [ ] **T790** `[US1]` (**SC-205**) Test every row of the outcomes table in [contracts/model-resolution.md](./contracts/model-resolution.md), asserting the **code** and, for both version cases, the body naming the promoted version. Check: all rows covered; no row asserted on status alone; and for every refusal a client can tell from the response **alone** whether retrying will help.
+- [ ] **T791** `[US1]` Run the whole Phase-1 suite in **both** positions of `BROKER_COORDINATOR_ADMISSION` (research R7). Check: green with the flag off — which is the default, and therefore the configuration an operator actually has.
+- [ ] **T792** `[US1]` Perform the two `curl` checks in [quickstart.md](./quickstart.md) against a running gateway: the substitution check and the listing check. Check: SC-204 holds — of one request per listed id, **zero** are served by a different model.
+
+**Phase 1 exit**: SC-204, SC-205, SC-208, SC-210 demonstrable; US1's and US3's Independent Tests pass; the reported P1 finding is closed **race-free**, not merely narrowed — T783b must fail against a gateway-only check. **No GPU required, and no GPU behaviour changed**: the agent change is an assert, and T783c proves admission is never called.
+
+---
+
+## Phase 2 — Model-keyed admission and on-demand placement [US2] *(exit is hardware-gated)*
+
+**Gate**: Phase 1 complete. The phase **exits** only on the target GPU host with
+`BROKER_COORDINATOR_ADMISSION=1`. Most tasks below are CPU-verifiable; the four that are not carry
+`[GPU]`.
+
+### Configuration and state
+
+- [ ] **T793** (**FR-456**, **FR-467**, **FR-469**) Extend the coordinator's typed config (026 T623) and `.specify/memory/hardware-profile.md` with `min_residency_s` (default 60 s), `vram_estimate_multiplier` (default 1.2, must be ≥ 1), `host_ram_budget_bytes`, and `host_ram_estimate_bytes`. Check: all four resolve from config, none is hardcoded, and the multiplier rejects a value below 1 — under-estimating is the dangerous direction (research R3).
+- [ ] **T794** `[US2]` (**FR-456**) Add `became_resident_at` to `ResidentModel.__slots__` in `hostagent/coordinator.py`, set **once** on the transition into `resident` — not at entry creation, so a slow load does not consume its own protection. Check: an entry that spent 40 s `loading` starts its window with the full duration remaining.
+- [ ] **T794a** `[US2]` (**FR-470**) Add the host-RAM state FR-470's equation reads: `host_ram_accounted_bytes` on `ResidentModel` and `host_ram_est_bytes` on `Reservation` (`hostagent/coordinator.py:151`, `:193`). Check: both sides of `Σ resident host RAM + Σ reserved host RAM` have a field behind them — the coordinator carries **only** VRAM accounting today, so the equation was previously stated against state that did not exist. `host_ram_accounted_bytes` is 0 while `loading`, exactly as `vram_accounted_bytes` is, so the reservation's estimate is not double-counted.
+- [ ] **T795** `[US2]` Change `Coordinator._select_victims` to return the `VictimSelection` record from [data-model.md](./data-model.md) — `victims`, `blocked_by`, `retry_after_s` — replacing the overloaded bare `[]`. Check: each of `insufficient`, `transient`, `residency_window` is produced by a test that constructs exactly that condition.
+
+### The residency window
+
+- [ ] **T796** `[US2]` Add the window as a third eligibility conjunct in `_select_victims` (FR-456). Check: a model resident for less than the window is not selected even when idle and LRU — the case that would otherwise make it the *most* attractive victim.
+- [ ] **T797** `[US2]` (**FR-456a**) Compute `retry_after_s` as `min over sufficient sets S of (max expiry in S)` — the point at which a **sufficient victim set** becomes eligible, evaluated over the evictor's own greedy order so the answer matches what the evictor would pick. Map `blocked_by == "residency_window"` to `503 gpu_busy` with that value. Check: the assertion is on the **number**, within tolerance — not on the header's presence.
+- [ ] **T797a** `[US2]` (**FR-456a**) Pin the **multi-victim** case that the earlier single-victim rule got wrong: a placement needing three victims with windows expiring at 10 s / 20 s / 30 s must answer **30**, not 10, and honouring it must succeed on the first retry **in a quiesced test with no competing traffic**. Check: the test fails against a `retry_after_s` computed from the earliest protected victim. A suite whose placements only ever need one victim passes against that defect. The quiesced qualifier is required, not a convenience — `Retry-After` is a lower bound, and a test asserting unconditional first-retry success would assert something the system does not promise.
+- [ ] **T798** `[US2]` (**FR-456a**) Document and test `Retry-After` as a **lower bound**: it says when the window expires, not when the eviction will happen. Check: the contract text and the response documentation agree that no eviction is promised.
+- [ ] **T799** `[US2]` Exempt the exclusive-job path from the window (FR-456c). Check: the window never delays or blocks a job's admission or release; FR-455's never-preempt is strictly stronger and remains the governing rule.
+- [ ] **T800** `[US2]` (**FR-456**) Verify `min_residency_s = 0` reproduces 026's victim selection **exactly**. Check: the 026 characterization suite passes unchanged — without this, a regression in ordinary eviction is indistinguishable from a regression in the window.
+- [ ] **T801** `[US2]` `[GPU]` (**FR-456a**) Verify the bound end-to-end: honour the returned `Retry-After`, retry **once**, and succeed — with the workload quiesced for the interval, since another tenant taking the slot is permitted behaviour and not a failure of the bound. Check: it holds against a real load, not a stub, for a multi-victim placement as well as a single-victim one.
+- [ ] **T802** `[US2]` `[GPU]` (**FR-456b**, **SC-209**) Drive an alternating two-model workload over N windows and count evictions in the admission journal. Check: **≤ N**, not one per request — the eviction rate is set by the configured period, not by request volume.
+
+### Model-keyed admission
+
+- [ ] **T803** `[US2]` Stop collapsing `model_key` to `engine_id` on the serving path in `hostagent/coordadmission.py`, preserving the exclusive-job path unchanged (FR-447). Check: the shim's job cases in `tests/test_broker_coadmission.py` pass unmodified while serving cases now key on a model.
+- [ ] **T804** `[US2]` (**FR-451**) Implement the per-model VRAM estimate from research R3 — artifact size × `vram_estimate_multiplier`, with a per-model config override. Check: the coordinator's post-load reconciliation corrects a deliberately **under**-estimated model, and the test asserts the corrected accounting, not the estimate.
+- [ ] **T805** `[US2]` (**FR-446**) Make the `model_key` field introduced in T783a **drive dispatch across multiple resident children**, not just assert against the single one. T783a adds the field and the guard; this task is the routing behaviour on top of it — they are not two introductions of the same field. Check: with two residents, a request naming each reaches **that** model's child — asserted on the child, not on the response echo; and **no new top-level agent route**, so `tests/test_console_allowlist.py` passes unedited.
+- [ ] **T805a** `[US2]` (**FR-474**, **FR-474a**) Refuse a non-resident `model_key` that arrives **without a placement authorization** with a distinct `not_resident` code — never auto-admit. Check: an agent that admits on the key alone places a version resolved from a stale cache, defeating FR-457e; the test sends a stale-cache-shaped request and asserts nothing is loaded.
+- [ ] **T805b** `[US2]` (**FR-474a**, **FR-474b**) Implement the gateway side of the two-step flow: on `not_resident`, re-read the promotion pointer **fresh**, and only if the identity is still promoted re-issue with an authorization naming the exact `(name, version)` and a short validity bound. Check: the agent places that version and no other, and a **lapsed** authorization is refused rather than honoured.
+- [ ] **T805c** `[US2]` (**FR-474c**) Document the residual window where the design states its limit: the registry read and the admission are in different processes, so the alias can move between them. Check: the contract claims only that tenant traffic never places from a cache of arbitrary age — not cross-process atomicity it does not have.
+- [ ] **T805d** `[US2]` `[P]` (**FR-475**, **FR-475a**, **FR-475b**) Audit every "current" / "currently promoted" / "only promoted" claim in the increment against the **single linearization point**, and restate each as bounded by its own authorizing read. Check: no requirement, contract, or dependency note promises currency at an instant later than the read that authorized the operation — and the audit confirms 022's gate is untouched, since an unpromoted version is authorized at no instant.
+- [ ] **T806** `[US2]` Preserve absent-`model_key` behaviour for the three existing callers — `gateway/app/routers/infer.py`, `gateway/app/platform_health.py`, `training/flows/batch_infer.py` (research R8). Check: all three work unchanged; the field is optional, not required.
+- [ ] **T807** `[US2]` Route a request whose `model_key` is in a transient state to 026 T675's await branch, never to another resident (FR-449). Check: a request arriving mid-rollback neither creates a competing `loading` entry nor receives a different model's output.
+- [ ] **T808** `[US2]` (**FR-451**, **FR-452**, **SC-206**) Wire the inference path to `Coordinator.admit_serving` for a resolved, promoted, non-resident model. Check: the model becomes resident and answers **in a single request with no operator involvement**; eviction drains in-flight requests before unloading.
+- [ ] **T809** `[US2]` Verify concurrent requests for the same non-resident key produce **one** load, joining via `Reservation.waiters` (FR-450). Check: exactly one load in the journal for N concurrent arrivals.
+- [ ] **T810** `[US2]` Map placement outcomes to the 026 refusal codes: `model_too_large` **only** when the estimate exceeds `usable_capacity − headroom`, `gpu_busy` for every contention case (FR-453, FR-454). Check: a model blocked by contention never returns 413.
+- [ ] **T811** `[US2]` `[GPU]` Verify job exclusivity under tenant-initiated placement (FR-455). Check: with a training job running, a model request returns `gpu_busy` with `Retry-After`, the job is not preempted, and **no eviction is attempted**.
+
+### Accounting and journal
+
+- [ ] **T812** `[US2]` Record the resolved model identity and the deciding bound on every placement decision in `hostagent/admissionlog.py` (FR-463). Check: an operator can reconstruct why a specific tenant request was refused from the journal alone.
+- [ ] **T813** `[US2]` Ensure a request refused **after** an eviction already occurred is not metered as billable output, while the eviction is still journaled (FR-465). Check: the ledger shows no output charge; the journal shows the eviction.
+- [ ] **T814** `[US2]` `[GPU]` Verify both VRAM invariants across a mixed multi-model workload by reading `GET /admin/queue` alone (SC-207). Check: `accounted + reserved ≤ usable_capacity` at every poll, with no recourse to agent logs.
+
+**Phase 2 exit**: SC-206, SC-207, SC-209 demonstrable on the GPU host; US2's Independent Test passes for the swap case. Two LLMs still do not co-reside — that is Phase 3.
+
+---
+
+## Phase 3 — LLM co-residency [US2] *(exit is hardware-gated)*
+
+**Gate**: Phase 2 complete and hardware-validated. This is the last unimplemented sentence of 026's
+inference contract. Two of the five tasks below carry `[GPU]`.
+
+- [ ] **T815** `[US2]` (**FR-451**) Change `hostagent/lifecycle.py` from one `EngineRuntime` per `engine_id` to one per resident model, so `EngineSupervisor.runtimes` can hold two LLM children. Check: `adapter.spawn()` is invoked per model, and `set_child` reports the right PID for each.
+- [ ] **T815a** `[US2]` (**FR-469**) Define the incoming child's host-RAM estimate: a per-adapter default mirroring the existing `estimate_vram()` constant, plus a per-model override. Check: `host_ram_estimate_bytes` resolves for every adapter — without it FR-467's precondition has no left-hand side and cannot be implemented at all.
+- [ ] **T815b** `[US2]` (**FR-467**, **FR-470**) Enforce the accounting equation as an admission **precondition**: `Σ accounted host RAM of resident serving children + Σ outstanding host-RAM reservations + incoming estimate ≤ host_ram_budget_bytes`, refused with the transient contention code **before** the spawn. Check: one bound only — there is no live-free analogue for host RAM, because no device-reported free figure is meaningful across mmap'd children; and it is never admitted-then-reclaimed, since nothing gives host RAM back within the request.
+- [ ] **T815c** `[US2]` (**FR-471**) Measure on a **PSS** basis, not RSS. Check: two children sharing mmap'd GGUF page-cache pages are accounted **once**, not twice — asserted against a case where the RSS sum exceeds the budget while the PSS sum does not, so an RSS-based implementation refuses a placement that fits. Where PSS is unavailable, the fallback subtracts shared file-backed pages and records that it is a fallback.
+- [ ] **T815d** `[US2]` (**FR-472**) Reconcile a child's accounted host RAM to the measured value after spawn. Check: a deliberately under-estimated model leaves the **next** admission deciding against the measured figure, not the estimate — this reclaims nothing for the request that just ran, which is past helping.
+- [ ] **T816** `[US2]` `[GPU]` (**FR-451**, **FR-452**) Verify two LLMs that both fit are both resident and neither request evicts the other. Check: `GET /admin/queue` shows two `resident` entries with `accounted + reserved ≤ usable_capacity` throughout, and interleaved requests each name their own model.
+- [ ] **T817** `[US2]` `[GPU]` (**FR-468**, **SC-211**) Measure resident **host RAM** with one LLM and with two, and calibrate `host_ram_budget_bytes` against the measurement. Check: the figures are recorded in `evidence/`, T815a's bound is set from them rather than assumed, and a placement that would breach the budget is **refused** — verified by setting the budget below the two-child figure and confirming the second placement is refused, not admitted. If the real delta puts the platform outside Principle III's budget, that is a finding to report, not a number to omit.
+- [ ] **T818** `[US2]` `[P]` (**FR-462**) Surface per-model residency in the console (it already renders the resident set from 026 T656). Check: the displayed set matches the coordinator's during a two-LLM workload.
+
+**Phase 3 exit**: 026's `contracts/inference-openai.md` co-residency sentence is implemented for LLMs, and SC-211 holds — the host-RAM bound is enforced and calibrated against a recorded measurement, not an estimate.
+
+---
+
+## Phase 4 — Polish and cross-cutting (no story tag)
+
+- [ ] **T819** Replace the README's disclosure that `model` selects nothing with an accurate description of what it now selects, **in the same increment that changes the behaviour** (FR-466). Check: SC-210 — no documentation in the repository states that `model` selects nothing.
+- [ ] **T820** `[P]` Record in `specs/026-lan-gpu-broker/` that its inference contract's model-targeted admission is implemented by 028, with the phase that did it. Check: a reader of 026 is not left believing the sentence was delivered in 026.
+- [ ] **T821** `[P]` Document the three tunables from [quickstart.md](./quickstart.md) — `min_residency_s`, `vram_estimate_multiplier`, `model_resolution_ttl_s` — where an operator will find them. Check: each is discoverable from `hardware-profile.md` or the README, not only from this spec.
+- [ ] **T822** File the deliberate omissions from research R8 as follow-up work: `gateway/app/routers/infer.py` and `training/flows/batch_infer.py` both read `SERVING_URL` and carry the **same substitution shape**, and neither is in this increment's scope. Check: a tracked follow-up exists; the omission is visible rather than discovered later.
+- [ ] **T823** Re-run the full suite and diff against T770's baseline. Check: newly-failing count is **zero**, stated as a measured diff with the real exit code — not as an assertion.
+
+---
+
+## Dependencies
+
+```text
+Phase 0  ──▶  Phase 1  ──▶  Phase 2 [GPU]  ──▶  Phase 3 [GPU]
+                  │                                   │
+                  └───────────────▶ Phase 4 ◀─────────┘
+```
+
+- **Phase 1 depends on nothing but Phase 0** and requires no GPU. It is the MVP.
+- **Phase 2 depends on Phase 1** (it needs a resolved identity to key on) and on
+  `BROKER_COORDINATOR_ADMISSION=1`.
+- **Phase 3 depends on Phase 2.**
+- **Phase 4's T819 depends on whichever phase last shipped** — the README must describe what is
+  actually built, not what is planned. That is the discipline the 026 README drift already cost once.
+
+## Parallel opportunities
+
+- Phase 0: T772 alongside T770/T771.
+- Phase 1: T781 (cache), T787 (listing), T789 (metrics) are independent of the resolution core once
+  T773–T776 land.
+- Phase 2: T793 (config) is independent of T794/T795; T803 (shim) and T804 (estimate) touch different
+  files.
+- Phase 4: T820 and T821 are independent of each other and of T819.
+
+## Suggested MVP
+
+**Phase 0 + Phase 1 (T770–T792, including T781a and T782a).** It closes the reported P1 finding,
+requires no GPU, changes no GPU behaviour, and is correct in both positions of the admission flag.
+Everything after it converts truthful refusals into service — valuable, but not what the finding
+asked for.
+
+**Note on task IDs.** T781a, T782a, and T815a carry letter suffixes because they were inserted by the
+`/speckit-analyze` remediation after the block was numbered. Renumbering 40+ downstream tasks to
+close the gap would invalidate every reference already written into these artifacts, for no gain;
+the suffix convention matches the one the spec already uses for FR-456a/FR-457a.
