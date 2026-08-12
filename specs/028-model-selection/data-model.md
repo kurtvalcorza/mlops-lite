@@ -229,6 +229,7 @@ transient and carries `Retry-After`:
 | `model_version_not_found` | 404 | the qualifier names a version that does not exist |
 | `model_version_not_promoted` | 409 | the version exists but is not the promoted one (FR-457) |
 | `model_name_ambiguous` | 409 | a registered name ends in `:` followed by digits, so it cannot be told apart from a qualified reference to a shorter name (FR-440b) |
+| `model_default_unconfigured` | 409 | `model` was omitted and the endpoint's modality has no designated default — reachable only when the modality has no promoted serving model at all (FR-477d) |
 | `registry_unavailable` | 503 | resolution could not be performed; transient, carries `Retry-After` |
 
 The **routing** refusal is produced by the agent rather than the resolver, because residency is the
@@ -247,6 +248,12 @@ degenerates into the auto-admit path it was written to replace. In **Phase 1** t
 path at all, so a transient code would send a client into an unbounded retry against a state that
 cannot change within the phase.
 
+`model_default_unconfigured` is likewise a **configuration** problem rather than a client error: the
+caller omitted `model`, which is valid on every surface, and the platform has nothing designated to
+answer with. Its message must name the modality and point at the pointer the operator sets. It is
+**not** reachable on a deployment where the modality's engine is serving something, because FR-477c
+bootstraps each pointer's default to the identity that engine already serves.
+
 `model_name_ambiguous` is a **registry-content** problem, not a client error: the caller sent a
 well-formed string and the registry holds a name no rightmost-split grammar can disambiguate. It is
 409 rather than 400 for that reason, and its message must point at the operator remedy — rename the
@@ -257,6 +264,7 @@ is fine, and a client that treats it as GPU contention would back off against th
 
 Per FR-464 these are counted with a **bounded** label vocabulary:
 `model_not_found | model_not_promoted | model_wrong_modality | model_version_not_found |
-model_version_not_promoted | model_name_ambiguous | registry_unavailable | not_resident`. The model name is
+model_version_not_promoted | model_name_ambiguous | model_default_unconfigured | registry_unavailable |
+not_resident`. The model name is
 tenant-controlled and never becomes a label — the same trap `hostagent/metrics.py` already documents
 for `malformed_length`.

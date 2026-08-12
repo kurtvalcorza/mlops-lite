@@ -434,7 +434,8 @@ at FR-446–FR-450.*
 - **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
   the engine it would dispatch to does not host it. The comparison and the **acquisition of the claim
   that pins the matched resident** MUST occur together under the lock guarding the resident set; the
-  dispatch itself MUST then run with that lock **released**, against the pin. A comparison
+  dispatch itself MUST then run with the **coordinator's** lock released, against the pin — see FR-476,
+  which makes the release requirement mode-specific because the two locks have opposite disciplines. A comparison
   performed anywhere else in the agent reintroduces a narrower version of the same window, and a
   comparison that does not take a pin leaves the model evictable or swappable between the check and
   the dispatch — which is the same window by another route. **Which lock and which pin depends on
@@ -530,15 +531,34 @@ of the two configurations the platform actually ships.*
     there**. `hostagent/main.py::_build_admission()` returns the legacy `adm.Admission`; the
     coordinator is constructed separately and later by `build_broker()`, so `_register_runtime()` is
     a no-op during `build_agent()` because `_RUNTIME_LIFECYCLE` does not yet exist. In this mode the
-    comparison MUST be against the **runtime's own child/model identity**, pinned under the
-    **runtime's** lock — which `coordadmission.py` already documents as the owner of request
-    lifetime under the legacy shim.
+    comparison MUST be against the **runtime's own child/model identity**, and the pin is the
+    **runtime lock held across the dispatch** — `rt.lock`, exactly as `_forward_under_lease()` and
+    `stream_frames()` already hold it today.
+- **FR-476b**: The **release-before-I/O rule of FR-473a applies to the coordinator's lock only**, and
+  this asymmetry is required rather than incidental. The two locks have opposite disciplines:
+  `coordinator._lock` guards state and MUST NOT be held across I/O — `LifecycleGuard` raises if it is
+  — so there the pin must be a separate object, which is what 026's claim is. `EngineRuntime.lock` is
+  the opposite: `hostagent/main.py::_forward_under_lease()` states it is *"held across the whole
+  forward so the reaper/swap cannot unload mid-flight"*, `stream_frames()` holds it *"across the whole
+  generation"*, and `EngineRuntime.unload()` takes the same lock before teardown. **Holding it across
+  the dispatch is the durable pin**, and releasing it before dispatch would *remove* protection that
+  ships today. Capturing `rt.child` and then releasing the lock is **not** a pin: nothing would make a
+  concurrent unload or swap honour the captured identity, and no ref-count, lease, or generation token
+  exists on the runtime to supply one. An implementation MUST NOT do that.
+- **FR-476c**: One documented exception must be stated rather than discovered. `EngineRuntime.unload()`
+  drains bounded by `drain_timeout_s` and, **on drain timeout, proceeds without the runtime lock** —
+  the llama supervisor's hard-cut semantics, deliberate since 018. So the flag-off pin is not absolute.
+  What it guarantees is the property 028 needs: a hard-cut **terminates** the in-flight request, which
+  loses its child and fails — it never causes a **different** model to answer. Substitution is what
+  this increment exists to prevent; a bounded, loud failure is not substitution.
 - **FR-476a**: The two implementations MUST satisfy one **stated invariant**, so the guard is a
   property of the platform rather than of a configuration: *once an identity is accepted for
-  dispatch, no concurrent swap, reload, eviction, or idle-release can cause a different model to
+  dispatch, no concurrent swap, reload, eviction, or idle-release can cause a **different model** to
   answer that request, and the pin is released on every terminal path.* A requirement whose only
   mechanism exists in the non-default configuration is not implemented in the configuration an
-  operator actually runs.
+  operator actually runs. The invariant is stated about **which model answers**, not about the request
+  surviving: FR-476c's hard-cut can still fail a request past the drain bound, and that is compatible
+  with the invariant because a failed request answers with no model at all.
 
 **Per-modality default authority**
 
@@ -561,6 +581,32 @@ of the two configurations the platform actually ships.*
   modality and none is designated; and the mechanism guaranteeing **resolver/runtime agreement**. A
   missing default MUST be refused with a permanent, machine-readable code naming the modality — never
   silently resolved to whichever model is found first.
+- **FR-477c**: Those four choices are **settled here, not deferred to implementation**, because
+  FR-444/T779 simultaneously require omission to keep working on all four surfaces. Leaving the
+  authority undefined would let an implementation satisfy FR-477b by refusing every omitted
+  embeddings, ASR, and vision request — technically conforming, and a break of the back-compatibility
+  FR-444 exists to protect. The policy is:
+  - **Source.** Each modality gets an explicit configuration pointer mirroring the LLM's
+    `SERVING_MODEL` — a per-modality serving-model name. Its **default value is the identity the
+    fixed engine for that modality already serves**, so omission keeps working with **no operator
+    action** on an existing deployment.
+  - **Resolution.** The pointer is resolved through `registry.resolve_serving_target(task,
+    prefer_name=<pointer>)`. `prefer_name` is the disambiguation that function already exposes for
+    exactly this case, so a second promoted model carrying the same task cannot displace the
+    configured one.
+  - **Several promoted, none designated.** The pointer is what designates. If the pointer names a
+    model that is not promoted for that modality, the request is refused — the resolver MUST NOT fall
+    back to `resolve_serving_target`'s *"otherwise the first match is used"* branch, which is
+    discovery and is deterministic only while exactly one promoted model carries the tag.
+  - **No default at all.** Only reachable when the modality has **no** promoted serving model, which
+    is already surfaced today as "not configured" — so making it a refusal breaks nothing that works.
+- **FR-477d**: That refusal MUST be a named code — **`model_default_unconfigured`, HTTP 409** — with
+  its own value in FR-464's bounded metric vocabulary, its own row in the outcomes table, and its own
+  test. It is 409 for the same reason `model_name_ambiguous` is: the caller sent a well-formed
+  request and the **platform's configuration** is what cannot answer it, so the message must point at
+  the operator remedy. An earlier revision required "a permanent, machine-readable code" without
+  naming one, which is the same unimplementable shape FR-440b had before it was given 409
+  `model_name_ambiguous`.
 
 ### Key Entities
 

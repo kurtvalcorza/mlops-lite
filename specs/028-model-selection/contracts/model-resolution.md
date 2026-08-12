@@ -67,7 +67,7 @@ evaluation gate remains the only way a version becomes servable at all (FR-475b)
 | input | outcome |
 |---|---|
 | `""` / absent | `ResolvedModel` for the **calling endpoint's modality** default, from that modality's designated authority (FR-444, FR-477); response names what answered. A single platform-wide default would refuse every omitting caller on three of the four surfaces |
-| `""` / absent, modality has **no** designated default | permanent refusal naming the modality (FR-477b) — never an arbitrary first match among promoted models |
+| `""` / absent, modality has **no** promoted serving model | **409 `model_default_unconfigured`** naming the modality (FR-477b, FR-477d) — never an arbitrary first match among promoted models |
 | `<name>`, promoted at the authorizing read, right modality | `ResolvedModel(name, promoted_version, modality, pinned=false)` — cache permitted only when the identity is already resident (FR-457c) |
 | `<name>:<v>` where `<v>` **is** promoted at read-through | `ResolvedModel(..., pinned=true)` — never answered from cache (FR-457b) |
 | `<name>:<v>` where `<v>` exists but is **not** promoted | `409 model_version_not_promoted`, body names the promoted version |
@@ -107,9 +107,21 @@ place that names a concrete registry identity the runtime will also agree on (FR
 | modality | authority today | status |
 |---|---|---|
 | LLM | `registry.DEFAULT_LLM` (`SERVING_MODEL`) via `registry.active_serving_llm_name()` | **exists** |
-| embeddings | — | **must be defined** (FR-477b) |
-| ASR | — | **must be defined** (FR-477b) |
-| vision | — | **must be defined** (FR-477b) |
+| embeddings | per-modality serving-model pointer, defaulting to the identity the embeddings engine already serves | **defined by FR-477c** |
+| ASR | per-modality serving-model pointer, defaulting to the identity the ASR engine already serves | **defined by FR-477c** |
+| vision | per-modality serving-model pointer, defaulting to the identity the vision engine already serves | **defined by FR-477c** |
+
+Each pointer resolves through `registry.resolve_serving_target(task, prefer_name=<pointer>)` —
+`prefer_name` is the disambiguation that function already exposes, so a second promoted model sharing
+the task cannot displace the configured one. The resolver MUST NOT fall through to the
+*"otherwise the first match is used"* branch; when the pointer names a model that is not promoted for
+the modality, the request is refused rather than served by whatever was found.
+
+**The defaults bootstrap to what already works.** Each pointer's default value is the identity that
+modality's fixed engine serves today, so omission keeps working with **no operator action** on an
+existing deployment. That is what makes FR-444's back-compatibility requirement and FR-477b's
+refusal compatible rather than contradictory: `model_default_unconfigured` is reachable only when the
+modality has no promoted serving model at all — already surfaced today as "not configured".
 
 `registry.resolve_serving_target(task)` is **not** an authority. It finds versions tagged for a task
 and, when several models share one, its own docstring says *"otherwise the first match is used"* —
@@ -162,7 +174,8 @@ identical trap `hostagent/metrics.py` documents for `malformed_length` metric la
 
 A single counter with a **bounded** `reason` vocabulary:
 `model_not_found | model_not_promoted | model_wrong_modality | model_version_not_found |
-model_version_not_promoted | model_name_ambiguous | registry_unavailable`.
+model_version_not_promoted | model_name_ambiguous | model_default_unconfigured |
+registry_unavailable`.
 
 `model_name_ambiguous` is worth its own value rather than folding into `model_not_found`: it is the
 one refusal in the set that indicts the **registry's contents** rather than the request, and an
@@ -193,9 +206,12 @@ time series per string any client has ever sent.
 6. The unpinned counterpart of the same setup may serve the stale version **only when it is already
    resident**, and its response must name the version it served — never the newly promoted one it
    did not.
-7. **Each modality's default resolves to its designated authority's identity**, and a modality with
-   no designated default is **refused** naming the modality — never resolved to whichever promoted
-   model is found first. Asserted per surface, since three of the four have no authority today.
+7. **Each modality's default resolves to its designated pointer's identity**, asserted per surface.
+   Two halves, and the second is the one that can regress: a modality whose pointer is unset resolves
+   to the identity its engine already serves (**omission keeps working**, FR-444/FR-477c), while a
+   modality with **no promoted serving model** is refused **409 `model_default_unconfigured`** naming
+   the modality. A test that only covers the refusal half passes against an implementation that has
+   broken every omitting caller on three surfaces.
 8. **The ambiguous-name case is reached.** Register a model literally named `svc:chat:3`, request it,
    and assert `409 model_name_ambiguous` — not `404 model_not_found`. A resolver that applies
    FR-440a's split without the exact-name lookup first returns 404 and passes no test that only
