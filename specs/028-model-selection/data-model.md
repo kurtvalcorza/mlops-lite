@@ -229,7 +229,7 @@ transient and carries `Retry-After`:
 | `model_version_not_found` | 404 | the qualifier names a version that does not exist |
 | `model_version_not_promoted` | 409 | the version exists but is not the promoted one (FR-457) |
 | `model_name_ambiguous` | 409 | a registered name ends in `:` followed by digits, so it cannot be told apart from a qualified reference to a shorter name (FR-440b) |
-| `model_default_unconfigured` | 409 | `model` was omitted and the endpoint's modality has no designated default — reachable only when the modality has no promoted serving model at all (FR-477d) |
+| `model_default_unconfigured` | 409 | `model` was omitted and the endpoint's modality has no usable designated default — nothing promoted, the pointer names a model not promoted for it, or the pointer is unset while two or more promoted models carry the task (FR-477c, FR-477d) |
 | `registry_unavailable` | 503 | resolution could not be performed; transient, carries `Retry-After` |
 
 The **routing** refusal is produced by the agent rather than the resolver, because residency is the
@@ -250,9 +250,12 @@ cannot change within the phase.
 
 `model_default_unconfigured` is likewise a **configuration** problem rather than a client error: the
 caller omitted `model`, which is valid on every surface, and the platform has nothing designated to
-answer with. Its message must name the modality and point at the pointer the operator sets. It is
-**not** reachable on a deployment where the modality's engine is serving something, because FR-477c
-bootstraps each pointer's default to the identity that engine already serves.
+answer with. Its message must name the modality **and the pointer to set** — an operator told only
+that the platform is misconfigured has not been told which knob fixes it. It is **not** reachable on
+a deployment whose modality has exactly one promoted model, which is the deterministic case FR-477c
+keeps working with no operator action; the three states that do reach it are all configuration —
+nothing promoted, the pointer naming something not promoted, or the pointer unset while two or more
+promoted models carry the task.
 
 `model_name_ambiguous` is a **registry-content** problem, not a client error: the caller sent a
 well-formed string and the registry holds a name no rightmost-split grammar can disambiguate. It is

@@ -563,13 +563,27 @@ of the two configurations the platform actually ships.*
 **Per-modality default authority**
 
 - **FR-477**: Each of the four modality defaults required by FR-444 MUST have a **single designated
-  authority** that names a concrete registry identity, and the resolver and the runtime that answers
-  MUST be guaranteed to agree on it. Only the LLM modality has one today —
-  `registry.DEFAULT_LLM` (`SERVING_MODEL`) with `registry.active_serving_llm_name()`. Embeddings,
-  ASR, and vision have none: `registry.resolve_serving_target(task)` finds versions tagged for a task
-  and, when several models share it, documents that *"otherwise the first match is used"*. That is
-  **discovery, not a designated default** — deterministic only while exactly one promoted model
-  carries the tag.
+  authority** that names a concrete registry identity, and the increment MUST state how the resolver
+  and the answering runtime come to agree on it (FR-477e). Three of the four pointers already ship,
+  so the gap is narrower — and differently shaped — than "no authority":
+  - **LLM** — `registry.DEFAULT_LLM` (`SERVING_MODEL`) via `registry.active_serving_llm_name()`.
+  - **ASR** — `ASR_SERVING_MODEL` (`gateway/app/routers/transcribe.py:25`), already passed as
+    `prefer_name` to `registry.resolve_serving_target("asr", …)`.
+  - **Vision** — `VISION_SERVING_MODEL` (`gateway/app/routers/vision.py:24`), likewise for
+    `image-classification`. `TABULAR_SERVING_MODEL` (`gateway/app/routers/tabular.py:40`) is the same
+    pattern off the OpenAI surface, and fixes the naming convention.
+  - **Embeddings** — none. `EMBED_MODEL` (`gateway/app/routers/embed.py:43`) is a status string, not
+    a registry identity, and no embeddings caller passes `prefer_name` at all.
+
+  The ASR and vision pointers are **attribution-only**. Both are read inside best-effort
+  `_resolve_asr_version()` / `_resolve_vision_version()` helpers whose docstrings say *"never
+  raises"*, and whose stated purpose is labelling a prediction log so the right model is attributed
+  when several are promoted. Neither selects what the request is routed to, because **nothing**
+  selects that today — the endpoint posts to a fixed engine slot. So for three of the four
+  modalities 028's work is **promoting an existing pointer from attribution to routing authority**,
+  not inventing configuration; only embeddings needs a new one. An earlier revision of this
+  requirement said embeddings, ASR, and vision "have none" and proposed creating a pointer for each,
+  which would have duplicated shipped config under a second name.
 - **FR-477a**: The reason this becomes load-bearing now: omission works today because each endpoint
   posts to a fixed engine slot, so no identity is ever chosen. Once FR-439 requires an omitted
   `model` to resolve to a concrete identity **before** the agent call, an arbitrary pick can differ
@@ -578,7 +592,7 @@ of the two configurations the platform actually ships.*
   reintroduced through the default path.
 - **FR-477b**: Each modality's default MUST therefore specify: the **source** of the identity; the
   behaviour when **no** default exists; the behaviour when **several** promoted models carry the
-  modality and none is designated; and the mechanism guaranteeing **resolver/runtime agreement**. A
+  modality and none is designated; and **how resolver/runtime agreement is obtained** (FR-477e). A
   missing default MUST be refused with a permanent, machine-readable code naming the modality — never
   silently resolved to whichever model is found first.
 - **FR-477c**: Those four choices are **settled here, not deferred to implementation**, because
@@ -586,27 +600,63 @@ of the two configurations the platform actually ships.*
   authority undefined would let an implementation satisfy FR-477b by refusing every omitted
   embeddings, ASR, and vision request — technically conforming, and a break of the back-compatibility
   FR-444 exists to protect. The policy is:
-  - **Source.** Each modality gets an explicit configuration pointer mirroring the LLM's
-    `SERVING_MODEL` — a per-modality serving-model name. Its **default value is the identity the
-    fixed engine for that modality already serves**, so omission keeps working with **no operator
-    action** on an existing deployment.
-  - **Resolution.** The pointer is resolved through `registry.resolve_serving_target(task,
-    prefer_name=<pointer>)`. `prefer_name` is the disambiguation that function already exposes for
-    exactly this case, so a second promoted model carrying the same task cannot displace the
-    configured one.
-  - **Several promoted, none designated.** The pointer is what designates. If the pointer names a
-    model that is not promoted for that modality, the request is refused — the resolver MUST NOT fall
-    back to `resolve_serving_target`'s *"otherwise the first match is used"* branch, which is
-    discovery and is deterministic only while exactly one promoted model carries the tag.
-  - **No default at all.** Only reachable when the modality has **no** promoted serving model, which
-    is already surfaced today as "not configured" — so making it a refusal breaks nothing that works.
+  - **Source.** The pointer that already ships, promoted from attribution to routing authority —
+    `SERVING_MODEL`, `ASR_SERVING_MODEL`, `VISION_SERVING_MODEL` — plus **one** new pointer for
+    embeddings, `EMBED_SERVING_MODEL`, following that established convention. Nothing is renamed and
+    nothing is duplicated.
+  - **Pointer set.** Resolved through `registry.resolve_serving_target(task, prefer_name=<pointer>)`.
+    `prefer_name` is the disambiguation that function already exposes for exactly this case, so a
+    second promoted model carrying the same task cannot displace the configured one, and the
+    *"otherwise the first match is used"* branch MUST NOT be taken.
+  - **Pointer unset** — the state of every existing deployment, and the case an earlier revision left
+    with no mechanism at all. It said the pointer "defaults to the identity the fixed engine already
+    serves", which is a description and not a source: with `prefer_name=None`, that branch **is**
+    `resolve_serving_target`'s first match, and the only other way to learn what the engine is
+    serving is to ask the agent — which FR-439 forbids at resolution time, because resolution runs
+    before any agent call so that a refusal costs no GPU work. The rule is therefore stated on the
+    candidate set, not on the ordering: **an unset pointer resolves iff exactly one promoted model
+    carries the modality's task.**
+    - **Exactly one** — resolve to it. "First match" and "the designated model" are then the same
+      identity and the ordering is unobservable, so omission keeps working with **no operator
+      action** wherever it is deterministic today.
+    - **Two or more** — refuse `model_default_unconfigured`, naming the modality *and the pointer to
+      set*. This is the only case where the old rule and the new one differ, and it is exactly the
+      case where the shipped behaviour is an arbitrary pick among promoted models — the silent
+      substitution this increment exists to end, not a working configuration being taken away.
+
+    This is not a new policy, which is the reason to prefer it over any invented one: 022 already
+    settled the identical question for the LLM listing, and `registry.list_tasks()`
+    (`gateway/app/registry.py:394-408`) implements it — a sole promoted model is adopted as the live
+    target with the pointer unset, and with several promoted and no active pointer it advertises
+    **no** live LLM rather than *"an arbitrary/nondeterministic `text_gen[0]` that contradicts what
+    the agent serves"* (FR-276). FR-477c generalises that rule from one listing to all four modality
+    defaults.
+  - **Pointer set but not promoted.** Refused. The resolver MUST NOT fall back to the first-match
+    branch, which is discovery and is deterministic only while one promoted model carries the tag.
+  - **No promoted model at all.** Refused with the same code — already surfaced today as "not
+    configured", so making it a refusal breaks nothing that works.
 - **FR-477d**: That refusal MUST be a named code — **`model_default_unconfigured`, HTTP 409** — with
   its own value in FR-464's bounded metric vocabulary, its own row in the outcomes table, and its own
   test. It is 409 for the same reason `model_name_ambiguous` is: the caller sent a well-formed
   request and the **platform's configuration** is what cannot answer it, so the message must point at
   the operator remedy. An earlier revision required "a permanent, machine-readable code" without
   naming one, which is the same unimplementable shape FR-440b had before it was given 409
-  `model_name_ambiguous`.
+  `model_name_ambiguous`. It has **three** triggers, all of them configuration states and all
+  answered by setting one pointer: no promoted model for the modality; the pointer names a model not
+  promoted for it; or the pointer is unset while **several** promoted models carry the task. The
+  message MUST name the modality **and the pointer to set** — without the pointer name the operator
+  is told the platform is misconfigured and not which knob fixes it.
+- **FR-477e**: The increment MUST NOT claim that configuration *guarantees* resolver/runtime
+  agreement, because it cannot. Each modality's gateway pointer and its agent-side identity are
+  **separate, independently set** environment variables, with nothing binding them: `SERVING_MODEL`
+  against the llama adapter's `MODEL` / `MODEL_ALIAS` (`hostagent/adapters/llama.py:62,64`),
+  `ASR_SERVING_MODEL` against `WHISPER_MODEL` / `WHISPER_MODEL_ALIAS` (`whisper.py:44,45`),
+  `VISION_SERVING_MODEL` against `VISION_MODEL` (`vision.py:36`). An operator can set either side
+  alone. Agreement is therefore **detected, not prevented**: FR-473a's compare-and-pin runs at the
+  agent, where the expected identity meets the runtime that would answer, and a divergence is refused
+  rather than served. That is also why the guard must hold for defaulted requests and not only for
+  named ones — the default path is the one where the two configurations are most likely to drift
+  apart unnoticed, which is how the 022 divergence went unseen (FR-477a).
 
 ### Key Entities
 

@@ -59,12 +59,15 @@ already-written contract**, and a description of the defect that cannot name the
 checked against the code. Specs 026 and 027 in this repo set the same precedent, and the audience
 for this platform's specs is its operators and maintainers, not an external business stakeholder.
 
-The deviation is bounded: every **requirement** (FR-439–FR-475b) is stated as an observable
+The deviation is bounded: every **requirement** (FR-439–FR-477e) is stated as an observable
 behavior, and every **success criterion** (SC-204–SC-211) is checkable from a client's or an
-operator's position without reading source. *(Ranges corrected after the PR #88 code review — this
-file still certified coverage over FR-439–FR-466 / SC-204–SC-210 after four review rounds had
-extended the spec to FR-475b and SC-211. T805d's audit is scoped to requirements and contracts and
-does not reach the checklists.)* SC-207 references the admission state endpoint
+operator's position without reading source. *(Ranges corrected twice, and the second time is the
+point. After the PR #88 code review this file still certified FR-439–FR-466 / SC-204–SC-210 against a
+spec that had reached FR-475b; the correction to FR-475b then went stale again within two rounds as
+FR-476–FR-477e were added. A hand-maintained range in prose re-stales every time the spec grows, and
+nothing checks it — `check_specs` validates FR ordering and uniqueness, not that a checklist's
+claimed range matches the spec's actual last identifier. T805d's audit is scoped to requirements and
+contracts and does not reach the checklists either.)* SC-207 references the admission state endpoint
 because 026 established that endpoint as the observation surface for exactly this invariant.
 
 **`/speckit-analyze` remediation, 2026-08-09.** All ten findings applied. The load-bearing ones:
