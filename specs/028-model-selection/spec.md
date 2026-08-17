@@ -566,7 +566,14 @@ of the two configurations the platform actually ships.*
   authority** that names a concrete registry identity, and the increment MUST state how the resolver
   and the answering runtime come to agree on it (FR-477e). Three of the four pointers already ship,
   so the gap is narrower — and differently shaped — than "no authority":
-  - **LLM** — `registry.DEFAULT_LLM` (`SERVING_MODEL`) via `registry.active_serving_llm_name()`.
+  - **LLM** — `registry.active_serving_llm_name()` (`gateway/app/registry.py:169-195`), whose
+    authority is the **persisted `ActiveServingLLM` pointer in Postgres** written by 022's gated
+    promote. It is a **three-tier chain**, not a pointer: the explicit DB pointer, else adoption of
+    the sole promoted text-generation model (`platformlib/llmresolve.py:121-134`), else
+    `DEFAULT_LLM` / `SERVING_MODEL`. `SERVING_MODEL` is the **fallback base, not the authority** —
+    calling it the LLM's pointer names tier three of three. `gateway/app/serving_pointer.py` is
+    explicit that the pointer is pure Postgres state and that `active_serving_llm_name` stays in the
+    MLflow adapter precisely to combine it with adoption and the configured default.
   - **ASR** — `ASR_SERVING_MODEL` (`gateway/app/routers/transcribe.py:25`), already passed as
     `prefer_name` to `registry.resolve_serving_target("asr", …)`.
   - **Vision** — `VISION_SERVING_MODEL` (`gateway/app/routers/vision.py:24`), likewise for
@@ -600,10 +607,24 @@ of the two configurations the platform actually ships.*
   authority undefined would let an implementation satisfy FR-477b by refusing every omitted
   embeddings, ASR, and vision request — technically conforming, and a break of the back-compatibility
   FR-444 exists to protect. The policy is:
-  - **Source.** The pointer that already ships, promoted from attribution to routing authority —
-    `SERVING_MODEL`, `ASR_SERVING_MODEL`, `VISION_SERVING_MODEL` — plus **one** new pointer for
-    embeddings, `EMBED_SERVING_MODEL`, following that established convention. Nothing is renamed and
-    nothing is duplicated.
+  - **Source.** **LLM is not in this policy** — it already has a complete authority and 028 must
+    call it, not restate it: the default for an omitted chat request is
+    `registry.active_serving_llm_name()`, whole chain intact. For the other three, the pointer that
+    already ships, promoted from attribution to routing authority — `ASR_SERVING_MODEL`,
+    `VISION_SERVING_MODEL` — plus **one** new pointer for embeddings, `EMBED_SERVING_MODEL`,
+    following that established convention. Nothing is renamed and nothing is duplicated.
+  - **Why LLM is carved out rather than folded in.** Applying the unset/several rule below to the
+    LLM surface would be a **regression, not a tightening**. `adopt_active_llm` returns `None` when
+    several text-generation models are promoted, and `active_serving_llm_name()` then falls back to
+    `DEFAULT_LLM` — deterministically, and the agent's `hostagent/serving_llm.py` does the same, so
+    the two sides still agree. Refusing there would break a configuration that works today and is
+    not ambiguous in the way the non-LLM case is. Resolving an omitted chat request through
+    `prefer_name=SERVING_MODEL` would be worse still: a gated go-live can point `ActiveServingLLM`
+    at a fine-tune while `SERVING_MODEL` still names the base, so the resolver would name the base
+    while the agent serves the fine-tune — FR-473a would refuse a valid request, and an
+    implementation that skipped the guard would recreate the exact divergence 022 closed.
+  The four bullets below therefore govern **embeddings, ASR, and vision only**.
+
   - **Pointer set.** Resolved through `registry.resolve_serving_target(task, prefer_name=<pointer>)`.
     `prefer_name` is the disambiguation that function already exposes for exactly this case, so a
     second promoted model carrying the same task cannot displace the configured one, and the
@@ -625,12 +646,19 @@ of the two configurations the platform actually ships.*
       substitution this increment exists to end, not a working configuration being taken away.
 
     This is not a new policy, which is the reason to prefer it over any invented one: 022 already
-    settled the identical question for the LLM listing, and `registry.list_tasks()`
+    settled the identical question for the LLM **listing**, and `registry.list_tasks()`
     (`gateway/app/registry.py:394-408`) implements it — a sole promoted model is adopted as the live
     target with the pointer unset, and with several promoted and no active pointer it advertises
     **no** live LLM rather than *"an arbitrary/nondeterministic `text_gen[0]` that contradicts what
-    the agent serves"* (FR-276). FR-477c generalises that rule from one listing to all four modality
+    the agent serves"* (FR-276). FR-477c carries that rule across to the three non-LLM modality
     defaults.
+
+    The LLM's own *resolution* path deliberately answers the same question differently — several
+    promoted with no pointer falls back to `DEFAULT_LLM` rather than refusing — and that is not an
+    inconsistency to reconcile. A listing that cannot name the live model must say so; a resolution
+    that cannot name it has a configured base to fall back to, **and the agent falls back to the same
+    one**, so the pair still agrees. The non-LLM modalities have neither a shared pointer store nor a
+    per-modality configured base, which is exactly why they refuse instead.
   - **Pointer set but not promoted.** Refused. The resolver MUST NOT fall back to the first-match
     branch, which is discovery and is deterministic only while one promoted model carries the tag.
   - **No promoted model at all.** Refused with the same code — already surfaced today as "not
@@ -645,18 +673,30 @@ of the two configurations the platform actually ships.*
   answered by setting one pointer: no promoted model for the modality; the pointer names a model not
   promoted for it; or the pointer is unset while **several** promoted models carry the task. The
   message MUST name the modality **and the pointer to set** — without the pointer name the operator
-  is told the platform is misconfigured and not which knob fixes it.
+  is told the platform is misconfigured and not which knob fixes it. It is reachable on the
+  embeddings, ASR, and vision surfaces only; the LLM surface has `active_serving_llm_name()`'s
+  configured-default tier and therefore always resolves (FR-477c's carve-out).
 - **FR-477e**: The increment MUST NOT claim that configuration *guarantees* resolver/runtime
-  agreement, because it cannot. Each modality's gateway pointer and its agent-side identity are
-  **separate, independently set** environment variables, with nothing binding them: `SERVING_MODEL`
-  against the llama adapter's `MODEL` / `MODEL_ALIAS` (`hostagent/adapters/llama.py:62,64`),
-  `ASR_SERVING_MODEL` against `WHISPER_MODEL` / `WHISPER_MODEL_ALIAS` (`whisper.py:44,45`),
-  `VISION_SERVING_MODEL` against `VISION_MODEL` (`vision.py:36`). An operator can set either side
-  alone. Agreement is therefore **detected, not prevented**: FR-473a's compare-and-pin runs at the
-  agent, where the expected identity meets the runtime that would answer, and a divergence is refused
-  rather than served. That is also why the guard must hold for defaulted requests and not only for
-  named ones — the default path is the one where the two configurations are most likely to drift
-  apart unnoticed, which is how the 022 divergence went unseen (FR-477a).
+  agreement on the **embeddings, ASR, and vision** surfaces, because it cannot. There each modality's
+  gateway pointer and its agent-side identity are **separate, independently set** environment
+  variables with nothing binding them — `ASR_SERVING_MODEL` against `WHISPER_MODEL` /
+  `WHISPER_MODEL_ALIAS` (`hostagent/adapters/whisper.py:44,45`), `VISION_SERVING_MODEL` against
+  `VISION_MODEL` (`vision.py:36`), and embeddings' child naming no registry identity at all. An
+  operator can set either side alone. Agreement is therefore **detected, not prevented**: FR-473a's
+  compare-and-pin runs at the agent, where the expected identity meets the runtime that would answer,
+  and a divergence is refused rather than served.
+- **FR-477f**: **The LLM surface is the exception, and the reason is worth keeping.** There the two
+  sides *are* bound: the gateway's `registry.active_serving_llm_name()` and the agent's
+  `hostagent/serving_llm.py::resolve()` read the **same persisted `ActiveServingLLM` pointer**, and
+  the agent's resolver is documented as mirroring the gateway's chain exactly — explicit pointer,
+  else adopt the sole promoted LLM, else the env default — down to matching behaviour on a store
+  outage. That shared authority, not configuration discipline, is what makes them agree, and it is
+  what 022 built to close this divergence. An earlier revision of FR-477e listed `SERVING_MODEL`
+  against `MODEL` / `MODEL_ALIAS` as an unbound pair; that is true only of the chain's third tier,
+  and reading it as the whole story is what produced the wrong LLM authority in the first place.
+  FR-473a's guard still covers defaulted LLM requests — a shared pointer is not a proof, and the
+  default path is where drift goes unnoticed (FR-477a) — but on this surface the guard is a backstop
+  rather than the mechanism.
 
 ### Key Entities
 

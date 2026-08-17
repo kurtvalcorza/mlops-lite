@@ -229,7 +229,7 @@ transient and carries `Retry-After`:
 | `model_version_not_found` | 404 | the qualifier names a version that does not exist |
 | `model_version_not_promoted` | 409 | the version exists but is not the promoted one (FR-457) |
 | `model_name_ambiguous` | 409 | a registered name ends in `:` followed by digits, so it cannot be told apart from a qualified reference to a shorter name (FR-440b) |
-| `model_default_unconfigured` | 409 | `model` was omitted and the endpoint's modality has no usable designated default — nothing promoted, the pointer names a model not promoted for it, or the pointer is unset while two or more promoted models carry the task (FR-477c, FR-477d) |
+| `model_default_unconfigured` | 409 | `model` was omitted and the endpoint's modality has no usable designated default — nothing promoted, the pointer names a model not promoted for it, or the pointer is unset while two or more promoted models carry the task (FR-477c, FR-477d). **Embeddings/ASR/vision only**: the LLM surface resolves through `active_serving_llm_name()`, whose configured-default tier always answers (FR-477f) |
 | `registry_unavailable` | 503 | resolution could not be performed; transient, carries `Retry-After` |
 
 The **routing** refusal is produced by the agent rather than the resolver, because residency is the
@@ -255,7 +255,9 @@ that the platform is misconfigured has not been told which knob fixes it. It is 
 a deployment whose modality has exactly one promoted model, which is the deterministic case FR-477c
 keeps working with no operator action; the three states that do reach it are all configuration —
 nothing promoted, the pointer naming something not promoted, or the pointer unset while two or more
-promoted models carry the task.
+promoted models carry the task. It is also **unreachable on the LLM surface entirely**: that default
+resolves through `registry.active_serving_llm_name()`, whose third tier is a configured base, so the
+chain always answers and there is no unconfigured state to report (FR-477f).
 
 `model_name_ambiguous` is a **registry-content** problem, not a client error: the caller sent a
 well-formed string and the registry holds a name no rightmost-split grammar can disambiguate. It is

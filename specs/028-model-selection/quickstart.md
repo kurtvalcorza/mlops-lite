@@ -10,7 +10,8 @@ Principle VII and are not "done" on a passing suite alone.
 | `min_residency_s` | coordinator config; documented in `.specify/memory/hardware-profile.md` with 026's other admission tunables | **60 s** — long enough that an alternating workload cannot thrash, short enough that a genuine model switch is not an outage | `0` disables the window and restores exact 026 behaviour |
 | `vram_estimate_multiplier` | coordinator/adapter config | **1.2** | applied to artifact size; must be ≥ 1 (research R3 — under-estimating is the dangerous direction) |
 | `model_resolution_ttl_s` | gateway | **30 s** | **the staleness bound itself**, not a backstop (FR-457d). Four of the five alias writers in this repo bypass `registry.promote` (`retag_serving_llm.py:49`, `seed_asr_model.py:33`, `seed_embedding_model.py:52`, `seed_tabular_model.py:78`), so eager invalidation covers one writer in five — size this for the ordinary case, not an unusual one. Applies only to serving an **already-resident** version; pins read through and placements revalidate fresh |
-| `SERVING_MODEL`, `ASR_SERVING_MODEL`, `VISION_SERVING_MODEL`, `EMBED_SERVING_MODEL` | gateway env | **unset** for the three non-LLM pointers, which is what every existing deployment has | FR-477c. Only `EMBED_SERVING_MODEL` is new; the other three ship today, and the two non-LLM ones are **attribution-only** (`transcribe.py:25`, `vision.py:24`) until this increment gives them routing authority. Unset resolves iff **exactly one** promoted model carries the modality's task — two or more is `409 model_default_unconfigured` naming the pointer. Read the operator note below before deploying |
+| `ASR_SERVING_MODEL`, `VISION_SERVING_MODEL`, `EMBED_SERVING_MODEL` | gateway env | **unset**, which is what every existing deployment has | FR-477c, **non-LLM only**. Only `EMBED_SERVING_MODEL` is new; the other two ship today but are **attribution-only** (`transcribe.py:25`, `vision.py:24`) until this increment gives them routing authority. Unset resolves iff **exactly one** promoted model carries the modality's task — two or more is `409 model_default_unconfigured` naming the pointer. Read the operator note below before deploying |
+| the LLM default | **not a tunable here** — `registry.active_serving_llm_name()` | the `ActiveServingLLM` Postgres pointer, else the sole promoted LLM, else `SERVING_MODEL` | FR-477f. `SERVING_MODEL` is the **fallback base, not the pointer**: a gated go-live sets the DB pointer, and 028 changes nothing about that chain. Setting `SERVING_MODEL` does **not** select the served LLM when the pointer is set, and no `model_default_unconfigured` refusal reaches this surface |
 | `host_ram_budget_bytes` | coordinator config; `hardware-profile.md` | **calibrated in T817, not guessed** | FR-467. An admission **precondition**, checked before the spawn: terminating a child does reclaim its memory, but nothing gives host RAM back *within* the request, so transient overcommit during load is the failure being avoided |
 | `host_ram_estimate_bytes` | per-adapter default with per-model override | **derived from T817's measurement** | FR-469. The precondition's left-hand side; measured **PSS, never RSS** (FR-471), or an RSS sum double-counts mmap'd GGUF pages and refuses placements that fit |
 
@@ -25,9 +26,10 @@ first match is used"* branch, and after 028 the request is refused **409
 python -c "from collections import defaultdict; from gateway.app import registry; d=defaultdict(list); [d[e['task']].append(e['model']) for e in registry.list_tasks()]; print(dict(d))"
 ```
 
-Any task listing more than one model needs its pointer set first. `text-generation` will under-report
-here — `list_tasks()` already filters it to the active LLM pointer (FR-276) — which is fine, because
-that is the one modality whose pointer has governed routing all along.
+Any **non-LLM** task listing more than one model needs its pointer set first. `text-generation` is
+out of scope for this check twice over: `list_tasks()` already filters it to the active LLM pointer
+(FR-276), and the LLM default is unaffected by 028 — it keeps resolving through
+`registry.active_serving_llm_name()`, which always answers, so no refusal can reach that surface.
 
 This is the only refusal in the increment that can turn a currently-working request into an error,
 which is why it is called out here rather than left to the contract. It is also not a new policy:
