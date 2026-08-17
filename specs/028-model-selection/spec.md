@@ -100,8 +100,9 @@ naming a string that is in no registry and confirm it is refused without the age
    **Then** the broker refuses with a code distinct from "unknown model", because the operator's
    remedy differs — promote it, versus register it.
 5. **Given** a tenant omits `model` entirely, **When** the request is otherwise valid, **Then** the
-   broker applies the documented default (the platform's promoted serving model) and the response's
-   `model` field names what actually answered, so an omitted field never reads as a granted request.
+   broker applies the documented default **for the modality of the endpoint called** (FR-444, FR-477
+   — there are four defaults, not one platform-wide model) and the response's `model` field names
+   what actually answered, so an omitted field never reads as a granted request.
 
 ---
 
@@ -225,19 +226,31 @@ the same request.
   total and deterministic: `svc:chat:3` is version 3 of `svc:chat`, while `svc:chat` is the bare name
   `svc:chat`. An earlier revision asserted that names may contain `:` and then used `:` as the
   separator without saying how to split, which is not a grammar.
-- **FR-440b**: A model whose name is ambiguous under FR-440a **cannot exist**: a registered name
-  ending in `:` followed by digits would be indistinguishable from a qualified reference to a shorter
-  name. Resolution MUST refuse such a name with a distinct code rather than guessing, and the refusal
-  MUST be reachable — this is a registry-content problem the operator must fix, not a client error.
+- **FR-440b**: A model whose name is ambiguous under FR-440a **cannot be served**: a registered name
+  ending in `:` followed by digits is indistinguishable from a qualified reference to a shorter name.
+  Resolution MUST refuse such a name with a distinct code rather than guessing, and the refusal MUST
+  be **reachable**. Reachability requires an explicit step, because FR-440a's split rule is *total*:
+  applied alone it resolves `svc:chat:3` to version 3 of `svc:chat` and, finding no such model,
+  answers `model_not_found` — so the distinct code is never returned and the operator never learns
+  the registry holds an unservable name. Resolution MUST therefore look the **unsplit** string up in
+  the registry as an exact name before applying the split, and refuse `model_name_ambiguous` when
+  that lookup hits a registered model whose name ends in `:` followed by digits. This is a
+  registry-content problem the operator must fix, not a client error.
 - **FR-441**: A `model` naming nothing in the registry MUST be refused with a **permanent**,
   machine-readable code, before any request is made to the host agent.
 - **FR-442**: A `model` naming a registered model with no promoted serving version MUST be refused
   with a code **distinct** from FR-441's, because the operator remedy differs.
 - **FR-443**: A `model` naming a model promoted for a different modality than the endpoint serves
   MUST be refused with a code distinct from both FR-441 and FR-442.
-- **FR-444**: An omitted or empty `model` MUST resolve to the platform's documented default serving
-  model, and the response MUST name what actually answered. The default MUST NOT be reached by
-  falling back from a failed resolution.
+- **FR-444**: An omitted or empty `model` MUST resolve to the documented default serving model **for
+  the modality of the endpoint being called**, and the response MUST name what actually answered. The
+  default MUST NOT be reached by falling back from a failed resolution. A **single platform-wide**
+  default MUST NOT be used: `model: str = ""` is today's declared default on the embeddings,
+  transcription, and vision handlers (`gateway/app/routers/broker_openai.py:220`, `:373`, `:464`), so
+  a platform default carrying one modality would resolve every omitting caller on the other three
+  surfaces to a model FR-443 then refuses `model_wrong_modality`. Omission MUST remain a working
+  request on every surface where it works today; a per-modality default is what makes FR-443 and
+  back-compatibility hold at once.
 - **FR-445**: When the registry cannot be consulted, the broker MUST refuse the request. It MUST NOT
   fall back to serving whatever occupies the modality slot.
 
@@ -409,19 +422,44 @@ the same request.
 ascending definition order and these were written last. They govern the routing behaviour described
 at FR-446–FR-450.*
 
-- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. A
-  gateway-side residency check followed by a separate inference call is a time-of-check/time-of-use
-  window: `gateway/app/serving.py` reads residency from a separate `GET /health`, and between that
-  read and the inference the resident model can change — via an operator swap, a promotion-triggered
-  reload, or idle-release. A request could pass the check for model A and be answered by model B,
-  which is the exact defect this increment exists to remove.
+- **FR-473**: The resolved identity MUST be asserted **atomically with dispatch, at the agent**. The
+  OpenAI surface today asserts identity **nowhere**: `gateway/app/routers/broker_openai.py` posts
+  straight to `{SERVING_URL}/infer` (line 260) and `{SERVING_URL}/infer/stream` (line 301), with no
+  residency read on the path at all — `SERVING_URL` is a fixed modality slot, and whatever occupies
+  it answers. Moving the check to the gateway does not fix that, it only makes the window narrower:
+  a gateway-side check *is* a residency read followed by a separate inference call, and between the
+  two the resident model can change via an operator swap, a promotion-triggered reload, or
+  idle-release, so a request that passed the check for model A is still answered by model B. The
+  assert therefore belongs where residency is known and dispatch happens — at the agent.
 - **FR-473a**: The request MUST therefore carry the expected identity, and the agent MUST refuse when
-  the engine it would dispatch to does not host it. The comparison and the dispatch MUST occur under
-  the same lock that guards the resident set; a check performed anywhere else in the agent
-  reintroduces a narrower version of the same window.
+  the engine it would dispatch to does not host it. The comparison and the **acquisition of the claim
+  that pins the matched resident** MUST occur together under the lock guarding the resident set; the
+  dispatch itself MUST then run with the **coordinator's** lock released, against the pin — see FR-476,
+  which makes the release requirement mode-specific because the two locks have opposite disciplines. A comparison
+  performed anywhere else in the agent reintroduces a narrower version of the same window, and a
+  comparison that does not take a pin leaves the model evictable or swappable between the check and
+  the dispatch — which is the same window by another route. **Which lock and which pin depends on
+  the admission mode, and both modes MUST be specified — see FR-476.**
+  > **Corrected after the PR #88 code review.** This requirement previously demanded the comparison
+  > and *the dispatch* occur under one lock. That contradicts `hostagent/coordinator.py:24-29`, which
+  > states that `_lock` **guards state only and is never held across `load`/`unload`** and has
+  > `LifecycleGuard` (026 T635) raise rather than deadlock when it is — so the requirement as written
+  > was unimplementable against the code it governs, and would additionally serialize every
+  > generation behind one lock, unbounded on the streaming path. The **claim** is the mechanism 026
+  > already provides: the ref-count that keeps a resident alive across a generation, established for
+  > precisely the case where a model must not be evicted while a request it authorized is still
+  > running. Identity settles atomically under the lock; the long I/O runs outside it.
 - **FR-473b**: This assertion is **not** placement, and MUST NOT wait for a load, evict anything, or
   consult the VRAM bounds. It is a guard, and it is what allows the truthfulness guarantee to be
-  delivered before on-demand placement exists.
+  delivered before on-demand placement exists. Because the guard cannot place, a promoted but
+  non-resident model MUST be refused in Phase 1 with the **permanent** `not_resident` code (FR-474a)
+  and MUST NOT carry `Retry-After`.
+  > **Corrected after the PR #88 code review.** Phase 1 previously refused this case with
+  > `gpu_busy`, which 026 defines as **transient** contention carrying `Retry-After`. Phase 1 has no
+  > placement path — that is the phase boundary — so the condition holds for the entire life of the
+  > phase and no retry can ever succeed. A client honouring the header backs off forever against a
+  > permanent state. `not_resident` already describes exactly this and is permanent; Phase 2 makes
+  > the same condition actionable by adding the authorization flow, not by relabelling it.
 - **FR-473c**: Post-hoc detection — comparing the agent's reported `serving_model` against the
   resolved identity **after** the response arrives — MUST NOT be used as the mechanism. It burns the
   GPU work, and on the streaming path the tokens have already reached the client by the time the
@@ -472,6 +510,193 @@ at FR-446–FR-450.*
   that is unaffected by when the pointer is read: an unpromoted version is never authorized at any
   instant. What FR-475 bounds is only the staleness of a *promotion*, and a version promoted moments
   ago being placed is the system working, not a violation.
+
+**The identity pin, in both admission modes**
+
+*Numbered last for the same FR-296 ascending-order reason as FR-473. They govern FR-473a's mechanism
+and FR-444's default, and were written after the PR #89 review found each specified against only one
+of the two configurations the platform actually ships.*
+
+- **FR-476**: The identity guard of FR-473a MUST be defined as an **identity pin**: an object
+  acquired under the lock that guards the identity being compared, guaranteeing that the runtime
+  which answers is the one whose identity was matched, and released on **every** terminal path —
+  success, error, client disconnect, and stream termination alike. The pin is an abstraction with
+  **two required implementations**, because the platform ships two admission modes and Phase 1 is
+  required to hold in both (T791):
+  - **`BROKER_COORDINATOR_ADMISSION=1`** — the coordinator is the serving authority. The lock is the
+    coordinator's resident-set lock and the pin is 026's **claim**, the ref-count that already exists
+    to keep a resident alive across a generation.
+  - **`BROKER_COORDINATOR_ADMISSION=0`, the default** — the coordinator is **not** the runtime
+    admission authority and holds no resident entry for the live engine, so **no claim can be minted
+    there**. `hostagent/main.py::_build_admission()` returns the legacy `adm.Admission`; the
+    coordinator is constructed separately and later by `build_broker()`, so `_register_runtime()` is
+    a no-op during `build_agent()` because `_RUNTIME_LIFECYCLE` does not yet exist. In this mode the
+    comparison MUST be against the **runtime's own child/model identity**, and the pin is the
+    **runtime lock held across the dispatch** — `rt.lock`, exactly as `_forward_under_lease()` and
+    `stream_frames()` already hold it today.
+- **FR-476b**: The **release-before-I/O rule of FR-473a applies to the coordinator's lock only**, and
+  this asymmetry is required rather than incidental. The two locks have opposite disciplines:
+  `coordinator._lock` guards state and MUST NOT be held across I/O — `LifecycleGuard` raises if it is
+  — so there the pin must be a separate object, which is what 026's claim is. `EngineRuntime.lock` is
+  the opposite: `hostagent/main.py::_forward_under_lease()` states it is *"held across the whole
+  forward so the reaper/swap cannot unload mid-flight"*, `stream_frames()` holds it *"across the whole
+  generation"*, and `EngineRuntime.unload()` takes the same lock before teardown. **Holding it across
+  the dispatch is the durable pin**, and releasing it before dispatch would *remove* protection that
+  ships today. Capturing `rt.child` and then releasing the lock is **not** a pin: nothing would make a
+  concurrent unload or swap honour the captured identity, and no ref-count, lease, or generation token
+  exists on the runtime to supply one. An implementation MUST NOT do that.
+- **FR-476c**: One documented exception must be stated rather than discovered. `EngineRuntime.unload()`
+  drains bounded by `drain_timeout_s` and, **on drain timeout, proceeds without the runtime lock** —
+  the llama supervisor's hard-cut semantics, deliberate since 018. So the flag-off pin is not absolute.
+  What it guarantees is the property 028 needs: a hard-cut **terminates** the in-flight request, which
+  loses its child and fails — it never causes a **different** model to answer. Substitution is what
+  this increment exists to prevent; a bounded, loud failure is not substitution.
+- **FR-476a**: The two implementations MUST satisfy one **stated invariant**, so the guard is a
+  property of the platform rather than of a configuration: *once an identity is accepted for
+  dispatch, no concurrent swap, reload, eviction, or idle-release can cause a **different model** to
+  answer that request, and the pin is released on every terminal path.* A requirement whose only
+  mechanism exists in the non-default configuration is not implemented in the configuration an
+  operator actually runs. The invariant is stated about **which model answers**, not about the request
+  surviving: FR-476c's hard-cut can still fail a request past the drain bound, and that is compatible
+  with the invariant because a failed request answers with no model at all.
+
+**Per-modality default authority**
+
+- **FR-477**: Each of the four modality defaults required by FR-444 MUST have a **single designated
+  authority** that names a concrete registry identity, and the increment MUST state how the resolver
+  and the answering runtime come to agree on it (FR-477e). Three of the four pointers already ship,
+  so the gap is narrower — and differently shaped — than "no authority":
+  - **LLM** — `registry.active_serving_llm_name()` (`gateway/app/registry.py:169-195`), whose
+    authority is the **persisted `ActiveServingLLM` pointer in Postgres** written by 022's gated
+    promote. It is a **three-tier chain**, not a pointer: the explicit DB pointer, else adoption of
+    the sole promoted text-generation model (`platformlib/llmresolve.py:121-134`), else
+    `DEFAULT_LLM` / `SERVING_MODEL`. `SERVING_MODEL` is the **fallback base, not the authority** —
+    calling it the LLM's pointer names tier three of three. `gateway/app/serving_pointer.py` is
+    explicit that the pointer is pure Postgres state and that `active_serving_llm_name` stays in the
+    MLflow adapter precisely to combine it with adoption and the configured default.
+  - **ASR** — `ASR_SERVING_MODEL` (`gateway/app/routers/transcribe.py:25`), already passed as
+    `prefer_name` to `registry.resolve_serving_target("asr", …)`.
+  - **Vision** — `VISION_SERVING_MODEL` (`gateway/app/routers/vision.py:24`), likewise for
+    `image-classification`. `TABULAR_SERVING_MODEL` (`gateway/app/routers/tabular.py:40`) is the same
+    pattern off the OpenAI surface, and fixes the naming convention.
+  - **Embeddings** — none. `EMBED_MODEL` (`gateway/app/routers/embed.py:43`) is a status string, not
+    a registry identity, and no embeddings caller passes `prefer_name` at all.
+
+  The ASR and vision pointers are **attribution-only**. Both are read inside best-effort
+  `_resolve_asr_version()` / `_resolve_vision_version()` helpers whose docstrings say *"never
+  raises"*, and whose stated purpose is labelling a prediction log so the right model is attributed
+  when several are promoted. Neither selects what the request is routed to, because **nothing**
+  selects that today — the endpoint posts to a fixed engine slot. So for three of the four
+  modalities 028's work is **promoting an existing pointer from attribution to routing authority**,
+  not inventing configuration; only embeddings needs a new one. An earlier revision of this
+  requirement said embeddings, ASR, and vision "have none" and proposed creating a pointer for each,
+  which would have duplicated shipped config under a second name.
+- **FR-477a**: The reason this becomes load-bearing now: omission works today because each endpoint
+  posts to a fixed engine slot, so no identity is ever chosen. Once FR-439 requires an omitted
+  `model` to resolve to a concrete identity **before** the agent call, an arbitrary pick can differ
+  from the runtime that answers — and FR-473a's guard would then refuse a request that works today,
+  or FR-458 would report an identity that did not serve. That is the identity divergence 022 closed,
+  reintroduced through the default path.
+- **FR-477b**: Each modality's default MUST therefore specify: the **source** of the identity; the
+  behaviour when **no** default exists; the behaviour when **several** promoted models carry the
+  modality and none is designated; and **how resolver/runtime agreement is obtained** (FR-477e). A
+  missing default MUST be refused with a permanent, machine-readable code naming the modality — never
+  silently resolved to whichever model is found first.
+- **FR-477c**: Those four choices are **settled here, not deferred to implementation**, because
+  FR-444/T779 simultaneously require omission to keep working on all four surfaces. Leaving the
+  authority undefined would let an implementation satisfy FR-477b by refusing every omitted
+  embeddings, ASR, and vision request — technically conforming, and a break of the back-compatibility
+  FR-444 exists to protect. The policy is:
+  - **Source.** **LLM is not in this policy** — it already has a complete authority and 028 must
+    call it, not restate it: the default for an omitted chat request is
+    `registry.active_serving_llm_name()`, whole chain intact. For the other three, the pointer that
+    already ships, promoted from attribution to routing authority — `ASR_SERVING_MODEL`,
+    `VISION_SERVING_MODEL` — plus **one** new pointer for embeddings, `EMBED_SERVING_MODEL`,
+    following that established convention. Nothing is renamed and nothing is duplicated.
+  - **Why LLM is carved out rather than folded in.** Applying the unset/several rule below to the
+    LLM surface would be a **regression, not a tightening**. `adopt_active_llm` returns `None` when
+    several text-generation models are promoted, and `active_serving_llm_name()` then falls back to
+    `DEFAULT_LLM` — deterministically, and the agent's `hostagent/serving_llm.py` does the same, so
+    the two sides still agree. Refusing there would break a configuration that works today and is
+    not ambiguous in the way the non-LLM case is. Resolving an omitted chat request through
+    `prefer_name=SERVING_MODEL` would be worse still: a gated go-live can point `ActiveServingLLM`
+    at a fine-tune while `SERVING_MODEL` still names the base, so the resolver would name the base
+    while the agent serves the fine-tune — FR-473a would refuse a valid request, and an
+    implementation that skipped the guard would recreate the exact divergence 022 closed.
+  The four bullets below therefore govern **embeddings, ASR, and vision only**.
+
+  - **Pointer set.** Resolved through `registry.resolve_serving_target(task, prefer_name=<pointer>)`.
+    `prefer_name` is the disambiguation that function already exposes for exactly this case, so a
+    second promoted model carrying the same task cannot displace the configured one, and the
+    *"otherwise the first match is used"* branch MUST NOT be taken.
+  - **Pointer unset** — the state of every existing deployment, and the case an earlier revision left
+    with no mechanism at all. It said the pointer "defaults to the identity the fixed engine already
+    serves", which is a description and not a source: with `prefer_name=None`, that branch **is**
+    `resolve_serving_target`'s first match, and the only other way to learn what the engine is
+    serving is to ask the agent — which FR-439 forbids at resolution time, because resolution runs
+    before any agent call so that a refusal costs no GPU work. The rule is therefore stated on the
+    candidate set, not on the ordering: **an unset pointer resolves iff exactly one promoted model
+    carries the modality's task.**
+    - **Exactly one** — resolve to it. "First match" and "the designated model" are then the same
+      identity and the ordering is unobservable, so omission keeps working with **no operator
+      action** wherever it is deterministic today.
+    - **Two or more** — refuse `model_default_unconfigured`, naming the modality *and the pointer to
+      set*. This is the only case where the old rule and the new one differ, and it is exactly the
+      case where the shipped behaviour is an arbitrary pick among promoted models — the silent
+      substitution this increment exists to end, not a working configuration being taken away.
+
+    This is not a new policy, which is the reason to prefer it over any invented one: 022 already
+    settled the identical question for the LLM **listing**, and `registry.list_tasks()`
+    (`gateway/app/registry.py:394-408`) implements it — a sole promoted model is adopted as the live
+    target with the pointer unset, and with several promoted and no active pointer it advertises
+    **no** live LLM rather than *"an arbitrary/nondeterministic `text_gen[0]` that contradicts what
+    the agent serves"* (FR-276). FR-477c carries that rule across to the three non-LLM modality
+    defaults.
+
+    The LLM's own *resolution* path deliberately answers the same question differently — several
+    promoted with no pointer falls back to `DEFAULT_LLM` rather than refusing — and that is not an
+    inconsistency to reconcile. A listing that cannot name the live model must say so; a resolution
+    that cannot name it has a configured base to fall back to, **and the agent falls back to the same
+    one**, so the pair still agrees. The non-LLM modalities have neither a shared pointer store nor a
+    per-modality configured base, which is exactly why they refuse instead.
+  - **Pointer set but not promoted.** Refused. The resolver MUST NOT fall back to the first-match
+    branch, which is discovery and is deterministic only while one promoted model carries the tag.
+  - **No promoted model at all.** Refused with the same code — already surfaced today as "not
+    configured", so making it a refusal breaks nothing that works.
+- **FR-477d**: That refusal MUST be a named code — **`model_default_unconfigured`, HTTP 409** — with
+  its own value in FR-464's bounded metric vocabulary, its own row in the outcomes table, and its own
+  test. It is 409 for the same reason `model_name_ambiguous` is: the caller sent a well-formed
+  request and the **platform's configuration** is what cannot answer it, so the message must point at
+  the operator remedy. An earlier revision required "a permanent, machine-readable code" without
+  naming one, which is the same unimplementable shape FR-440b had before it was given 409
+  `model_name_ambiguous`. It has **three** triggers, all of them configuration states and all
+  answered by setting one pointer: no promoted model for the modality; the pointer names a model not
+  promoted for it; or the pointer is unset while **several** promoted models carry the task. The
+  message MUST name the modality **and the pointer to set** — without the pointer name the operator
+  is told the platform is misconfigured and not which knob fixes it. It is reachable on the
+  embeddings, ASR, and vision surfaces only; the LLM surface has `active_serving_llm_name()`'s
+  configured-default tier and therefore always resolves (FR-477c's carve-out).
+- **FR-477e**: The increment MUST NOT claim that configuration *guarantees* resolver/runtime
+  agreement on the **embeddings, ASR, and vision** surfaces, because it cannot. There each modality's
+  gateway pointer and its agent-side identity are **separate, independently set** environment
+  variables with nothing binding them — `ASR_SERVING_MODEL` against `WHISPER_MODEL` /
+  `WHISPER_MODEL_ALIAS` (`hostagent/adapters/whisper.py:44,45`), `VISION_SERVING_MODEL` against
+  `VISION_MODEL` (`vision.py:36`), and embeddings' child naming no registry identity at all. An
+  operator can set either side alone. Agreement is therefore **detected, not prevented**: FR-473a's
+  compare-and-pin runs at the agent, where the expected identity meets the runtime that would answer,
+  and a divergence is refused rather than served.
+- **FR-477f**: **The LLM surface is the exception, and the reason is worth keeping.** There the two
+  sides *are* bound: the gateway's `registry.active_serving_llm_name()` and the agent's
+  `hostagent/serving_llm.py::resolve()` read the **same persisted `ActiveServingLLM` pointer**, and
+  the agent's resolver is documented as mirroring the gateway's chain exactly — explicit pointer,
+  else adopt the sole promoted LLM, else the env default — down to matching behaviour on a store
+  outage. That shared authority, not configuration discipline, is what makes them agree, and it is
+  what 022 built to close this divergence. An earlier revision of FR-477e listed `SERVING_MODEL`
+  against `MODEL` / `MODEL_ALIAS` as an unbound pair; that is true only of the chain's third tier,
+  and reading it as the whole story is what produced the wrong LLM authority in the first place.
+  FR-473a's guard still covers defaulted LLM requests — a shared pointer is not a proof, and the
+  default path is where drift goes unnoticed (FR-477a) — but on this surface the guard is a backstop
+  rather than the mechanism.
 
 ### Key Entities
 

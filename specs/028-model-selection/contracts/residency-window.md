@@ -49,19 +49,39 @@ of them leaves its window. So the value is:
 retry_after_s = min over sufficient sets S of ( max over v in S of expiry(v) ) − now
 ```
 
-Computed against the same greedy the evictor itself uses, so the answer is consistent with what the
-evictor would actually pick: walk the eligible-ignoring-window list in the evictor's order
-(idle-first, then LRU), accumulating freed bytes; take the **shortest prefix** that satisfies both
-bounds; `retry_after_s` is the latest window expiry within that prefix.
+Computed by **expiry order**, which is what makes the answer the earliest one the evictor can act on:
+sort the window-blocked candidates by expiry ascending; walk that order accumulating freed bytes
+alongside the already-eligible victims; `retry_after_s` is the **first expiry at which the accumulated
+set satisfies both bounds**.
 
-The shortest sufficient prefix is also the one minimising the maximum expiry **among prefixes**,
-because prefixes are nested and their maximum is non-decreasing as they extend. A non-prefix set
-could in principle expire sooner, but the evictor does not consider non-prefix sets, so promising one
-would name a time at which the evictor still would not act.
+The reason expiry order is the right one — and the evictor's own order is not — is that at any
+instant `t` the evictor has the **whole** eligible set available to it. Its idle-first/LRU order
+decides *which* victims it takes, never *whether* it can take enough. So sufficiency at `t` depends
+only on which windows have expired by `t`, and the minimising set is always a prefix in **expiry**
+order. The predicate is monotone in `t` (windows only expire, never re-arm), so the first sufficient
+expiry is the earliest time a sufficient eligible set exists — exactly what FR-456a asks for.
 
-**Worked case.** Victims A, B, C with windows expiring in 10 s, 20 s, 30 s; the placement needs all
-three. The old rule answered 10 s and the retry failed twice. The rule above answers 30 s, and the
-retry succeeds on the first attempt.
+> **Corrected after the PR #88 code review.** This section previously prescribed walking the
+> **evictor's** greedy order and taking the shortest sufficient prefix, justified by "prefixes are
+> nested and their maximum is non-decreasing… the evictor does not consider non-prefix sets". That
+> justification holds only *within a single instant*. Across time the eligible set itself changes, so
+> the prefix taken at `t` is drawn from a different list than the prefix taken now, and the rule
+> overshoots. **Counterexample**: victims in evictor order A(expires 30 s, frees 8 GiB),
+> B(5 s, 8 GiB), C(5 s, 8 GiB), placement needs 16 GiB. The old rule takes the shortest prefix
+> `{A,B}` and answers **30**. But at `t = 5` the window filter admits `{B,C}`, which frees 16 GiB, and
+> the evictor succeeds — the correct answer is **5**. The error is in the safe direction (the client
+> waits longer than necessary rather than retrying too early, so the retry-once property is not
+> lost), but it is not FR-456a's "earliest", and it hands back an inflated `Retry-After` on exactly
+> the workload the window exists to smooth.
+
+**Worked case 1 — all victims needed.** Victims A, B, C with windows expiring in 10 s, 20 s, 30 s;
+the placement needs all three. The original rule answered 10 s and the retry failed twice. This rule
+answers **30 s**: no earlier expiry admits a sufficient set.
+
+**Worked case 2 — a later-ordered subset is sufficient sooner.** The counterexample above, which is
+the case the evictor-order rule got wrong: A(30 s, 8 GiB), B(5 s, 8 GiB), C(5 s, 8 GiB), needing
+16 GiB. Expiry order is B, C, A; the accumulated set is sufficient at the **second** expiry, both of
+which fall at 5 s. Answer **5 s**, not 30.
 
 ## `Retry-After` is a lower bound, honestly labelled
 
@@ -97,6 +117,11 @@ from a regression in the window.
 2a. **The multi-victim case explicitly**: a placement needing three victims whose windows expire at
    10 s / 20 s / 30 s returns **30**, not 10. This is the case the earlier single-victim rule got
    wrong, so a test that only ever needs one victim would pass against the defect.
+2b. **The sufficient-subset case explicitly**: victims in evictor order A(30 s, 8 GiB),
+   B(5 s, 8 GiB), C(5 s, 8 GiB) with a 16 GiB placement returns **5**, not 30. Case 2a cannot catch
+   this — it needs *all* victims, so its prefix and its optimum coincide, and an evictor-order
+   implementation passes it. The distinguishing shape is a sufficient set that excludes the
+   **first** victim in evictor order.
 3. Honouring that `Retry-After` and retrying once succeeds — for the multi-victim case as well as
    the single-victim one.
 4. An alternating two-model workload over N windows performs ≤ N evictions, not one per request
