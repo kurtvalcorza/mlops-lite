@@ -276,6 +276,10 @@ time series per string any client has ever sent.
    only the refusal states passes against an implementation that has broken every omitting caller on
    three surfaces. The two-or-more-promoted refusal must assert that the message names **the pointer
    to set**, not merely that the request was refused.
+8. **The ambiguous-name case is reached.** Register a model literally named `svc:chat:3`, request it,
+   and assert `409 model_name_ambiguous` — not `404 model_not_found`. A resolver that applies
+   FR-440a's split without the exact-name lookup first returns 404 and passes no test that only
+   checks "it is refused", which is why the assertion is on the code.
 9. **The LLM default follows the persisted pointer, not the env fallback.** Set `ActiveServingLLM`
    to a fine-tune while `SERVING_MODEL` still names the base, then send a chat request with `model`
    omitted: it must resolve to the **fine-tune**. An implementation that resolves through
@@ -285,7 +289,3 @@ time series per string any client has ever sent.
    it: pointer unset with one promoted LLM adopts it, and with several promoted it falls back to
    `DEFAULT_LLM` **without** refusing — the non-LLM `model_default_unconfigured` rule must not reach
    this surface.
-8. **The ambiguous-name case is reached.** Register a model literally named `svc:chat:3`, request it,
-   and assert `409 model_name_ambiguous` — not `404 model_not_found`. A resolver that applies
-   FR-440a's split without the exact-name lookup first returns 404 and passes no test that only
-   checks "it is refused", which is why the assertion is on the code.
